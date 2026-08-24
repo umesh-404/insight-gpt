@@ -1,0 +1,8 @@
+# Normalize line endings: LF in the repo, auto on checkout per-OS.
+* text=auto eol=lf
+
+# Binary / generated lockfiles keep their bytes.
+*.png binary
+*.jpg binary
+*.ico binary
+*.parquet binary
