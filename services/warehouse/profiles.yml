@@ -1,0 +1,23 @@
+# dbt profile TEMPLATE — env-driven, no secrets committed (docs/02 §5).
+#
+# Copy nothing: dbt reads this file directly when DBT_PROFILES_DIR points here,
+# and every value comes from the environment. The password is never written to
+# disk. The same POSTGRES_* variables back services/ingestion and the API.
+#
+#   export POSTGRES_HOST=localhost POSTGRES_PORT=5432
+#   export POSTGRES_DB=insight POSTGRES_USER=insight_app POSTGRES_PASSWORD=...
+#   dbt build --project-dir services/warehouse --profiles-dir services/warehouse
+
+insightgpt:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'insight') }}"
+      user: "{{ env_var('POSTGRES_USER', 'insight_app') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', '') }}"
+      schema: "{{ env_var('POSTGRES_SCHEMA', 'marts') }}"
+      threads: "{{ env_var('DBT_THREADS', '4') | int }}"
+      sslmode: "{{ env_var('POSTGRES_SSLMODE', 'prefer') }}"

@@ -1,0 +1,38 @@
+[project]
+name = "insightgpt-ingestion"
+version = "0.1.0"
+description = "InsightGPT ingestion — connectors, redaction, and the raw Postgres loader"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+# Kept small. The record/document extraction and redaction run with no heavy
+# deps; only the real raw loader needs psycopg (optional, degrades cleanly).
+dependencies = [
+    "pydantic>=2.7",          # typed records / results
+    "pydantic-settings>=2.3", # env-driven DSN + paths (no secrets in repo)
+]
+
+[project.optional-dependencies]
+# Real Postgres landing zone; without it the loader is a counted no-op.
+postgres = ["psycopg[binary]>=3.2"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = [".."]
+testpaths = ["tests"]

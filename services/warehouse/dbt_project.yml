@@ -1,0 +1,39 @@
+name: "insightgpt_warehouse"
+version: "0.1.0"
+config-version: 2
+
+# This project turns the landed `raw.*` tables (written by services/ingestion)
+# into the staging views and the modeled star schema + semantic metrics the
+# insight engine reads. See docs/02-data-model.md.
+profile: "insightgpt"
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Landing/reading contract: staging is ephemeral-cheap (views), marts are
+# materialized tables the read-only analytics role queries.
+models:
+  insightgpt_warehouse:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts
+
+seeds:
+  insightgpt_warehouse:
+    +schema: marts
+
+# Resolve relative-time tests ("no future orders") against a reference date so a
+# demo dataset dated in 2026 is not flagged as "future". Overridable via env.
+vars:
+  reference_date: "{{ env_var('INSIGHT_REFERENCE_DATE', '2026-07-15') }}"

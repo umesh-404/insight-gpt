@@ -1,0 +1,122 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: "Conformed calendar spanning the fact date range."
+    columns:
+      - name: date_key
+        tests: [not_null, unique]
+      - name: full_date
+        tests: [not_null]
+      - name: quarter_label
+        description: "e.g. 2026Q2 — the quarter slice used by the engine."
+
+  - name: dim_customer
+    description: "Conformed customer dimension (region, segment)."
+    columns:
+      - name: customer_key
+        tests: [not_null, unique]
+      - name: segment
+        tests:
+          - accepted_values:
+              values: ["consumer", "smb", "enterprise"]
+
+  - name: dim_product
+    description: "Conformed product dimension (category, cost, price)."
+    columns:
+      - name: product_key
+        tests: [not_null, unique]
+      - name: category
+        tests:
+          - accepted_values:
+              values: ["Electronics", "Apparel", "Home"]
+
+  - name: dim_store
+    description: "Conformed store dimension."
+    columns:
+      - name: store_key
+        tests: [not_null, unique]
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ["online", "retail", "marketplace", "wholesale"]
+
+  - name: dim_channel
+    description: "Conformed channel dimension."
+    columns:
+      - name: channel_key
+        tests: [not_null, unique]
+      - name: channel_name
+        tests: [not_null, unique]
+
+  - name: fact_order_items
+    description: "Order-line fact — the workhorse for revenue/margin/units."
+    columns:
+      - name: order_item_key
+        tests: [not_null, unique]
+      - name: quantity
+        tests: [not_null]
+      - name: date_key
+        tests:
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+      - name: product_key
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_product')
+              field: product_key
+      - name: customer_key
+        tests:
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_key
+      - name: store_key
+        tests:
+          - relationships:
+              to: ref('dim_store')
+              field: store_key
+      - name: channel_key
+        tests:
+          - relationships:
+              to: ref('dim_channel')
+              field: channel_key
+
+  - name: fact_sales
+    description: "Order-header fact for AOV / order counts / shipping."
+    columns:
+      - name: order_key
+        tests: [not_null, unique]
+      - name: status
+        tests:
+          - accepted_values:
+              values: ["placed", "shipped", "delivered", "cancelled", "returned"]
+      - name: customer_key
+        tests:
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_key
+
+  - name: fact_inventory_snapshot
+    description: "Periodic inventory snapshot (SKU x store x day)."
+    columns:
+      - name: inv_snapshot_key
+        tests: [not_null, unique]
+      - name: units_on_hand
+        tests: [not_null]
+      - name: product_key
+        tests:
+          - relationships:
+              to: ref('dim_product')
+              field: product_key
+      - name: store_key
+        tests:
+          - relationships:
+              to: ref('dim_store')
+              field: store_key
+      - name: date_key
+        tests:
+          - relationships:
+              to: ref('dim_date')
+              field: date_key

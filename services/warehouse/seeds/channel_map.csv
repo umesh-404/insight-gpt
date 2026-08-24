@@ -1,0 +1,5 @@
+channel_name,channel_group,is_digital
+online,Direct,true
+retail,Direct,false
+marketplace,Third-party,true
+wholesale,Third-party,false

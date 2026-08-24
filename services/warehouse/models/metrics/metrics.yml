@@ -1,0 +1,219 @@
+version: 2
+
+# Semantic metrics — the governed measures the insight engine grounds on
+# (docs/02-data-model.md §6). These mirror config/semantic_layer.yml (the file
+# the API's deterministic query builder reads) but are expressed here in dbt's
+# semantic layer (MetricFlow), so `dbt parse` validates them and the same
+# definitions stay versioned inside the warehouse project. Slicing dimensions
+# (region, category, channel, segment, ...) are reached through the entity joins
+# declared on the semantic models below.
+#
+# Requires a dbt version with the semantic layer (>= 1.6). Parsing needs no
+# extra install; querying the metrics needs dbt-metricflow.
+
+# The semantic layer needs a day-grain time spine to resolve time filters.
+models:
+  - name: metricflow_time_spine
+    description: "One row per calendar day; time spine for the semantic layer."
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+        tests: [not_null, unique]
+
+semantic_models:
+  # --- order-line grain: revenue, margin, units, orders, returns -------------
+  - name: order_items
+    description: "Order-line facts (SKU x order)."
+    model: ref('fact_order_items')
+    defaults:
+      agg_time_dimension: order_date
+    entities:
+      - name: order_item
+        type: primary
+        expr: order_item_key
+      - name: order
+        type: foreign
+        expr: order_key
+      - name: product
+        type: foreign
+        expr: product_key
+      - name: customer
+        type: foreign
+        expr: customer_key
+      - name: store
+        type: foreign
+        expr: store_key
+      - name: channel
+        type: foreign
+        expr: channel_key
+    dimensions:
+      - name: order_date
+        type: time
+        type_params:
+          time_granularity: day
+    measures:
+      - name: revenue_amount
+        description: "Net revenue = gross_revenue - discount_amount."
+        agg: sum
+        expr: gross_revenue - discount_amount
+      - name: margin_amount
+        description: "Gross margin = gross_revenue - discount_amount - cost_amount."
+        agg: sum
+        expr: gross_revenue - discount_amount - cost_amount
+      - name: units_non_returned
+        description: "Quantity on non-returned lines."
+        agg: sum
+        expr: case when is_returned then 0 else quantity end
+      - name: quantity_total
+        agg: sum
+        expr: quantity
+      - name: returned_quantity
+        agg: sum
+        expr: case when is_returned then quantity else 0 end
+      - name: distinct_orders
+        agg: count_distinct
+        expr: order_key
+
+  # --- inventory snapshot grain ---------------------------------------------
+  - name: inventory
+    description: "Inventory snapshots (SKU x store x day)."
+    model: ref('fact_inventory_snapshot')
+    defaults:
+      agg_time_dimension: snapshot_date
+    entities:
+      - name: inventory_snapshot
+        type: primary
+        expr: inv_snapshot_key
+      - name: product
+        type: foreign
+        expr: product_key
+      - name: store
+        type: foreign
+        expr: store_key
+    dimensions:
+      - name: snapshot_date
+        type: time
+        type_params:
+          time_granularity: day
+    measures:
+      - name: on_hand
+        agg: sum
+        expr: units_on_hand
+
+  # --- conformed dimensions (provide the slicing attributes) -----------------
+  - name: customers
+    model: ref('dim_customer')
+    entities:
+      - name: customer
+        type: primary
+        expr: customer_key
+    dimensions:
+      - name: region
+        type: categorical
+      - name: segment
+        type: categorical
+
+  - name: products
+    model: ref('dim_product')
+    entities:
+      - name: product
+        type: primary
+        expr: product_key
+    dimensions:
+      - name: category
+        type: categorical
+      - name: subcategory
+        type: categorical
+      - name: product_name
+        type: categorical
+
+  - name: stores
+    model: ref('dim_store')
+    entities:
+      - name: store
+        type: primary
+        expr: store_key
+    dimensions:
+      - name: store_name
+        type: categorical
+      - name: store_region
+        type: categorical
+        expr: region
+
+  - name: channels
+    model: ref('dim_channel')
+    entities:
+      - name: channel
+        type: primary
+        expr: channel_key
+    dimensions:
+      - name: channel_name
+        type: categorical
+
+# --- the eight governed metrics (+ two building-block metrics for return_rate)
+metrics:
+  - name: revenue
+    label: Revenue
+    type: simple
+    type_params:
+      measure: revenue_amount
+
+  - name: gross_margin
+    label: Gross margin
+    type: simple
+    type_params:
+      measure: margin_amount
+
+  - name: gross_margin_pct
+    label: Gross margin %
+    type: ratio
+    type_params:
+      numerator: gross_margin
+      denominator: revenue
+
+  - name: orders
+    label: Orders
+    type: simple
+    type_params:
+      measure: distinct_orders
+
+  - name: units_sold
+    label: Units sold
+    type: simple
+    type_params:
+      measure: units_non_returned
+
+  - name: avg_order_value
+    label: Average order value
+    type: ratio
+    type_params:
+      numerator: revenue
+      denominator: orders
+
+  # Building blocks so return_rate can be expressed as a ratio of two metrics.
+  - name: returned_units
+    label: Returned units
+    type: simple
+    type_params:
+      measure: returned_quantity
+
+  - name: total_units
+    label: Total units
+    type: simple
+    type_params:
+      measure: quantity_total
+
+  - name: return_rate
+    label: Return rate
+    type: ratio
+    type_params:
+      numerator: returned_units
+      denominator: total_units
+
+  - name: units_on_hand
+    label: Units on hand
+    type: simple
+    type_params:
+      measure: on_hand

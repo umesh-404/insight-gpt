@@ -1,0 +1,13 @@
+# Repo-root lint config for the data-foundation packages (data/, scripts/,
+# services/ingestion, services/warehouse). Matches services/api/pyproject.toml
+# so the whole codebase lints under one ruleset. Ruff uses the nearest config,
+# so services/api keeps its own [tool.ruff] block.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[lint.per-file-ignores]
+# Tests may use assert-heavy, longer helper expressions.
+"**/tests/*.py" = ["E501"]

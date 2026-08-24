@@ -1,0 +1,27 @@
+version: 2
+
+# The landing zone written verbatim by services/ingestion. Columns are text in
+# `raw` (docs/02 §3); staging casts them. Freshness is declared so a stale feed
+# is surfaced in the pipeline monitor rather than silently transformed
+# (docs/02 §7) — it keys off the ingestion metadata column `_loaded_at`.
+sources:
+  - name: raw
+    schema: raw
+    description: "Landed operational feeds, one table per source unit, untyped."
+    loaded_at_field: _loaded_at
+    freshness:
+      warn_after: { count: 24, period: hour }
+      error_after: { count: 72, period: hour }
+    tables:
+      - name: customers
+        description: "Customer master (PII already redacted at ingestion)."
+      - name: products
+        description: "Product catalog with cost and list price."
+      - name: stores
+        description: "Stores and online channels."
+      - name: orders
+        description: "Order headers, one row per order."
+      - name: order_items
+        description: "Order lines, one row per SKU per order."
+      - name: inventory
+        description: "Periodic stock snapshots, one row per SKU per store per day."

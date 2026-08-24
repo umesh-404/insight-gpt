@@ -1,0 +1,85 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: "Typed, deduped customers. No PII (redacted at ingestion)."
+    columns:
+      - name: customer_id
+        tests: [not_null, unique]
+      - name: segment
+        tests:
+          - accepted_values:
+              values: ["consumer", "smb", "enterprise"]
+
+  - name: stg_products
+    description: "Typed, deduped product catalog."
+    columns:
+      - name: product_id
+        tests: [not_null, unique]
+      - name: sku
+        tests: [not_null, unique]
+      - name: category
+        tests:
+          - accepted_values:
+              values: ["Electronics", "Apparel", "Home"]
+
+  - name: stg_stores
+    description: "Typed, deduped stores/channels."
+    columns:
+      - name: store_id
+        tests: [not_null, unique]
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ["online", "retail", "marketplace", "wholesale"]
+
+  - name: stg_orders
+    description: "Typed order headers."
+    columns:
+      - name: order_id
+        tests: [not_null, unique]
+      - name: order_ts
+        tests: [not_null]
+      - name: status
+        tests:
+          - accepted_values:
+              values: ["placed", "shipped", "delivered", "cancelled", "returned"]
+      - name: customer_id
+        tests:
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: store_id
+        tests:
+          - relationships:
+              to: ref('stg_stores')
+              field: store_id
+
+  - name: stg_order_items
+    description: "Typed order lines with gross_revenue computed."
+    columns:
+      - name: order_item_id
+        tests: [not_null, unique]
+      - name: quantity
+        tests: [not_null]
+      - name: order_id
+        tests:
+          - relationships:
+              to: ref('stg_orders')
+              field: order_id
+      - name: product_id
+        tests:
+          - relationships:
+              to: ref('stg_products')
+              field: product_id
+
+  - name: stg_inventory
+    description: "Typed inventory snapshots."
+    columns:
+      - name: snapshot_date
+        tests: [not_null]
+      - name: units_on_hand
+        tests: [not_null]
+    # Composite uniqueness of the snapshot grain (snapshot_date x product x
+    # store) is enforced by the singular test
+    # tests/assert_unique_inventory_grain.sql (no external package needed).

@@ -1,0 +1,15 @@
+version: 2
+
+seeds:
+  - name: channel_map
+    description: >
+      Small controlled vocabulary: maps each selling channel to a coarse group
+      and a digital flag. Enriches dim_channel without hardcoding the mapping in
+      SQL (docs/02 §5 seeds).
+    columns:
+      - name: channel_name
+        tests: [not_null, unique]
+      - name: channel_group
+        tests:
+          - accepted_values:
+              values: ["Direct", "Third-party"]
