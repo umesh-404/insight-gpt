@@ -12,11 +12,10 @@ import time
 from functools import lru_cache
 
 from ..config import Settings, get_settings
+from ..engine.build import build_engine
 from ..engine.engine import InsightEngine
-from ..engine.retrieval import FixtureRetriever
-from ..providers.factory import get_provider
 from ..semantic.catalog import SemanticCatalog, load_catalog
-from ..warehouse.executor import PostgresWarehouse, Warehouse
+from ..warehouse.executor import Warehouse
 
 APP_VERSION = "0.1.0"
 _STARTED_AT = time.time()
@@ -33,27 +32,9 @@ def get_catalog() -> SemanticCatalog:
 
 @lru_cache(maxsize=1)
 def _build_engine() -> InsightEngine:
-    settings = get_settings()
-    catalog = get_catalog()
-    provider = get_provider(settings.llm_provider, settings.llm_model)
-
-    warehouse: Warehouse
-    if settings.warehouse == "duckdb" or not settings.postgres_dsn:
-        # Offline fixture stack — no external database required.
-        return InsightEngine.fixture(provider=provider, today=settings.today)
-
-    warehouse = PostgresWarehouse(
-        dsn=settings.postgres_dsn,
-        allow_tables=set(catalog.allow_tables),
-        statement_timeout_ms=catalog.statement_timeout_ms,
-    )
-    return InsightEngine(
-        catalog=catalog,
-        warehouse=warehouse,
-        retriever=FixtureRetriever(),
-        provider=provider,
-        today=settings.today,
-    )
+    # Config-driven: offline fixture stack by default; real Postgres/Qdrant
+    # backends when WAREHOUSE/RETRIEVER select them (see engine/build.py).
+    return build_engine(get_settings())
 
 
 def get_engine() -> InsightEngine:

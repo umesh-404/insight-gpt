@@ -167,7 +167,7 @@ def get_sample_documents() -> list[dict]:
                     "arrived two weeks late due to a fulfilment centre backlog. "
                     "Third complaint this week about North warehouse delays.",
             "date": "2026-05-08", "region": "North", "category": "Electronics",
-            "author_role": "support_agent",
+            "author_role": "agent",
         },
         {
             "doc_id": "REVIEW-9931", "source_type": "review",
@@ -185,7 +185,7 @@ def get_sample_documents() -> list[dict]:
                     "centre through April and May, delaying electronics shipments and "
                     "driving cancellations and refunds.",
             "date": "2026-05-27", "region": "North", "category": "Electronics",
-            "author_role": "ops_manager",
+            "author_role": "manager",
         },
         {
             "doc_id": "REVIEW-9950", "source_type": "review",
@@ -202,6 +202,6 @@ def get_sample_documents() -> list[dict]:
                     "issue of the quarter, concentrated in electronics. Other regions "
                     "operated normally. Remediation: temporary capacity and rerouting.",
             "date": "2026-06-30", "region": "North", "category": "Electronics",
-            "author_role": "ops_manager",
+            "author_role": "manager",
         },
     ]

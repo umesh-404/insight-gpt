@@ -147,9 +147,8 @@ services/retrieval/
   runs on RRF order if it is disabled or unavailable.
 - **Payload field names** follow `docs/04` §1.1 (`created_at`, `source_type`,
   `region`, `category`, `product_ref`, `order_ref`, `author_role`, `channel`).
-  The sample fixture in `services/api` uses `date` and `author_role` values like
-  `support_agent`/`ops_manager`; `Document.from_dict` maps `date → created_at`,
-  and the sample corpus here uses the normalized `author_role` enum
-  (`customer`/`agent`/`manager`). Confirm the ingestion layer normalizes to the
-  same enum.
+  Both the sample fixture in `services/api` and the sample corpus here use the
+  normalized `author_role` enum (`customer`/`agent`/`manager`);
+  `Document.from_dict` maps `date → created_at`. Confirm any future ingestion
+  layer normalizes incoming roles to the same enum.
 ```

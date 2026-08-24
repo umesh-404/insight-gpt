@@ -77,15 +77,21 @@ class RetrievalConfig(BaseModel):
     reranker: RerankerConfig = Field(default_factory=RerankerConfig)
 
     def _apply_env(self) -> RetrievalConfig:
-        """Environment overrides for the two network endpoints.
+        """Environment overrides for the network endpoints and embedding model.
 
-        Only the hosts are overridable — model names and dimensions must match
-        what is stored in Qdrant, so they stay pinned to the file.
+        Hosts (``OLLAMA_HOST``, ``QDRANT_URL``) point a container at sibling
+        services. ``EMBED_MODEL`` overrides the embedding model name so the
+        shared deployment selector wins over the file default — but it must name
+        a model whose vectors match ``dimensions`` and the query/document
+        prefixes stored in Qdrant, or retrieval degrades silently (re-index on
+        a real change).
         """
         if ollama := os.environ.get("OLLAMA_HOST"):
             self.embedding.base_url = ollama.rstrip("/")
         if qdrant := os.environ.get("QDRANT_URL"):
             self.qdrant_url = qdrant.rstrip("/")
+        if embed_model := os.environ.get("EMBED_MODEL"):
+            self.embedding.model = embed_model
         return self
 
 

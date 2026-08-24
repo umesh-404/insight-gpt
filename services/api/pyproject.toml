@@ -24,6 +24,14 @@ api = [
     "python-multipart>=0.0.9",  # form parsing for FastAPI request bodies
     "psycopg[binary]>=3.2",     # real Postgres executor (production warehouse)
 ]
+# Real retrieval backend (Qdrant). Optional so the offline default never needs
+# it: installed into the container image, imported lazily by engine/build.py.
+real = [
+    "insightgpt-retrieval",     # path/workspace dep — see [tool.uv.sources]
+]
+
+[tool.uv.sources]
+insightgpt-retrieval = { path = "../retrieval" }
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.8"]

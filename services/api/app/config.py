@@ -18,9 +18,14 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     ollama_host: str = "http://127.0.0.1:11434"
 
-    # Warehouse: "duckdb" fixture (default, offline) or a Postgres DSN.
+    # Warehouse: "duckdb" fixture (default, offline) or "postgres" (needs a DSN).
     warehouse: str = "duckdb"
     postgres_dsn: str | None = None
+
+    # Retriever: "fixture" keyword scoring (default, offline) or "qdrant" (real).
+    # The Qdrant client reads QDRANT_URL / OLLAMA_HOST / EMBED_MODEL from the
+    # environment via the retrieval package's own config.
+    retriever: str = "fixture"
 
     # Reference "as of" date used to resolve relative time ranges.
     today: str = "2026-07-15"
