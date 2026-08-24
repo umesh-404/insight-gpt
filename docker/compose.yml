@@ -1,0 +1,168 @@
+# InsightGPT — full-stack Docker Compose topology (docs/09-deployment.md §1).
+#
+# Six services on a private network. Only `web` and `api` publish ports to the
+# host; postgres/qdrant/ollama/worker are internal-only. Bring the stack up from
+# the REPO ROOT so the root .env and the build contexts resolve:
+#
+#   docker compose --env-file .env -f docker/compose.yml up --build
+#
+# (the Makefile wraps this). First run then needs a one-time bootstrap:
+#
+#   make bootstrap
+#
+# Every value is interpolated from the root .env with a safe in-file default, so
+# the stack also comes up on a bare checkout with no .env present.
+
+name: insightgpt
+
+services:
+  # --- Warehouse ------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-insight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-insight}
+      POSTGRES_DB: ${POSTGRES_DB:-insight}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once on an empty volume: creates raw/marts/insight + pipeline_runs.
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    # Loopback-only publish keeps Postgres reachable for host-side dbt/psql
+    # while never exposing it beyond the machine.
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-insight} -d ${POSTGRES_DB:-insight}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # --- Vector DB ------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    # Internal only. Uncomment to expose REST/gRPC on loopback for debugging.
+    # ports:
+    #   - "127.0.0.1:6333:6333"
+    #   - "127.0.0.1:6334:6334"
+    # No container healthcheck: the qdrant image is distroless (no curl/shell),
+    # so a CMD-SHELL probe can never pass. Dependents use `service_started` and
+    # rely on their own connection-retry logic (and bootstrap's readiness wait).
+
+  # --- Local models (embeddings, rerank, default LLM) -----------------------
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      # `ollama list` hits the same daemon as GET /api/tags and is always in the
+      # image, so it is a reliable readiness probe.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # --- API (REST + SSE, insight engine, auth) -------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      WAREHOUSE: ${WAREHOUSE:-postgres}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://insight:insight@postgres:5432/insight}
+      RETRIEVER: ${RETRIEVER:-qdrant}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-.env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      TODAY: ${TODAY:-2026-07-15}
+    healthcheck:
+      # The API serves GET /health at the root. python (urllib) is always in the
+      # image, so this is a reliable probe and lets `web` gate on api readiness.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=4).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  # --- Worker (APScheduler jobs, pipeline runs, dbt) ------------------------
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/worker.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      WAREHOUSE: ${WAREHOUSE:-postgres}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://insight:insight@postgres:5432/insight}
+      # dbt / seed.py read the discrete POSTGRES_* vars (profiles.yml, seed guard).
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-insight}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-insight}
+      POSTGRES_DB: ${POSTGRES_DB:-insight}
+      RETRIEVER: ${RETRIEVER:-qdrant}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      RERANK_MODEL: ${RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:F16}
+      INSIGHT_REFERENCE_DATE: ${TODAY:-2026-07-15}
+      TODAY: ${TODAY:-2026-07-15}
+    healthcheck:
+      # The worker serves GET /health on 8090 (internal only).
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8090/health', timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- Frontend (Next.js) ---------------------------------------------------
+  web:
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+      args:
+        # NEXT_PUBLIC_* are baked at build time, so pass them as build args too.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+        NEXT_PUBLIC_USE_MOCK: ${NEXT_PUBLIC_USE_MOCK:-false}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+      NEXT_PUBLIC_USE_MOCK: ${NEXT_PUBLIC_USE_MOCK:-false}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+volumes:
+  pgdata:
+  qdrant_storage:
+  ollama_models:

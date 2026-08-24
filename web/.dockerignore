@@ -1,0 +1,16 @@
+# Applies when the web image is built with web/ as its context. The default
+# stack builds web from the repo root (context: ..), where the root
+# .dockerignore governs; this keeps a stand-alone `docker build web/` small too.
+
+node_modules/
+.next/
+out/
+.turbo/
+npm-debug.log*
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+README.md

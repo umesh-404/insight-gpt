@@ -77,8 +77,6 @@ Start with the docs index: [`docs/README.md`](docs/README.md).
 
 ## Quick start
 
-> The runnable stack lands in Phase 0 of the roadmap. Once scaffolded:
-
 ```bash
 docker compose up
 ```
@@ -86,6 +84,60 @@ docker compose up
 …brings up the warehouse, vector DB, local model runtime, API, worker, and web
 app, then bootstraps the demo dataset. Configuration is via `config/*.yaml` and
 `.env` (see `.env.example`).
+
+## Run the whole stack
+
+The full system comes up with a single command. Everything is wired in
+[`docker/compose.yml`](docker/compose.yml); a root [`Makefile`](Makefile) wraps
+the common tasks.
+
+**Prerequisites:** Docker + Docker Compose. First run pulls local models into a
+named volume, so it takes a while and benefits from a GPU (CPU works, slower —
+see [`docs/09-deployment.md`](docs/09-deployment.md) §5).
+
+```bash
+cp .env.example .env        # then edit secrets (JWT_SECRET, any cloud LLM keys)
+make up                     # build + start all six services
+make bootstrap              # first run only: pull models, build warehouse, index docs
+```
+
+Then open:
+
+- **web** — http://localhost:3000
+- **api** — http://localhost:8000 (health: `GET /health`)
+
+### Topology
+
+Six services on a private compose network; only `web` and `api` publish ports.
+
+| Service | Image / build | Port | Role |
+|---|---|---|---|
+| `web` | `docker/web.Dockerfile` | `3000` (published) | Next.js frontend |
+| `api` | `docker/api.Dockerfile` | `8000` (published) | FastAPI REST + SSE, insight engine, auth |
+| `worker` | `docker/worker.Dockerfile` | — internal | APScheduler jobs, dbt, pipeline runs |
+| `postgres` | `postgres:16` | — internal (loopback) | Warehouse (`raw` / `marts` / `insight`) |
+| `qdrant` | `qdrant/qdrant` | — internal | Vector DB |
+| `ollama` | `ollama/ollama` | — internal | Local embeddings, rerank, default LLM |
+
+Persistent state lives in named volumes: `pgdata`, `qdrant_storage`,
+`ollama_models`. `api` and `worker` wait for `postgres`, `qdrant`, and `ollama`
+to be **healthy** before starting; `web` waits for `api`.
+
+### Make targets
+
+| Target | What it does |
+|---|---|
+| `make up` | Build and start the full stack (`docker compose up --build -d`) |
+| `make bootstrap` | First-run: pull Ollama models, build the warehouse (generate → load → dbt), create the Qdrant collection, index sample documents. Idempotent. |
+| `make down` | Stop the stack (named volumes preserved) |
+| `make logs` | Tail all service logs |
+| `make seed` | (Re)build the warehouse from synthetic data |
+| `make test` | Run every service's offline test suite |
+| `make clean` | Stop and **delete** all data volumes (destructive) |
+
+Configuration is env-driven ([`.env.example`](.env.example) documents every
+variable). The same images deploy to a single cloud VM unchanged, or decompose
+onto a managed platform — see [`docs/09-deployment.md`](docs/09-deployment.md) §5.
 
 ## License
 
