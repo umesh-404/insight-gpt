@@ -1,0 +1,59 @@
+# --- Secrets & environment ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+credentials.json
+config/runtime.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.uv-cache/
+.uv-python/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+.turbo/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.tsbuildinfo
+
+# --- dbt ---
+target/
+dbt_packages/
+logs/
+
+# --- Data & model artifacts (heavy / regenerable) ---
+data/warehouse/
+data/qdrant/
+data/backups/
+data/generated/
+data/samples/*.parquet
+*.duckdb
+
+# --- Docker / local infra ---
+docker/.data/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,157 @@
+# InsightGPT — governed semantic layer
+#
+# This catalog is the single source of truth the insight engine reasons over.
+# The LLM selects a metric + dimensions + filters FROM THIS FILE ONLY; a
+# deterministic query builder compiles that selection into SQL using the joins
+# and aggregations declared here. The model never authors SQL and never invents
+# a join, an aggregation, or a column. Adding a metric = editing this file, not
+# the engine. Mirrors docs/02-data-model.md §6.
+
+version: 1
+
+# --- Facts: measured event tables (star-schema centers) -----------------------
+facts:
+  fact_order_items:
+    grain: order line (SKU x order)
+    keys: [order_key, order_item_key]
+    joins:
+      dim_date: { column: date_key }
+      dim_product: { column: product_key }
+      dim_customer: { column: customer_key }
+      dim_store: { column: store_key }
+      dim_channel: { column: channel_key }
+
+  fact_inventory_snapshot:
+    grain: SKU x store x day
+    keys: [product_key, store_key, date_key]
+    joins:
+      dim_date: { column: date_key }
+      dim_product: { column: product_key }
+      dim_store: { column: store_key }
+
+# --- Dimensions: conformed context tables -------------------------------------
+# `expr` is the SQL expression for the grouping/label; `key` (optional) is the
+# join column used for entity filters by id.
+dimensions:
+  date:
+    table: dim_date
+    grains:
+      day: full_date
+      week: week_label
+      month: month_label
+      quarter: quarter_label   # e.g. '2026Q2'
+      year: cal_year
+    default_grain: month
+    time_column: full_date      # used for BETWEEN range filters
+  region:
+    table: dim_customer
+    expr: region
+  category:
+    table: dim_product
+    expr: category
+  subcategory:
+    table: dim_product
+    expr: subcategory
+  product:
+    table: dim_product
+    expr: product_name
+    key: product_key
+  channel:
+    table: dim_channel
+    expr: channel_name
+  segment:
+    table: dim_customer
+    expr: segment
+  store:
+    table: dim_store
+    expr: store_name
+    key: store_key
+
+# --- Metrics: governed measures -----------------------------------------------
+# `expr` is the aggregate over the fact. `dimensions` is the allow-list of
+# dimensions this metric may be sliced by. `format` drives display only.
+metrics:
+  revenue:
+    label: Revenue
+    expr: "SUM(gross_revenue - discount_amount)"
+    fact: fact_order_items
+    additive: true
+    format: currency
+    dimensions: [date, region, category, subcategory, product, channel, segment]
+
+  gross_margin:
+    label: Gross margin
+    expr: "SUM(gross_revenue - discount_amount - cost_amount)"
+    fact: fact_order_items
+    additive: true
+    format: currency
+    dimensions: [date, region, category, subcategory, product, channel]
+
+  gross_margin_pct:
+    label: Gross margin %
+    expr: "SUM(gross_revenue - discount_amount - cost_amount) / NULLIF(SUM(gross_revenue - discount_amount), 0)"
+    fact: fact_order_items
+    additive: false
+    format: percent
+    dimensions: [date, region, category, product, channel]
+
+  orders:
+    label: Orders
+    expr: "COUNT(DISTINCT order_key)"
+    fact: fact_order_items
+    additive: true
+    format: integer
+    dimensions: [date, region, category, channel, segment]
+
+  units_sold:
+    label: Units sold
+    expr: "SUM(CASE WHEN is_returned THEN 0 ELSE quantity END)"
+    fact: fact_order_items
+    additive: true
+    format: integer
+    dimensions: [date, category, subcategory, product, channel]
+
+  avg_order_value:
+    label: Average order value
+    aliases: [aov]
+    expr: "SUM(gross_revenue - discount_amount) / NULLIF(COUNT(DISTINCT order_key), 0)"
+    fact: fact_order_items
+    additive: false
+    format: currency
+    dimensions: [date, region, channel, segment]
+
+  return_rate:
+    label: Return rate
+    expr: "SUM(CASE WHEN is_returned THEN quantity ELSE 0 END) / NULLIF(SUM(quantity), 0)"
+    fact: fact_order_items
+    additive: false
+    format: percent
+    dimensions: [date, category, subcategory, product]
+
+  units_on_hand:
+    label: Units on hand
+    expr: "SUM(units_on_hand)"
+    fact: fact_inventory_snapshot
+    additive: true
+    format: integer
+    dimensions: [date, product, store]
+
+# --- Guardrail allow-list -----------------------------------------------------
+# The set of physical tables the engine's SQL is permitted to touch. Anything
+# outside this list (e.g. the `raw` schema, unmodeled PII) is rejected before
+# execution. Column-level checks are derived from the dimension/metric defs.
+allow_list:
+  tables:
+    - fact_order_items
+    - fact_inventory_snapshot
+    - dim_date
+    - dim_product
+    - dim_customer
+    - dim_store
+    - dim_channel
+
+# Hard execution bounds (see docs/08-security.md).
+limits:
+  max_rows: 5000
+  default_rows: 1000
+  statement_timeout_ms: 10000
