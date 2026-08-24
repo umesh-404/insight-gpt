@@ -1,0 +1,88 @@
+# Retrieval / RAG configuration — the single source of truth for how documents
+# become vectors and how a query becomes results. The indexer, the store, and
+# the query-time pipeline all read this file; nothing downstream hardcodes a
+# model name, a dimension, or a collection name.
+#
+# CRITICAL INVARIANT
+# ------------------
+# `embedding.model`, `embedding.dimensions`, and the two prefixes must stay in
+# lockstep with what is actually stored in Qdrant. Vectors produced by different
+# models are not comparable — mixing them does not error, it silently returns
+# nonsense. Changing any of those fields requires a FULL RE-INDEX, not a restart.
+# `schema_version` makes that violation detectable: it is stamped into every
+# point's payload and asserted against the collection at query time.
+
+schema_version: 1
+
+# Collection name in Qdrant. A SINGLE `documents` collection holds tickets,
+# reviews, reports and emails; the document type is the `source_type` payload
+# field, not a separate collection (see docs/04-retrieval-rag.md §7).
+collection: documents
+
+embedding:
+  # Local Ollama embedding model. CPU-viable and private — no data leaves the
+  # box. The reference model is a small asymmetric embedder.
+  base_url: http://127.0.0.1:11434
+  model: nomic-embed-text
+  dimensions: 768
+  distance: Cosine
+  # Ollama silently truncates anything past the context window, so chunking must
+  # stay comfortably below this. Used to hard-truncate before sending.
+  max_context_tokens: 2048
+  # Round-trip cost dominates indexing; batch rather than one call per chunk.
+  batch_size: 32
+  # Ollama unloads an idle model after 5 minutes by default; hold it longer per
+  # request so the first query after a pause does not pay a reload.
+  keep_alive: 30m
+  timeout_seconds: 120
+  # These models are ASYMMETRIC: queries and documents embed with different
+  # prefixes so a short question lands near a long passage. Using the wrong
+  # prefix (or none) degrades retrieval silently, so both live here as part of
+  # the model definition and no caller can get them wrong.
+  query_prefix: "search_query: "
+  document_prefix: "search_document: "
+
+sparse:
+  # Sparse (term-frequency) vectors give exact-string precision the dense model
+  # blurs: an order id like ORD-88213 or a SKU like X230 matches lexically even
+  # when semantics are fuzzy. Built by a deterministic CRC32 tokenizer, no BM25
+  # library needed — Qdrant applies IDF server-side (modifier: idf).
+  enabled: true
+  split_identifiers: true    # "user repository" also finds UserRepository / X230
+  min_token_len: 2
+  max_tokens_per_chunk: 400
+
+chunking:
+  # Whole-record for tickets/reviews; heading/section-aware for reports/emails.
+  max_chunk_chars: 1600
+  min_chunk_chars: 200
+  overlap_lines: 2
+  # Prepend a breadcrumb header (title :: heading · date · source · role) to the
+  # EMBEDDED and SPARSE text only — never to the stored content that is quoted
+  # back to the user. Supplies vocabulary a bare chunk lacks.
+  contextual_header: true
+
+search:
+  # Each branch (dense, sparse) fetches this many times the requested k before
+  # fusion. Over-fetching lets a hit that is mediocre in one branch but strong
+  # in the other survive RRF.
+  prefetch_multiplier: 4
+  # Cap chunks per source document so one long report cannot fill the window;
+  # backfill from the overflow to still return k when possible.
+  max_per_doc: 2
+
+reranker:
+  # Second stage: a local cross-encoder reads query and document TOGETHER and
+  # judges answerhood, not mere similarity. An ENHANCEMENT — any failure logs
+  # and returns the RRF order untouched. Ollama has no rerank endpoint, so the
+  # reference model is a small Qwen3-Reranker scored via single-token logprobs.
+  enabled: true
+  model: dengcao/Qwen3-Reranker-0.6B:F16
+  candidates: 10          # how many first-stage candidates get reranked
+  concurrency: 4          # parallel scoring requests to Ollama
+  keep_alive: 30m
+  timeout_seconds: 60
+  max_batch_seconds: 12   # latency guard: over budget -> fall back to RRF order
+  instruct: >-
+    Given a business analyst's question, judge whether the document (a support
+    ticket, product review, or report) contains information that answers it.
