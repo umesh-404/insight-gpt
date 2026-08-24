@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { FileText, Loader2, Plus, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusBadge } from '@/components/status-badge';
-import { EmptyState, ErrorState } from '@/components/states';
+import { describeError, EmptyState, ErrorState } from '@/components/states';
 import {
   Card,
   CardContent,
@@ -16,12 +16,15 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
+import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
 import { useReports } from '@/lib/hooks';
 import { useAuth } from '@/lib/auth';
 import { api } from '@/lib/api';
+import { qk } from '@/lib/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import { RANGE_OPTIONS, resolveRange, type RangeKey } from '@/lib/metrics';
 import { formatDateTime } from '@/lib/utils';
 import type { ReportSection } from '@/lib/types';
 
@@ -36,14 +39,17 @@ export function ReportsView() {
   const router = useRouter();
   const { toast } = useToast();
   const { hasRole } = useAuth();
+  const queryClient = useQueryClient();
   const reports = useReports();
   const canGenerate = hasRole('analyst');
 
-  const [title, setTitle] = React.useState('Q2 2026 Executive Summary');
+  const [title, setTitle] = React.useState('Executive summary');
+  const [range, setRange] = React.useState<RangeKey>('quarter');
   const [selected, setSelected] = React.useState<Set<ReportSection>>(
     new Set(['kpis', 'sales', 'voice_of_customer']),
   );
   const [submitting, setSubmitting] = React.useState(false);
+  const period = React.useMemo(() => resolveRange(range), [range]);
 
   const toggle = (section: ReportSection) => {
     setSelected((prev) => {
@@ -61,15 +67,16 @@ export function ReportsView() {
     try {
       const res = await api.createReport({
         title: title.trim(),
-        period: { grain: 'quarter', start: '2026-04-01', end: '2026-06-30' },
+        period,
         sections: Array.from(selected),
       });
       toast({ title: 'Report generation started', variant: 'success' });
+      void queryClient.invalidateQueries({ queryKey: qk.reports });
       router.push(`/reports/${res.report_id}`);
     } catch (err) {
       toast({
         title: 'Could not start generation',
-        description: err instanceof Error ? err.message : 'Unknown error',
+        description: describeError(err),
         variant: 'destructive',
       });
     } finally {
@@ -149,11 +156,16 @@ export function ReportsView() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Period</Label>
-                  <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                    <Badge variant="muted">Quarter</Badge>
-                    Apr 1 — Jun 30, 2026
-                  </div>
+                  <Label htmlFor="report-period">Period</Label>
+                  <Select
+                    id="report-period"
+                    options={RANGE_OPTIONS}
+                    value={range}
+                    onChange={(e) => setRange(e.target.value as RangeKey)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {period.start} — {period.end}
+                  </p>
                 </div>
                 <fieldset className="space-y-2">
                   <legend className="text-sm font-medium">Sections</legend>

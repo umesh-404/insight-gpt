@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
+from .schema import CONTENT_HASH_KEY, normalize_document
+
 
 class RetrievedDoc(BaseModel):
     """A single cited result. Interface-compatible with the engine's model."""
@@ -43,23 +45,35 @@ class Document:
     category: str | None = None
     product_ref: str | None = None
     order_ref: str | None = None
-    author_role: str | None = None
+    author_role: str | None = None  # customer | agent | manager
     channel: str | None = None
+    # Hash of the index-relevant content, used for changed-only re-indexing.
+    content_hash: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict) -> Document:
+        """Build from ANY producer's spelling via :mod:`retrieval.schema`.
+
+        The ingestion corpus uses ``doc_type`` / ``created_ts`` /
+        ``author_role='support_agent'``; the built-in samples use
+        ``source_type`` / ``date`` / ``author_role='agent'``. Both land here as
+        the same canonical document, so the payload the engine filters on is
+        identical whichever produced it.
+        """
+        c = normalize_document(raw)
         return cls(
-            doc_id=raw["doc_id"],
-            source_type=raw["source_type"],
-            title=raw.get("title", ""),
-            body=raw.get("body", ""),
-            date=raw.get("date") or raw.get("created_at"),
-            region=raw.get("region"),
-            category=raw.get("category"),
-            product_ref=raw.get("product_ref"),
-            order_ref=raw.get("order_ref"),
-            author_role=raw.get("author_role"),
-            channel=raw.get("channel"),
+            doc_id=c["doc_id"],
+            source_type=c["source_type"],
+            title=c["title"],
+            body=c["body"],
+            date=c["created_at"],
+            region=c["region"],
+            category=c["category"],
+            product_ref=c["product_ref"],
+            order_ref=c["order_ref"],
+            author_role=c["author_role"],
+            channel=c["channel"],
+            content_hash=c[CONTENT_HASH_KEY],
         )
 
 

@@ -438,13 +438,24 @@ in a defined order; a client can render progressively and stop early.
 |---|---|---|
 | `meta` | `{ conversation_id, message_id }` | Sent first; lets the client anchor the turn |
 | `token` | `{ text }` | A chunk of the answer narrative (many, in order) |
-| `sql` | `{ sql, dialect }` | The governed SQL that produced the numbers |
-| `tables` | `{ name, columns, rows }` | A result table backing the answer |
+| `sql` | `{ sql, dialect }` | Sent **once**, carrying every statement joined by `";\n\n"` — the client replaces on this event |
+| `tables` | `{ name, columns, rows }` | **One event per table**, in order — the by-region / by-category breakdowns are part of the answer, so the client *appends* rather than replaces |
 | `citations` | `{ items: Citation[] }` | The documents grounding the claims |
-| `chart` | `{ chart_spec }` | The chart specification (see §7) |
+| `chart` | `{ chart_spec }` | The chart specification (see §7). `data_ref` points at a table already streamed (e.g. `tables[0]`); the client resolves it against what it accumulated |
 | `caveats` | `{ items: string[] }` | Limitations/assumptions on the answer |
+| `route` | `{ route, confidence }` | Completes the envelope for a client assembling it from the stream alone |
 | `done` | `{ message_id, usage }` | Terminal success; stream closes |
-| `error` | `{ code, message, request_id }` | Terminal failure; stream closes |
+| `error` | `{ code, message, request_id }` | Terminal failure; stream closes. `code` is `guardrail_rejected` for a rejected query, else `internal_error` |
+
+The assembled stream is **equal to** the single JSON envelope — that equality is
+asserted by a test, and it is why `route` is on the wire at all (`route` and
+`confidence` are envelope fields that no other event carries).
+
+On the JSON path (`stream: false` or `Accept: application/json`) the response is
+the typed `AnswerEnvelope`, and the turn identifiers that `meta` would have
+carried are returned as the `X-Conversation-Id` and `X-Message-Id` **headers** —
+so a JSON client can continue a thread without the envelope schema having to
+grow transport fields.
 
 ```
 event: meta

@@ -40,7 +40,7 @@ raw (landed, untyped)  ->  staging (cleaned + typed views)  ->  marts (star + me
 
 ```bash
 export POSTGRES_HOST=localhost POSTGRES_PORT=5432
-export POSTGRES_DB=insight POSTGRES_USER=insight_app POSTGRES_PASSWORD=...
+export POSTGRES_DB=insight POSTGRES_USER=insight POSTGRES_PASSWORD=...
 export POSTGRES_SCHEMA=marts        # target schema for marts (staging -> "staging")
 export INSIGHT_REFERENCE_DATE=2026-07-15   # "no future orders" test boundary
 ```

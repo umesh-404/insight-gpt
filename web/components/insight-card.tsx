@@ -5,9 +5,11 @@ import {
   BarChart3,
   Code2,
   FileText,
+  HelpCircle,
   MessageSquareText,
   ThumbsDown,
   ThumbsUp,
+  TriangleAlert,
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -18,12 +20,19 @@ import { CitationList } from '@/components/citation-list';
 import { CaveatNote } from '@/components/caveat-note';
 import { DataTable } from '@/components/data-table';
 import { cn } from '@/lib/utils';
-import type { AnswerEnvelope } from '@/lib/types';
+import type { AnswerEnvelope, ApiErrorBody, Confidence, Route } from '@/lib/types';
 
-const ROUTE_LABEL: Record<NonNullable<AnswerEnvelope['route']>, string> = {
+const ROUTE_LABEL: Record<Route, string> = {
   structured: 'SQL',
   unstructured: 'Documents',
   hybrid: 'SQL + Documents',
+  clarify: 'Needs clarification',
+};
+
+const CONFIDENCE_CLASS: Record<Confidence, string> = {
+  high: 'text-success',
+  medium: 'text-muted-foreground',
+  low: 'text-warning',
 };
 
 export interface InsightCardProps {
@@ -31,6 +40,8 @@ export interface InsightCardProps {
   envelope: AnswerEnvelope;
   /** True while tokens are still streaming into `envelope.answer`. */
   streaming?: boolean;
+  /** Mid-stream failure; rendered in place of the missing tail of the answer. */
+  error?: ApiErrorBody | null;
   messageId?: string;
   feedback?: 'up' | 'down' | null;
   onFeedback?: (rating: 'up' | 'down') => void;
@@ -40,24 +51,32 @@ export function InsightCard({
   question,
   envelope,
   streaming,
+  error,
   feedback,
   onFeedback,
 }: InsightCardProps) {
-  const hasChart = Boolean(envelope.chart_spec);
-  const hasSql = Boolean(envelope.sql);
-  const hasCitations = envelope.citations.length > 0;
-  const hasTables = envelope.tables.length > 0;
+  const chart = envelope.chart_spec;
+  const hasChart = Boolean(chart && (chart.data?.length ?? 0) > 0);
+  const sqlStatements = envelope.sql ?? [];
+  const hasSql = sqlStatements.length > 0;
+  const citations = envelope.citations ?? [];
+  const tables = envelope.tables ?? [];
+  const hasCitations = citations.length > 0;
+  const hasTables = tables.length > 0;
+  const route = envelope.route;
 
   return (
     <Card className="animate-fade-in">
       <CardContent className="p-5">
         {/* Question echo */}
-        <div className="mb-4 flex items-start gap-3">
-          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-            You
-          </span>
-          <p className="text-sm font-medium text-foreground">{question}</p>
-        </div>
+        {question ? (
+          <div className="mb-4 flex items-start gap-3">
+            <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+              You
+            </span>
+            <p className="text-sm font-medium text-foreground">{question}</p>
+          </div>
+        ) : null}
 
         <div className="flex items-start gap-3">
           <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
@@ -65,18 +84,20 @@ export function InsightCard({
           </span>
           <div className="min-w-0 flex-1">
             {/* Route + confidence */}
-            {(envelope.route || typeof envelope.confidence === 'number') && (
+            {route || envelope.confidence ? (
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                {envelope.route ? (
-                  <Badge variant="secondary">{ROUTE_LABEL[envelope.route]}</Badge>
+                {route ? (
+                  <Badge variant="secondary">{ROUTE_LABEL[route] ?? route}</Badge>
                 ) : null}
-                {typeof envelope.confidence === 'number' ? (
-                  <span className="text-xs text-muted-foreground">
-                    {Math.round(envelope.confidence * 100)}% confidence
+                {envelope.confidence ? (
+                  <span
+                    className={cn('text-xs', CONFIDENCE_CLASS[envelope.confidence])}
+                  >
+                    {envelope.confidence} confidence
                   </span>
                 ) : null}
               </div>
-            )}
+            ) : null}
 
             <Tabs defaultValue="answer">
               <TabsList>
@@ -91,23 +112,25 @@ export function InsightCard({
                 {hasSql ? (
                   <TabsTrigger value="sql">
                     <Code2 className="size-3.5" /> SQL
+                    {sqlStatements.length > 1 ? (
+                      <Badge variant="muted" className="ml-1 px-1.5 py-0">
+                        {sqlStatements.length}
+                      </Badge>
+                    ) : null}
                   </TabsTrigger>
                 ) : null}
                 {hasCitations ? (
                   <TabsTrigger value="sources">
                     <FileText className="size-3.5" /> Sources
                     <Badge variant="muted" className="ml-1 px-1.5 py-0">
-                      {envelope.citations.length}
+                      {citations.length}
                     </Badge>
                   </TabsTrigger>
                 ) : null}
               </TabsList>
 
               <TabsContent value="answer">
-                <div
-                  aria-live="polite"
-                  className="text-sm leading-relaxed text-foreground"
-                >
+                <div aria-live="polite" className="text-sm leading-relaxed text-foreground">
                   <p className="whitespace-pre-wrap">
                     {envelope.answer}
                     {streaming ? (
@@ -119,22 +142,50 @@ export function InsightCard({
                   </p>
                 </div>
 
-                {hasTables && !streaming ? (
+                {envelope.clarifying_question ? (
+                  <div className="mt-4 flex gap-2.5 rounded-md border border-primary/30 bg-primary/5 p-3 text-sm">
+                    <HelpCircle
+                      className="mt-0.5 size-4 shrink-0 text-primary"
+                      aria-hidden
+                    />
+                    <p className="text-foreground">{envelope.clarifying_question}</p>
+                  </div>
+                ) : null}
+
+                {error ? (
+                  <div
+                    role="alert"
+                    className="mt-4 flex gap-2.5 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm"
+                  >
+                    <TriangleAlert
+                      className="mt-0.5 size-4 shrink-0 text-destructive"
+                      aria-hidden
+                    />
+                    <div className="min-w-0">
+                      <p className="font-medium text-destructive">
+                        {error.code === 'guardrail_rejected'
+                          ? 'Blocked by a guardrail'
+                          : 'This answer stopped early'}
+                      </p>
+                      <p className="mt-0.5 text-muted-foreground">{error.message}</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {hasTables ? (
                   <div className="mt-4 space-y-4">
-                    {envelope.tables.map((table, i) => (
-                      <DataTable key={i} block={table} />
+                    {tables.map((table, i) => (
+                      <DataTable key={`${table.name}-${i}`} block={table} />
                     ))}
                   </div>
                 ) : null}
 
-                {!streaming ? <CaveatNote caveats={envelope.caveats} /> : null}
+                {!streaming ? <CaveatNote caveats={envelope.caveats ?? []} /> : null}
 
                 {/* Feedback */}
                 {!streaming && onFeedback ? (
                   <div className="mt-4 flex items-center gap-2 border-t pt-3">
-                    <span className="text-xs text-muted-foreground">
-                      Was this helpful?
-                    </span>
+                    <span className="text-xs text-muted-foreground">Was this helpful?</span>
                     <button
                       type="button"
                       onClick={() => onFeedback('up')}
@@ -163,24 +214,29 @@ export function InsightCard({
                 ) : null}
               </TabsContent>
 
-              {hasChart ? (
+              {hasChart && chart ? (
                 <TabsContent value="chart">
-                  <ChartRenderer spec={envelope.chart_spec!} />
+                  <ChartRenderer spec={chart} />
                 </TabsContent>
               ) : null}
 
               {hasSql ? (
                 <TabsContent value="sql">
-                  <SqlViewer
-                    sql={envelope.sql!}
-                    dialect={envelope.dialect ?? 'postgres'}
-                  />
+                  <div className="space-y-3">
+                    {sqlStatements.map((statement, i) => (
+                      <SqlViewer
+                        key={i}
+                        sql={statement}
+                        dialect={envelope.dialect ?? 'sql'}
+                      />
+                    ))}
+                  </div>
                 </TabsContent>
               ) : null}
 
               {hasCitations ? (
                 <TabsContent value="sources">
-                  <CitationList citations={envelope.citations} />
+                  <CitationList citations={citations} />
                 </TabsContent>
               ) : null}
             </Tabs>

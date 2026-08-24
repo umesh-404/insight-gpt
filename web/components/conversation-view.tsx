@@ -1,13 +1,21 @@
 'use client';
 
 import * as React from 'react';
-import { CornerDownLeft, Loader2, Square } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { CornerDownLeft, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { InsightCard } from '@/components/insight-card';
 import { PromptChips } from '@/components/prompt-chips';
-import { streamAsk, api } from '@/lib/api';
+import { EnvelopeAccumulator, streamAsk, api } from '@/lib/api';
 import { useToast } from '@/components/ui/toast';
-import type { AnswerEnvelope, AskStreamEvent, ConversationTurn } from '@/lib/types';
+import { qk } from '@/lib/hooks';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  emptyEnvelope,
+  type AnswerEnvelope,
+  type ApiErrorBody,
+  type ConversationTurn,
+} from '@/lib/types';
 
 interface ThreadTurn {
   id: string;
@@ -15,17 +23,8 @@ interface ThreadTurn {
   envelope: AnswerEnvelope;
   streaming: boolean;
   feedback: 'up' | 'down' | null;
-}
-
-function emptyEnvelope(): AnswerEnvelope {
-  return {
-    answer: '',
-    sql: null,
-    tables: [],
-    citations: [],
-    chart_spec: null,
-    caveats: [],
-  };
+  /** Set when the stream failed part-way; rendered inside the card. */
+  error?: ApiErrorBody | null;
 }
 
 export function ConversationView({
@@ -36,6 +35,8 @@ export function ConversationView({
   initialTurns?: ConversationTurn[];
 }) {
   const { toast } = useToast();
+  const router = useRouter();
+  const queryClient = useQueryClient();
   const [turns, setTurns] = React.useState<ThreadTurn[]>(() =>
     initialTurns.map((t) => ({
       id: t.id,
@@ -43,6 +44,7 @@ export function ConversationView({
       envelope: t.envelope,
       streaming: false,
       feedback: t.feedback ?? null,
+      error: null,
     })),
   );
   const [input, setInput] = React.useState('');
@@ -54,86 +56,26 @@ export function ConversationView({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [turns]);
 
+  // Abort any in-flight stream when the view unmounts (route change, sign-out).
+  React.useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
+
   const patchLast = React.useCallback(
     (updater: (turn: ThreadTurn) => ThreadTurn) => {
       setTurns((prev) => {
         if (!prev.length) return prev;
         const next = [...prev];
-        next[next.length - 1] = updater(next[next.length - 1]!);
+        const last = next[next.length - 1];
+        if (!last) return prev;
+        next[next.length - 1] = updater(last);
         return next;
       });
     },
     [],
-  );
-
-  const applyEvent = React.useCallback(
-    (event: AskStreamEvent) => {
-      switch (event.type) {
-        case 'token':
-          patchLast((t) => ({
-            ...t,
-            envelope: { ...t.envelope, answer: t.envelope.answer + event.data.text },
-          }));
-          break;
-        case 'route':
-          patchLast((t) => ({
-            ...t,
-            envelope: {
-              ...t.envelope,
-              route: event.data.route,
-              confidence: event.data.confidence,
-            },
-          }));
-          break;
-        case 'sql':
-          patchLast((t) => ({
-            ...t,
-            envelope: { ...t.envelope, sql: event.data.sql, dialect: event.data.dialect },
-          }));
-          break;
-        case 'tables':
-          patchLast((t) => ({
-            ...t,
-            envelope: { ...t.envelope, tables: [...t.envelope.tables, event.data] },
-          }));
-          break;
-        case 'citations':
-          patchLast((t) => ({
-            ...t,
-            envelope: { ...t.envelope, citations: event.data.items },
-          }));
-          break;
-        case 'chart':
-          patchLast((t) => ({
-            ...t,
-            envelope: { ...t.envelope, chart_spec: event.data.chart_spec },
-          }));
-          break;
-        case 'caveats':
-          patchLast((t) => ({
-            ...t,
-            envelope: { ...t.envelope, caveats: event.data.items },
-          }));
-          break;
-        case 'meta':
-          patchLast((t) => ({ ...t, id: event.data.message_id }));
-          break;
-        case 'done':
-          patchLast((t) => ({ ...t, id: event.data.message_id, streaming: false }));
-          break;
-        case 'error':
-          patchLast((t) => ({ ...t, streaming: false }));
-          toast({
-            title: 'Could not complete the answer',
-            description: event.data.message,
-            variant: 'destructive',
-          });
-          break;
-        default:
-          break;
-      }
-    },
-    [patchLast, toast],
   );
 
   const ask = React.useCallback(
@@ -153,29 +95,64 @@ export function ConversationView({
           envelope: emptyEnvelope(),
           streaming: true,
           feedback: null,
+          error: null,
         },
       ]);
+
+      // The accumulator owns envelope reconstruction: it appends every table,
+      // replaces the SQL block, and re-resolves the chart's `data_ref` as more
+      // tables arrive, so the streamed result matches the non-stream envelope.
+      const acc = new EnvelopeAccumulator();
 
       try {
         await streamAsk(trimmed, {
           conversationId,
           signal: controller.signal,
-          onEvent: applyEvent,
+          onEvent: (event) => {
+            const envelope = acc.apply(event);
+            patchLast((t) => ({
+              ...t,
+              envelope,
+              id: acc.messageId ?? t.id,
+              // An `error` frame ends the turn — never leave the caret spinning.
+              streaming: !acc.done,
+              error: acc.error,
+            }));
+            if (event.type === 'error') {
+              toast({
+                title: 'Could not complete the answer',
+                description: event.data.message,
+                variant: 'destructive',
+              });
+            }
+          },
         });
       } catch (err) {
-        patchLast((t) => ({ ...t, streaming: false }));
-        toast({
-          title: 'Request failed',
-          description: err instanceof Error ? err.message : 'Unknown error',
-          variant: 'destructive',
-        });
+        if (!controller.signal.aborted) {
+          const message = err instanceof Error ? err.message : 'Unknown error';
+          patchLast((t) => ({
+            ...t,
+            streaming: false,
+            error: { code: 'request_failed', message },
+          }));
+          toast({
+            title: 'Request failed',
+            description: message,
+            variant: 'destructive',
+          });
+        }
       } finally {
         patchLast((t) => ({ ...t, streaming: false }));
         setBusy(false);
         abortRef.current = null;
+        // History gained a message (and possibly a brand-new conversation).
+        void queryClient.invalidateQueries({ queryKey: qk.conversations });
+        if (!conversationId && acc.conversationId && !controller.signal.aborted) {
+          router.replace(`/ask/${acc.conversationId}`);
+        }
       }
     },
-    [busy, conversationId, applyEvent, patchLast, toast],
+    [busy, conversationId, patchLast, queryClient, router, toast],
   );
 
   const stop = React.useCallback(() => {
@@ -189,6 +166,7 @@ export function ConversationView({
       setTurns((prev) =>
         prev.map((t) => (t.id === turnId ? { ...t, feedback: rating } : t)),
       );
+      // Feedback is best-effort; a missing endpoint must not surface an error.
       void api.sendFeedback(turnId, rating).catch(() => undefined);
       toast({ title: 'Thanks for the feedback', variant: 'success' });
     },
@@ -215,6 +193,7 @@ export function ConversationView({
                 question={turn.question}
                 envelope={turn.envelope}
                 streaming={turn.streaming}
+                error={turn.error}
                 messageId={turn.id}
                 feedback={turn.feedback}
                 onFeedback={(rating) => onFeedback(turn.id, rating)}
@@ -247,12 +226,18 @@ export function ConversationView({
               className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm outline-none placeholder:text-muted-foreground"
             />
             {busy ? (
-              <Button type="button" variant="secondary" size="icon" onClick={stop} aria-label="Stop">
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                onClick={stop}
+                aria-label="Stop generating"
+              >
                 <Square className="size-4" />
               </Button>
             ) : (
               <Button type="submit" size="icon" disabled={!input.trim()} aria-label="Send">
-                {busy ? <Loader2 className="size-4 animate-spin" /> : <CornerDownLeft className="size-4" />}
+                <CornerDownLeft className="size-4" />
               </Button>
             )}
           </div>

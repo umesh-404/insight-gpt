@@ -80,11 +80,12 @@ class RetrievalConfig(BaseModel):
         """Environment overrides for the network endpoints and embedding model.
 
         Hosts (``OLLAMA_HOST``, ``QDRANT_URL``) point a container at sibling
-        services. ``EMBED_MODEL`` overrides the embedding model name so the
-        shared deployment selector wins over the file default — but it must name
-        a model whose vectors match ``dimensions`` and the query/document
-        prefixes stored in Qdrant, or retrieval degrades silently (re-index on
-        a real change).
+        services. ``EMBED_MODEL`` and ``RERANK_MODEL`` override the model names
+        so the shared deployment selector wins over the file default.
+
+        ``EMBED_MODEL`` must name a model whose vectors match ``dimensions`` and
+        the query/document prefixes stored in Qdrant, or retrieval degrades
+        silently — a real change there requires a full re-index.
         """
         if ollama := os.environ.get("OLLAMA_HOST"):
             self.embedding.base_url = ollama.rstrip("/")
@@ -92,6 +93,16 @@ class RetrievalConfig(BaseModel):
             self.qdrant_url = qdrant.rstrip("/")
         if embed_model := os.environ.get("EMBED_MODEL"):
             self.embedding.model = embed_model
+        # `RERANK_MODEL` is the variable bootstrap PULLS, so it has to be the
+        # variable the reranker USES — otherwise changing it in .env pulls one
+        # model and scores with another, and the mismatch shows up only as a
+        # 404 that quietly disables reranking. An empty value disables reranking
+        # explicitly, which is a legitimate deployment choice on a small box.
+        rerank_model = os.environ.get("RERANK_MODEL")
+        if rerank_model is not None:
+            self.reranker.model = rerank_model.strip()
+            if not self.reranker.model:
+                self.reranker.enabled = False
         return self
 
 

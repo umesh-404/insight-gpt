@@ -19,8 +19,19 @@ import time
 from .config import RetrievalConfig, get_config
 from .retriever import QdrantRetriever
 
+# Two golden sets, because there are two indexable corpora and their doc ids do
+# not overlap in meaning:
+#
+#   SAMPLE_GOLDEN    -- fixed doc ids from retrieval.sample_docs
+#   CORPUS_GOLDEN    -- the generated corpus, where ids are arbitrary but the
+#                       planted story is not, so a case is judged by METADATA
+#                       (region/category/source_type) instead of by id.
+#
+# A case may carry ``expect`` (doc ids), ``expect_meta`` (all key/value pairs
+# must match the hit), or both — a hit satisfying either counts.
+
 # question -> the doc_ids that genuinely answer it. Drawn from the sample corpus.
-GOLDEN: list[dict] = [
+SAMPLE_GOLDEN: list[dict] = [
     {
         "query": "why are North region electronics deliveries late?",
         "expect": {"TICKET-40122", "TICKET-40210", "REPORT-Q2-OPS", "REVIEW-9931"},
@@ -43,6 +54,41 @@ GOLDEN: list[dict] = [
     },
 ]
 
+# The generated corpus (data/ingested/documents.json). Ids there are sequential
+# and meaningless, so correctness is judged on the planted story's metadata: the
+# 2026Q2 North/Electronics fulfilment backlog.
+CORPUS_GOLDEN: list[dict] = [
+    {
+        "query": "why are North region electronics deliveries late?",
+        "expect_meta": {"region": "North", "category": "Electronics"},
+    },
+    {
+        "query": "customer complaints about the North warehouse backlog",
+        "expect_meta": {"region": "North", "category": "Electronics"},
+    },
+    {
+        "query": "what did the 2026Q2 operations review say?",
+        "expect": {"REPORT-2026Q2"},
+    },
+    {
+        "query": "fulfilment centre backlog root cause",
+        "expect_meta": {"region": "North", "category": "Electronics"},
+    },
+]
+
+# Backwards-compatible alias: the sample set is what `eval` scored before.
+GOLDEN = SAMPLE_GOLDEN
+
+
+def _matches(result, case: dict) -> bool:
+    """Does this hit satisfy the case — by doc id, or by expected metadata?"""
+    if result.doc_id in case.get("expect", ()):
+        return True
+    expect_meta = case.get("expect_meta")
+    if not expect_meta:
+        return False
+    return all(result.metadata.get(key) == value for key, value in expect_meta.items())
+
 
 def evaluate(retriever: QdrantRetriever, cases: list[dict], *, k: int = 5) -> dict:
     hits1 = hits3 = 0
@@ -53,7 +99,7 @@ def evaluate(retriever: QdrantRetriever, cases: list[dict], *, k: int = 5) -> di
     for case in cases:
         results = retriever.search(case["query"], k=k)
         rank = next(
-            (i for i, r in enumerate(results, 1) if r.doc_id in case["expect"]),
+            (i for i, r in enumerate(results, 1) if _matches(r, case)),
             None,
         )
         if rank == 1:
@@ -75,16 +121,28 @@ def evaluate(retriever: QdrantRetriever, cases: list[dict], *, k: int = 5) -> di
     }
 
 
-def run(config: RetrievalConfig | None = None, floor: float = 0.80) -> int:
-    """Score the golden set with rerank off vs. on. Returns a process exit code."""
+def run(
+    config: RetrievalConfig | None = None,
+    floor: float = 0.80,
+    *,
+    samples: bool = False,
+) -> int:
+    """Score a golden set with rerank off vs. on. Returns a process exit code.
+
+    Which golden set depends on what is in the collection: ``samples=True``
+    scores the demo documents, otherwise the generated-corpus set is used —
+    matching ``insight-retrieval index`` and ``index --samples`` respectively.
+    """
     cfg = config or get_config()
     retriever = QdrantRetriever(cfg)
+    cases = SAMPLE_GOLDEN if samples else CORPUS_GOLDEN
+    corpus = "sample documents" if samples else "the generated corpus"
 
-    print(f"{len(GOLDEN)} golden queries against the live index\n")
+    print(f"{len(cases)} golden queries against the live index ({corpus})\n")
     rows: dict[str, dict] = {}
     for label, rerank in (("RRF only", False), ("RRF + rerank", True)):
         retriever.searcher.reranker.enabled = rerank and cfg.reranker.enabled
-        rows[label] = evaluate(retriever, GOLDEN)
+        rows[label] = evaluate(retriever, cases)
 
     print(f"{'pipeline':<14}{'R@1':>8}{'R@3':>8}{'MRR':>8}{'avg s':>8}")
     for label, m in rows.items():

@@ -41,20 +41,45 @@ export function formatDuration(ms: number | null | undefined): string {
   return `${minutes}m ${seconds.toString().padStart(2, '0')}s`;
 }
 
-/** Format an ISO timestamp as a short, locale-aware date-time. */
+/**
+ * Format an ISO timestamp as a short date-time.
+ *
+ * Pinned to UTC on purpose: these strings are produced during SSR *and* during
+ * hydration, and a server/browser timezone difference would otherwise trip a
+ * React hydration mismatch on every timestamp on the page.
+ */
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('en-US', {
+  return `${new Intl.DateTimeFormat('en-US', {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+    timeZone: 'UTC',
+  }).format(date)} UTC`;
+}
+
+/** Format an ISO date (no time component) — used for citation dates. */
+export function formatDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const date = new Date(iso.length === 10 ? `${iso}T00:00:00Z` : iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
   }).format(date);
 }
 
-/** Relative "time ago" for run tables and conversation lists. */
+/**
+ * Relative "time ago" for run tables and conversation lists.
+ *
+ * Depends on `Date.now()`, so it is **not** hydration-safe on its own — render
+ * it through `<RelativeTime>`, which only switches to relative text after mount.
+ */
 export function timeAgo(iso: string | null | undefined): string {
   if (!iso) return '—';
   const then = new Date(iso).getTime();

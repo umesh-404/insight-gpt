@@ -5,12 +5,14 @@ import { usePathname } from 'next/navigation';
 import { Plus, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { RelativeTime } from '@/components/relative-time';
 import { useConversations } from '@/lib/hooks';
-import { cn, timeAgo } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 
 export function ConversationList() {
   const pathname = usePathname();
-  const { data, isLoading } = useConversations();
+  const { data, isLoading, isError } = useConversations();
+  const items = data?.items ?? [];
 
   return (
     <div className="flex h-full flex-col">
@@ -31,9 +33,17 @@ export function ConversationList() {
               <Skeleton key={i} className="h-12 w-full" />
             ))}
           </div>
+        ) : isError ? (
+          <p className="px-2 py-3 text-xs text-muted-foreground">
+            History is unavailable right now.
+          </p>
+        ) : items.length === 0 ? (
+          <p className="px-2 py-3 text-xs text-muted-foreground">
+            No conversations yet. Ask a question to start one.
+          </p>
         ) : (
           <ul className="space-y-0.5">
-            {data?.items.map((conversation) => {
+            {items.map((conversation) => {
               const active = pathname === `/ask/${conversation.id}`;
               return (
                 <li key={conversation.id}>
@@ -61,12 +71,13 @@ export function ConversationList() {
                           active ? 'text-primary' : 'text-foreground',
                         )}
                       >
-                        {conversation.title}
+                        {conversation.title || 'Untitled conversation'}
                       </span>
                     </span>
-                    <span className="pl-5 text-xs text-muted-foreground">
-                      {timeAgo(conversation.updated_at)}
-                    </span>
+                    <RelativeTime
+                      iso={conversation.updated_at}
+                      className="pl-5 text-xs text-muted-foreground"
+                    />
                   </Link>
                 </li>
               );

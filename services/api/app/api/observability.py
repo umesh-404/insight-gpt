@@ -13,8 +13,11 @@ import logging
 import sys
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
+from starlette.background import BackgroundTask
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -22,6 +25,15 @@ from starlette.responses import Response
 REQUEST_ID_HEADER = "X-Request-ID"
 
 log = logging.getLogger("insightgpt.access")
+
+# Ambient request id so code with no ``Request`` handle (engine internals,
+# background work) can still stamp its logs with the correlating id.
+_REQUEST_ID: ContextVar[str] = ContextVar("request_id", default="-")
+
+
+def current_request_id() -> str:
+    """The id of the request being served on this task, or ``"-"``."""
+    return _REQUEST_ID.get()
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -61,6 +73,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request.state.user_id = None
         request.state.role = None
         request.state.llm_trace = []
+        token = _REQUEST_ID.set(rid)
 
         start = time.perf_counter()
         try:
@@ -69,9 +82,26 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             latency_ms = round((time.perf_counter() - start) * 1000, 2)
             _emit(request, status=500, latency_ms=latency_ms)
             raise
-        latency_ms = round((time.perf_counter() - start) * 1000, 2)
+        finally:
+            _REQUEST_ID.reset(token)
+
         response.headers[REQUEST_ID_HEADER] = rid
-        _emit(request, status=response.status_code, latency_ms=latency_ms)
+
+        # Emit the access line *after* the body has been sent. For a streamed
+        # answer the LLM trace is only complete once the generator has finished,
+        # so logging inline would drop it (doc 06 §9 wants the trace on the line).
+        previous = response.background
+
+        async def _finalize() -> None:
+            if previous is not None:
+                await previous()
+            _emit(
+                request,
+                status=response.status_code,
+                latency_ms=round((time.perf_counter() - start) * 1000, 2),
+            )
+
+        response.background = BackgroundTask(_finalize)
         return response
 
 
@@ -106,14 +136,42 @@ def record_llm_call(
     trace = getattr(request.state, "llm_trace", None)
     if trace is None:
         return
-    trace.append(
-        {
-            "provider": provider,
-            "model": model,
-            "operation": operation,
-            "latency_ms": round(latency_ms, 2),
-            "prompt_chars": prompt_chars,
-            "completion_chars": completion_chars,
-            "cache_hit": cache_hit,
-        }
+    entry = {
+        "provider": provider,
+        "model": model,
+        "operation": operation,
+        "latency_ms": round(latency_ms, 2),
+        "prompt_chars": prompt_chars,
+        "completion_chars": completion_chars,
+        "cache_hit": cache_hit,
+    }
+    trace.append(entry)
+    log.debug(
+        "llm_call",
+        extra={"context": {"request_id": getattr(request.state, "request_id", "-"), **entry}},
     )
+
+
+@contextmanager
+def time_llm_call(
+    request: Request, *, provider: str, model: str, operation: str, prompt_chars: int = 0
+) -> Iterator[dict[str, int]]:
+    """Time a block and record it as an LLM call, even when it raises.
+
+    Yields a small mutable dict; set ``result["completion_chars"]`` inside the
+    block so the recorded trace carries the real completion size.
+    """
+    result: dict[str, int] = {"completion_chars": 0}
+    started = time.perf_counter()
+    try:
+        yield result
+    finally:
+        record_llm_call(
+            request,
+            provider=provider,
+            model=model,
+            operation=operation,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            prompt_chars=prompt_chars,
+            completion_chars=int(result.get("completion_chars", 0)),
+        )

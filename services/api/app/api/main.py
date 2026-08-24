@@ -26,9 +26,27 @@ from .routers import ask, auth, metrics, pipelines, reports, sources, system
 API_PREFIX = "/api/v1"
 
 
+#: Dev origins the web app is served from. Both ports are covered so the
+#: default `next dev` port and the project's 3020 both work out of the box.
+_DEFAULT_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3020",
+    "http://127.0.0.1:3020",
+)
+
+
 def _cors_origins() -> list[str]:
-    raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
-    return [o.strip() for o in raw.split(",") if o.strip()]
+    """Explicit origin allow-list.
+
+    ``allow_credentials=True`` is required for the httpOnly refresh cookie, and
+    the CORS spec forbids pairing credentials with a ``*`` wildcard — a browser
+    rejects the response outright. So a wildcard is dropped rather than honored,
+    and the dev defaults are used instead.
+    """
+    raw = os.getenv("CORS_ORIGINS", ",".join(_DEFAULT_ORIGINS))
+    origins = [o.strip() for o in raw.split(",") if o.strip() and o.strip() != "*"]
+    return origins or list(_DEFAULT_ORIGINS)
 
 
 def create_app() -> FastAPI:

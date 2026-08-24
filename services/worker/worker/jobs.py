@@ -11,10 +11,16 @@ installed. A missing dependency raises a clear :class:`JobDependencyError`, whic
 is recorded as a failed run like any other error.
 
 Jobs:
-    full_ingest       -> services.ingestion full reload of raw.*
-    incremental_sync  -> services.ingestion content-hash / watermark sync
+    full_ingest       -> services.ingestion full reload of raw.* + publish the
+                         redacted document corpus
+    incremental_sync  -> services.ingestion content-hash sync (unchanged units
+                         are skipped, not reloaded) + republish the corpus
     dbt_build         -> `dbt build` over the warehouse project (subprocess)
-    reindex_docs      -> retrieval indexer: re-chunk / re-embed into Qdrant
+    reindex_docs      -> retrieval indexer: re-chunk / re-embed the documents
+                         ingestion published, changed-only
+
+The chain is real: ``full_ingest`` / ``incremental_sync`` write
+``data/ingested/documents.json`` and ``reindex_docs`` reads exactly that file.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import subprocess
 import traceback
 from collections.abc import Callable
 from importlib import import_module
+from pathlib import Path
 
 from .config import WorkerSettings, get_settings
 from .runs import PipelineRunStore
@@ -125,15 +132,43 @@ def dbt_build(settings: WorkerSettings) -> int:
     return 0
 
 
-def reindex_docs(settings: WorkerSettings) -> int:
-    """Re-chunk / re-embed documents into Qdrant via the retrieval indexer.
+def _resolve_reindex_docs(settings: WorkerSettings, models_mod, corpus_mod, sample_mod):
+    """Pick the documents to reindex and the state file that tracks them.
 
-    Needs live Qdrant + Ollama at runtime; those failures surface as a failed
-    run. Returns the number of chunks written.
+    ``REINDEX_SOURCE=ingested`` (the default) reads the corpus
+    ``services/ingestion`` published. Its absence is an ERROR, not a cue to
+    quietly index six demo documents: a reindex that reports success while the
+    real corpus was never touched is the exact failure this wiring exists to
+    prevent. ``samples`` is available as an explicit opt-in.
+    """
+    source = settings.reindex_source
+    if source == "samples":
+        docs = [models_mod.Document.from_dict(d) for d in sample_mod.get_sample_documents()]
+        return docs, "built-in sample documents", None
+
+    path = settings.document_corpus_path if source == "ingested" else Path(source)
+    if not path.exists():
+        raise JobDependencyError(
+            f"document corpus not found: {path}. Run the ingestion document branch "
+            "first (`python -m worker run full_ingest`, or "
+            "`python -m services.ingestion run --source documents`), or set "
+            "REINDEX_SOURCE=samples to index the demo set on purpose."
+        )
+    return corpus_mod.load_corpus(path), str(path), corpus_mod.state_path_for(path)
+
+
+def reindex_docs(settings: WorkerSettings) -> int:
+    """Re-chunk / re-embed the ingested documents into Qdrant.
+
+    Changed-only by default: documents whose content hash matches the last
+    successful run are skipped, and documents that disappeared from the corpus
+    have their chunks deleted. Needs live Qdrant + Ollama at runtime; those
+    failures surface as a failed run. Returns the number of chunks written.
     """
     try:
         cli = import_module("retrieval.cli")
         indexer_mod = import_module("retrieval.indexer")
+        corpus_mod = import_module("retrieval.corpus")
         store_mod = import_module("retrieval.store")
         embedder_mod = import_module("retrieval.embedder")
         sample_mod = import_module("retrieval.sample_docs")
@@ -144,28 +179,29 @@ def reindex_docs(settings: WorkerSettings) -> int:
         ) from exc
 
     cfg = cli.load_config(None)
-    if settings.reindex_source == "samples":
-        docs = [models_mod.Document.from_dict(d) for d in sample_mod.get_sample_documents()]
-    else:
-        docs = indexer_mod.load_documents(_as_path(settings.reindex_source))
+    docs, origin, state_path = _resolve_reindex_docs(
+        settings, models_mod, corpus_mod, sample_mod
+    )
+    if state_path is None:
+        # The sample set has no corpus directory of its own to keep state in.
+        state_path = settings.document_corpus_path.parent / "samples.index_state.json"
+    logger.info("reindex_docs: %d documents from %s", len(docs), origin)
 
+    state = corpus_mod.IndexState(state_path, cfg.collection)
     store = store_mod.Store(cfg)
     store.ensure_collection()
     with embedder_mod.Embedder(cfg.embedding) as embedder:
         embedder.health()
-        stats = indexer_mod.Indexer(cfg, store, embedder).index_documents(docs)
+        stats = indexer_mod.Indexer(cfg, store, embedder).index_changed(
+            docs, state, full=not settings.reindex_changed_only
+        )
 
+    logger.info("reindex_docs: %s", stats.summary())
     if stats.errors:
         raise JobExecutionError(
             f"reindex had {len(stats.errors)} document error(s): {stats.errors[0]}"
         )
     return int(stats.chunks)
-
-
-def _as_path(value: str):
-    from pathlib import Path
-
-    return Path(value)
 
 
 # job name -> callable(settings) -> int rows

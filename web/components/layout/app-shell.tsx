@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/lib/auth';
+import { displayName } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
@@ -54,9 +55,12 @@ function UserCard() {
   const { user, logout } = useAuth();
   const router = useRouter();
 
-  const onLogout = async () => {
-    await logout();
-    router.replace('/login');
+  // Sign-out must always land on /login, even if the server call fails —
+  // otherwise a network blip leaves an unhandled rejection and a dead shell.
+  const onLogout = () => {
+    void logout()
+      .catch(() => undefined)
+      .finally(() => router.replace('/login'));
   };
 
   if (!user) {
@@ -68,14 +72,13 @@ function UserCard() {
     );
   }
 
-  // Display name is defensive: fall back to the email local-part if the API
-  // did not return a name, so the shell can never crash on a missing field.
-  const displayName =
-    user.name && user.name.trim() ? user.name : user.email.split('@')[0];
+  // Defensive: `name` and even `email` can be missing on a partial user record,
+  // so the label comes from a total helper rather than raw field access.
+  const label = displayName(user);
   const initials =
-    displayName
+    label
       .split(/[\s._-]+/)
-      .map((p) => p[0])
+      .map((part) => part[0])
       .filter(Boolean)
       .join('')
       .slice(0, 2)
@@ -87,7 +90,7 @@ function UserCard() {
         {initials}
       </span>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{displayName}</p>
+        <p className="truncate text-sm font-medium">{label}</p>
         <Badge variant="muted" className="mt-0.5 capitalize">
           {user.role}
         </Badge>

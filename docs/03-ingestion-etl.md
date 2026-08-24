@@ -43,7 +43,10 @@ flowchart TB
     end
     MARTS2[("Postgres: marts.*")]
 
-    subgraph RetrievalHandoff["hand-off to retrieval"]
+    CORPUS["data/ingested/documents.json<br/>redacted corpus + content hashes"]
+    subgraph RetrievalHandoff["services/retrieval"]
+        NORM["schema.normalize_document()"]
+        CHANGED["changed-only planner<br/>.index_state.json"]
         CHUNK["chunk + embed + index"]
         QD[("Qdrant")]
     end
@@ -56,21 +59,23 @@ flowchart TB
     REDACT -->|structured records| LOADR --> RAW
     RAW --> STG --> MARTS --> MARTS2
 
-    REDACT -->|documents + metadata| CHUNK --> QD
+    REDACT -->|documents + metadata| CORPUS
+    CORPUS --> NORM --> CHANGED --> CHUNK --> QD
 
     subgraph Worker["services/worker — APScheduler"]
-        JOBS["jobs: full / incremental / dbt run / reindex"]
-        RUNS[("pipeline_runs tracking")]
+        JOBS["jobs: full_ingest · incremental_sync<br/>dbt_build · reindex_docs"]
+        RUNS[("insight.pipeline_runs")]
     end
     JOBS --> CONN
     JOBS --> STG
-    JOBS --> CHUNK
+    JOBS --> CORPUS
     JOBS --> RUNS
 ```
 
 Two branches share one extraction and one redaction pass: structured records
-flow to `raw` then dbt; documents flow to chunking/indexing. Redaction sits
-**before** the fork so neither branch can persist a secret.
+flow to `raw` then dbt; documents are published as one redacted corpus file that
+retrieval normalizes, diffs, and indexes (§7). Redaction sits **before** the fork
+so neither branch can persist a secret.
 
 ## 3. Source connectors
 
@@ -115,8 +120,12 @@ decide *whether* a unit changed before paying to read it.
   of tickets/reviews/reports. Reuses rememory's discovery discipline: prune
   ignored directories, reject by content probe (NUL-byte / non-UTF-8) not just
   extension, skip empty and oversized files, and **hash bytes** for change
-  detection. Each document yields text plus structured metadata
-  (`product_id`, `region`, `created_ts`, `doc_type`) for retrieval filtering.
+  detection. It handles two shapes: a `.json` file holding a list of document
+  objects (what the generator writes) yields one document per element; any
+  other UTF-8 text file yields one document. Each document carries the
+  producer's own metadata (`doc_type`, `created_ts`, `region`, `category`,
+  `product_sku`, ...); mapping those onto the canonical payload schema is
+  retrieval's job — see §7.
 
 ### 3.3 Incremental loading
 
@@ -130,7 +139,14 @@ Two complementary strategies, both borrowed from rememory:
    only rows beyond the high-water mark recorded on the previous run.
 
 A full ingest ignores both and reloads everything (used for seeding and for
-recovering from schema changes).
+recovering from schema changes — the raw table is widened with
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for any column the source has
+gained, since raw is a landing zone and a source that grew a column must not
+break every subsequent load).
+
+**Implemented today:** the content-hash strategy, for the CSV connector (per
+file) and the document corpus (per document). The watermark strategy belongs to
+the SQL source connector, which is designed in §3.2 but not yet built.
 
 ## 4. Redaction at ingestion
 
@@ -172,51 +188,73 @@ to demo and reason about.
 
 ### 5.1 Job types
 
-| Job | Does | Typical trigger |
-|---|---|---|
-| `full_ingest` | Extract → redact → **full** reload of `raw.*` for a source; reset watermarks/hashes | On-demand (seed, recovery) |
-| `incremental_sync` | Extract only changed units (hash/watermark) → redact → upsert `raw.*` | Scheduled (e.g. hourly) |
-| `dbt_run` | `dbt build` (run + test) `staging` → `marts` | After an ingest completes |
-| `reindex` | Re-chunk/re-embed changed documents into Qdrant | After a document ingest; or on-demand |
+The four job names are exactly these — `worker.jobs.JOB_NAMES` — and each is
+runnable on its own with `python -m worker run <job>`:
 
-Jobs are chained: a successful incremental_sync of a records source enqueues a
-`dbt_run`; a document ingest enqueues `reindex`. Chaining is explicit so a
-partial failure does not silently publish a half-built mart.
+| Job | Does | Trigger |
+|---|---|---|
+| `full_ingest` | Extract → redact → **full** reload of `raw.*` (ignoring stored hashes) and republish the document corpus | On-demand (seed, recovery) |
+| `incremental_sync` | Extract → redact → load only units whose content hash changed; republish the document corpus | Every 30 min (`INCREMENTAL_SYNC_MINUTES`) |
+| `dbt_build` | `dbt build` (run + test) `staging` → `marts`, shelled out to the `dbt` CLI | Daily at 02:00 (`DBT_BUILD_HOUR` / `DBT_BUILD_MINUTE`) |
+| `reindex_docs` | Re-chunk / re-embed **changed** documents from the published corpus into Qdrant | Every 30 min, offset 15 min so it never fires in the same tick as `incremental_sync` |
+
+Jobs are **not** chained to each other today: each is an independent scheduled
+trigger, and the offset between the two 30-minute jobs is what keeps them from
+contending. Chaining is unnecessary for correctness because each job is
+idempotent and gates its own work — `incremental_sync` skips unchanged units,
+`reindex_docs` skips unchanged documents, and `dbt_build` rebuilds from whatever
+is currently in `raw`. Event-driven chaining is on the roadmap
+([`11-roadmap.md`](11-roadmap.md)), not in the code.
 
 ### 5.2 Scheduling, retries, backoff
 
-- Schedules are config-driven cron/interval triggers (e.g. incremental_sync
-  every hour, a nightly full dbt_run). A single-instance execution lock per job
-  type prevents overlapping runs — the same concern rememory's writer heartbeat
-  solves for its indexer.
-- **Retries with exponential backoff** on transient failures (source
-  unreachable, DB contention): bounded attempts, growing delay, then the run is
-  marked `failed` with the error captured. A failed unit does not abort the
-  whole run — like `pipeline.py`, one bad file/row is recorded and the run
-  continues, so a single malformed record never blocks the batch.
+- Schedules are env-configurable interval/cron triggers on a single APScheduler
+  instance. Every job is registered with `max_instances=1` and `coalesce=True`,
+  which is the single-instance execution lock: a long run cannot overlap itself,
+  and missed fires collapse into one catch-up rather than a thundering herd.
+- **A failed unit does not abort the run.** One unreadable file, one bad
+  document, one row that will not load is recorded and the run continues — like
+  `pipeline.py`, so a single malformed record never blocks the batch. A job that
+  raises is caught by the run wrapper, recorded as `failed` with the error, and
+  the scheduler loop keeps going.
+- **Retries** are per-operation where they pay for themselves — bootstrap
+  retries a flaky Ollama model pull, for instance — rather than a generic
+  backoff wrapper around every job. A failed scheduled job is retried by its
+  next fire, which for the 30-minute jobs is soon enough to need no extra
+  machinery.
 
 ### 5.3 `pipeline_runs` tracking table
 
 Every job execution writes a tracked run, surfaced through the API for the
 pipeline-monitor UI ([`01-architecture.md`](01-architecture.md) §4.6).
 
-| Column | Meaning |
-|---|---|
-| `run_id` | PK |
-| `job_type` | full_ingest / incremental_sync / dbt_run / reindex |
-| `source` | source name (null for dbt_run) |
-| `status` | queued / running / success / failed / partial |
-| `started_at`, `finished_at` | timestamps → duration |
-| `units_seen`, `units_loaded`, `units_skipped`, `units_failed` | counts |
-| `rows_loaded`, `secrets_redacted`, `chunks_indexed` | volume/redaction stats |
-| `error` | first error + truncated detail on failure |
-| `triggered_by` | schedule / manual / chained |
+The table is deliberately narrow — one row per run, with per-unit detail staying
+in the job's stats and logs. This is the schema actually in use, created by
+`docker/initdb/01-schemas.sql` and re-created defensively by the worker's run
+store:
 
-These counters are the same honest-reporting stats rememory's `IndexStats`
-tracks (`files_seen`, `files_skipped_unchanged`, `files_failed`,
-`secrets_redacted`), lifted to the pipeline level. The monitor answers "why
-isn't my data current?" the way rememory's `--explain` answers "why isn't my
-file indexed?".
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | text PK | Run id (hex uuid4) |
+| `pipeline` | text | `full_ingest` / `incremental_sync` / `dbt_build` / `reindex_docs` |
+| `status` | text | `queued` / `running` / `success` / `failed` |
+| `started_at`, `finished_at` | timestamptz | → duration |
+| `rows_processed` | integer | Rows loaded, or chunks written for `reindex_docs`; null on failure |
+| `error` | text | Exception type, message, and traceback, truncated to 4 000 chars |
+| `triggered_by` | text | `schedule` / `manual` |
+| `created_at` | timestamptz | Row insert time |
+
+The richer per-run counters rememory's `IndexStats` tracks — `units_seen`,
+`units_loaded`, `units_skipped`, `units_unchanged`, `rows_loaded`,
+`secrets_redacted`, `documents_published`, `documents_changed` — are returned by
+`services.ingestion.run()` and printed by its CLI and by `scripts/seed.py`, but
+are **not** columns here. The monitor answers "why isn't my data current?" from
+`status` + `error` + `rows_processed`; the counters answer "what exactly
+happened in that run?" at the command line.
+
+With no `POSTGRES_DSN` the run store keeps records in memory and logs a warning,
+so the scheduler and the offline tests run without a database — records are lost
+on exit, which the warning says plainly.
 
 ## 6. Idempotency and re-runnability
 
@@ -242,34 +280,74 @@ The document branch does not embed inline; it hands each redacted document plus
 its metadata to the retrieval/indexing pipeline, which owns chunking (heading/
 section-aware), embedding (local Ollama), sparse-vector construction, and the
 Qdrant upsert. That boundary — and the hybrid-search + rerank design on the
-query side — is specified in [`04-retrieval-rag.md`](04-retrieval-rag.md). The
-ingestion side guarantees only two things to retrieval: the text is already
-redacted, and each document carries stable filter metadata (`doc_type`,
-`product_id`, `region`, `created_ts`).
+query side — is specified in [`04-retrieval-rag.md`](04-retrieval-rag.md).
+
+**The hand-off is a file.** `services/ingestion` publishes every redacted
+document to `data/ingested/documents.json` (`IngestionSettings.document_corpus_path`),
+and that is exactly the path the worker's `reindex_docs` job and
+`insight-retrieval index` read by default. Making the contract a concrete
+artifact rather than an in-process call means the ingest and the index can run
+in different containers, at different times, and either can be re-run alone.
+
+Three properties make it work:
+
+1. **Redacted before publication.** Redaction runs on extraction, so nothing
+   secret is ever written to the corpus file, let alone embedded.
+2. **Deterministic and only rewritten when it changed.** Documents are sorted by
+   `doc_id` and serialized with sorted keys, then written atomically via a temp
+   file and a rename — and skipped entirely when the bytes match what is already
+   there. A re-ingest of an unchanged source touches nothing.
+3. **Content-hashed per document.** Each record carries a `_content_hash`, which
+   gives `incremental_sync` an honest "N documents changed" count.
+
+The ingestion side guarantees only two things to retrieval: the text is already
+redacted, and each document carries its filter metadata. It deliberately does
+*not* rename fields — the generator's `doc_type` / `created_ts` /
+`author_role: support_agent` are published as-is, and `retrieval/schema.py`
+normalizes them onto the canonical payload schema
+([`04-retrieval-rag.md`](04-retrieval-rag.md) §1.1). One normalizer, owned by
+the consumer, is the reason a filter cannot half-match.
+
+**Changed-only indexing.** Retrieval keeps an index-state file beside the corpus
+(`.index_state.json`) mapping `doc_id` to the hash of the canonical content it
+last embedded, keyed by collection name. A reindex re-embeds only documents
+whose hash changed, and **deletes** the chunks of documents that vanished from
+the corpus — so a retracted ticket stops being retrievable instead of lingering
+forever. `insight-retrieval index --full` ignores the state and re-embeds
+everything.
 
 ## 8. Operational commands
 
 Illustrative CLI/`make` targets (exact wiring in `scripts/`):
 
 ```bash
-# Seed the synthetic demo dataset (generates CSVs + documents into data/)
-python scripts/seed_demo_data.py
+# Seed the whole demo: generate -> load raw + publish documents -> dbt
+python scripts/seed.py
 
-# Full ingest of all configured sources into raw.* (records) + redacted docs
+# Full ingest of all sources into raw.* (records) + publish the document corpus
 python -m services.ingestion run --job full_ingest --source all
 
-# Incremental sync (hash/watermark) of a single source
-python -m services.ingestion run --job incremental_sync --source operational_db
+# Incremental sync (content hash) of just the document branch
+python -m services.ingestion run --job incremental_sync --source documents
 
 # Transform + test the warehouse (staging -> marts + semantic metrics)
-dbt build --project-dir services/warehouse
+dbt build --project-dir services/warehouse --profiles-dir services/warehouse
 
 # Re-chunk + re-embed changed documents into Qdrant
-python -m services.retrieval reindex --changed-only
+insight-retrieval index            # changed-only, from the published corpus
+insight-retrieval index --full     # re-embed everything
+
+# The same work, run as a TRACKED job (writes a pipeline_runs row)
+python -m worker run full_ingest
+python -m worker run incremental_sync
+python -m worker run dbt_build
+python -m worker run reindex_docs
 ```
 
-All commands are re-runnable (§6) and every invocation records a `pipeline_runs`
-row (§5.3).
+Every command is re-runnable (§6). The `python -m worker run <job>` form is the
+one that records a `pipeline_runs` row (§5.3) and exits non-zero when the run
+failed; calling the services directly does not, which is what makes them usable
+as plain command-line tools.
 
 ## 9. Where to go next
 

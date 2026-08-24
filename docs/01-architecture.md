@@ -218,7 +218,9 @@ Ports are discovered/overridable (no hardcoding). Cloud path documented in
   call tracing → `06-api.md`, `10-testing-eval.md`.
 - **Quality** — dbt tests, pytest, retrieval + text-to-SQL eval harness, CI →
   `10-testing-eval.md`.
-- **Config** — YAML in `config/`, runtime discovery in `config/runtime.json`.
+- **Config** — non-secret YAML in `config/` and
+  `services/retrieval/config/`; secrets and per-deployment values in the root
+  `.env` (see `09-deployment.md` §2).
 
 ## 8. Repository layout
 
@@ -232,11 +234,19 @@ insight-gpt/
     retrieval/          # Qdrant client, chunking, hybrid search, rerank
     warehouse/          # dbt project: models, semantic metrics, seeds, tests
   web/                  # Next.js frontend
-  data/                 # synthetic dataset generator + sample docs (heavy = gitignored)
-  config/               # *.yaml, runtime.json
+  data/
+    generator/          # deterministic synthetic dataset generator
+    generated/          # its output: CSVs + document JSON (gitignored)
+    ingested/           # the redacted document corpus + index state (gitignored)
+  config/               # semantic_layer.yml — the governed metric catalog
   docker/               # compose.yml + per-service Dockerfiles
-  scripts/              # setup, seed, diagnose, eval
-  tests/                # pytest + eval harnesses
+  compose.yaml          # root entry point (include: docker/compose.yml)
+  scripts/              # bootstrap.py, seed.py
+  tests/                # cross-cutting tests (semantic-layer drift)
 ```
+
+Each Python package under `services/` (and `data/generator`) carries its own
+tests next to the code it covers; `tests/` at the root is only for checks that
+span more than one of them.
 
 Detailed build sequence: `11-roadmap.md`.

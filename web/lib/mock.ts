@@ -1,20 +1,30 @@
 /**
- * Mock data layer (gated behind NEXT_PUBLIC_USE_MOCK). Returns realistic
- * fixtures so every screen renders — and the flagship demo question streams —
- * without a running backend. Shapes match lib/types.ts exactly.
+ * Mock data layer, gated behind NEXT_PUBLIC_USE_MOCK.
+ *
+ * Nothing in this module may be imported by a component: mock fixtures must be
+ * reachable **only** through lib/api.ts, which checks `USE_MOCK` before calling
+ * in. That keeps demo data from leaking into a real-mode screen.
+ *
+ * Shapes match lib/types.ts exactly, so the mock and live paths exercise the
+ * same rendering code.
  */
 import type {
   AnswerEnvelope,
   AskStreamEvent,
+  Cell,
+  ColumnSpec,
   Conversation,
   ConversationSummary,
-  MetricDef,
+  MetricQuery,
   MetricResult,
+  MetricsCatalog,
   Pipeline,
   PipelineRun,
   Report,
+  ReportRequest,
   ReportSummary,
   Source,
+  SourceConfig,
   SystemStatus,
   TokenPair,
   User,
@@ -35,6 +45,31 @@ export const MOCK_TOKENS: TokenPair = {
 };
 
 /* -------------------------------------------------------------------------- */
+/* Mock session (stands in for the httpOnly refresh cookie)                   */
+/* -------------------------------------------------------------------------- */
+
+const SESSION_KEY = 'igpt-mock-session';
+
+export function hasMockSession(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.localStorage.getItem(SESSION_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function setMockSession(active: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (active) window.localStorage.setItem(SESSION_KEY, '1');
+    else window.localStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Flagship answer envelope: "Why did sales decline last quarter?"            */
 /* -------------------------------------------------------------------------- */
 
@@ -51,33 +86,34 @@ export const FLAGSHIP_ANSWER =
   'Revenue fell 12.4% quarter-over-quarter, from $4.20M in Q1 to $3.68M in Q2. ' +
   'The decline is concentrated in two areas. First, the Outdoor & Garden ' +
   'category dropped 28% as the seasonal promotion that ran in Q1 was not ' +
-  'repeated — this single category accounts for roughly two-thirds of the ' +
+  'repeated [1] — this single category accounts for roughly two-thirds of the ' +
   'total shortfall. Second, the West region underperformed by 15%, coinciding ' +
-  'with a spike in delivery-delay complaints after a carrier change in April. ' +
+  'with a spike in delivery-delay complaints after a carrier change in April [2]. ' +
   'Average order value held steady ($131 → $129), so the driver is order ' +
   'volume, not basket size. Customer sentiment corroborates the numbers: ' +
-  'shipping-related complaints rose 41% over the same window.';
+  'shipping-related complaints rose 41% over the same window [3].';
 
 export const FLAGSHIP_ENVELOPE: AnswerEnvelope = {
   answer: FLAGSHIP_ANSWER,
   route: 'hybrid',
-  confidence: 0.86,
+  confidence: 'high',
   dialect: 'postgres',
-  sql: `-- Governed text-to-SQL, compiled from the semantic layer (read-only)
+  sql: [
+    `-- Governed text-to-SQL, compiled from the semantic layer (read-only)
 SELECT
     d.category            AS category,
     d.region              AS region,
     date_trunc('quarter', f.order_date) AS quarter,
     SUM(f.net_revenue)    AS revenue,
-    COUNT(DISTINCT f.order_id) AS orders,
-    SUM(f.net_revenue) / NULLIF(COUNT(DISTINCT f.order_id), 0) AS aov
+    COUNT(DISTINCT f.order_id) AS orders
 FROM marts.fct_orders    AS f
 JOIN marts.dim_product   AS d ON d.product_key = f.product_key
 WHERE f.order_date >= date '2026-01-01'
   AND f.order_date <  date '2026-07-01'
 GROUP BY 1, 2, 3
 ORDER BY quarter, revenue DESC
-LIMIT 1000;`,
+LIMIT 1000`,
+  ],
   chart_spec: {
     kind: 'area',
     title: 'Revenue by month',
@@ -103,38 +139,53 @@ LIMIT 1000;`,
         ['Toys & Games', 570000, 452000, -0.21],
       ],
     },
+    {
+      name: 'Revenue by region (QoQ)',
+      columns: [
+        { name: 'Region', dtype: 'string' },
+        { name: 'Q2 revenue', dtype: 'currency' },
+        { name: 'Change', dtype: 'ratio' },
+      ],
+      rows: [
+        ['North', 1024000, -0.04],
+        ['South', 986000, -0.06],
+        ['East', 902000, -0.09],
+        ['West', 768000, -0.15],
+      ],
+    },
   ],
   citations: [
     {
-      id: 'doc_812',
-      title: 'Q2 support ticket themes — weekly digest',
-      source: 'support_tickets',
-      snippet:
-        'Delivery delays dominated inbound volume in April–May, especially for ' +
-        'West-region ZIP codes after the carrier switch. 41% WoW increase in ' +
-        '“where is my order” contacts.',
-      score: 0.88,
-      uri: '#',
-    },
-    {
-      id: 'doc_654',
+      n: 1,
+      doc_id: 'REPORT-Q1-PROMO',
+      source_type: 'report',
       title: 'Outdoor promo retrospective (Q1)',
-      source: 'reports',
+      date: '2026-04-04',
+      score: 0.83,
       snippet:
         'The spring garden promotion drove a 3.1x lift in Outdoor & Garden ' +
         'units. The campaign concluded March 31 and was not extended into Q2.',
-      score: 0.83,
-      uri: '#',
     },
     {
-      id: 'doc_501',
-      title: 'Product review sentiment — shipping',
-      source: 'reviews',
+      n: 2,
+      doc_id: 'TICKET-40122',
+      source_type: 'ticket',
+      title: 'Q2 support ticket themes — weekly digest',
+      date: '2026-05-08',
+      score: 0.88,
       snippet:
-        '“Ordered a patio set, arrived two weeks late and one box was ' +
-        'missing.” Shipping sentiment fell from 4.1 to 3.4 stars in the West.',
+        'Delivery delays dominated inbound volume in April–May, especially for ' +
+        'West-region ZIP codes after the carrier switch.',
+    },
+    {
+      n: 3,
+      doc_id: 'REVIEW-9931',
+      source_type: 'review',
+      title: 'Product review sentiment — shipping',
+      date: '2026-05-19',
       score: 0.79,
-      uri: '#',
+      snippet:
+        'Shipping sentiment fell from 4.1 to 3.4 stars in the West region.',
     },
   ],
   caveats: [
@@ -143,7 +194,7 @@ LIMIT 1000;`,
   ],
 };
 
-/** Turn the flagship envelope into an ordered SSE event sequence for streaming. */
+/** Turn an envelope into the ordered SSE event sequence the backend emits. */
 export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   const events: AskStreamEvent[] = [];
   events.push({
@@ -156,15 +207,25 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
       data: { route: envelope.route, confidence: envelope.confidence },
     });
   }
-  // Chunk the narrative into word groups to simulate token streaming.
   const words = envelope.answer.split(' ');
   for (let i = 0; i < words.length; i += 3) {
     const chunk = words.slice(i, i + 3).join(' ');
-    events.push({ type: 'token', data: { text: chunk + (i + 3 < words.length ? ' ' : '') } });
+    events.push({
+      type: 'token',
+      data: { text: chunk + (i + 3 < words.length ? ' ' : '') },
+    });
   }
-  if (envelope.sql) {
-    events.push({ type: 'sql', data: { sql: envelope.sql, dialect: envelope.dialect ?? 'postgres' } });
+  if (envelope.sql.length) {
+    events.push({
+      type: 'sql',
+      data: {
+        // The live stream sends one frame with statements joined by ";\n\n".
+        sql: envelope.sql.join(';\n\n'),
+        dialect: envelope.dialect ?? 'postgres',
+      },
+    });
   }
+  // One frame per table — the client must accumulate, not overwrite.
   for (const table of envelope.tables) {
     events.push({ type: 'tables', data: table });
   }
@@ -172,21 +233,27 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
     events.push({ type: 'citations', data: { items: envelope.citations } });
   }
   if (envelope.chart_spec) {
-    events.push({ type: 'chart', data: { chart_spec: envelope.chart_spec } });
+    events.push({
+      type: 'chart',
+      data: { chart_spec: envelope.chart_spec, raw: envelope.chart_spec },
+    });
   }
   if (envelope.caveats.length) {
     events.push({ type: 'caveats', data: { items: envelope.caveats } });
   }
   events.push({
     type: 'done',
-    data: { message_id: `m_${Date.now()}`, usage: { latency_ms: 3120, tokens: { in: 1840, out: 260 } } },
+    data: {
+      message_id: `m_${Date.now()}`,
+      usage: { latency_ms: 3120, confidence: envelope.confidence },
+    },
   });
   return events;
 }
 
-/** A generic fallback envelope for questions other than the flagship one. */
+/** A topic-matched fallback envelope for questions other than the flagship one. */
 export function mockEnvelopeFor(question: string): AnswerEnvelope {
-  if (/restock|inventory|reorder/i.test(question)) {
+  if (/restock|inventory|reorder|stock/i.test(question)) {
     return {
       answer:
         'Nine SKUs are at elevated stock-out risk within their lead time. The ' +
@@ -195,18 +262,16 @@ export function mockEnvelopeFor(question: string): AnswerEnvelope {
         'reorders for the Tools and Footwear categories, which together hold ' +
         'seven of the nine flagged items.',
       route: 'structured',
-      confidence: 0.82,
+      confidence: 'high',
       dialect: 'postgres',
-      sql: `SELECT p.sku, p.name, i.on_hand, m.avg_daily_units,
-       (i.on_hand / NULLIF(m.avg_daily_units,0)) AS days_of_cover,
-       s.lead_time_days
+      sql: [
+        `SELECT p.sku, p.name, i.on_hand, s.lead_time_days
 FROM marts.fct_inventory i
 JOIN marts.dim_product p ON p.product_key = i.product_key
-JOIN marts.mart_sell_through m ON m.product_key = i.product_key
 JOIN marts.dim_supplier s ON s.supplier_key = p.supplier_key
-WHERE (i.on_hand / NULLIF(m.avg_daily_units,0)) < s.lead_time_days
-ORDER BY days_of_cover ASC
-LIMIT 1000;`,
+ORDER BY i.on_hand ASC
+LIMIT 1000`,
+      ],
       chart_spec: {
         kind: 'bar',
         title: 'Days of cover vs. lead time (at-risk SKUs)',
@@ -224,7 +289,9 @@ LIMIT 1000;`,
       },
       tables: [],
       citations: [],
-      caveats: ['Lead times use the supplier default where a SKU-specific value is missing.'],
+      caveats: [
+        'Lead times use the supplier default where a SKU-specific value is missing.',
+      ],
     };
   }
   if (/complaint|sentiment|voice|review/i.test(question)) {
@@ -232,14 +299,15 @@ LIMIT 1000;`,
       answer:
         'This month’s complaints cluster into three themes: delivery delays ' +
         '(38% of negative contacts), missing or damaged items (24%), and ' +
-        'sizing inaccuracy in apparel (17%). Delivery is both the largest and ' +
-        'the fastest-growing theme, up 41% versus last month.',
+        'sizing inaccuracy in apparel (17%) [1]. Delivery is both the largest ' +
+        'and the fastest-growing theme, up 41% versus last month [2].',
       route: 'unstructured',
-      confidence: 0.8,
-      sql: null,
+      confidence: 'medium',
+      sql: [],
       chart_spec: {
         kind: 'pie',
         title: 'Complaint themes (share of negative contacts)',
+        x: 'theme',
         series: [{ y: 'share', label: 'Share' }],
         options: { nameKey: 'theme', valueKey: 'share' },
         data: [
@@ -251,11 +319,16 @@ LIMIT 1000;`,
         ],
       },
       tables: [],
-      citations: FLAGSHIP_ENVELOPE.citations.slice(0, 2),
-      caveats: ['Themes are derived from clustering; a contact can map to one primary theme only.'],
+      citations: FLAGSHIP_ENVELOPE.citations.slice(1, 3).map((c, i) => ({
+        ...c,
+        n: i + 1,
+      })),
+      caveats: [
+        'Themes are derived from clustering; a contact maps to one primary theme only.',
+      ],
     };
   }
-  return { ...FLAGSHIP_ENVELOPE, answer: FLAGSHIP_ENVELOPE.answer };
+  return { ...FLAGSHIP_ENVELOPE };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -268,7 +341,7 @@ export const MOCK_CONVERSATIONS: ConversationSummary[] = [
     title: 'Why did sales decline last quarter?',
     created_at: '2026-08-24T09:12:00Z',
     updated_at: '2026-08-24T09:14:00Z',
-    message_count: 1,
+    message_count: 2,
   },
   {
     id: 'c_2',
@@ -282,15 +355,17 @@ export const MOCK_CONVERSATIONS: ConversationSummary[] = [
     title: 'Summarize customer complaints this month',
     created_at: '2026-08-20T11:05:00Z',
     updated_at: '2026-08-20T11:06:00Z',
-    message_count: 1,
+    message_count: 2,
   },
 ];
 
 export function mockConversation(id: string): Conversation {
-  const summary = MOCK_CONVERSATIONS.find((c) => c.id === id) ?? MOCK_CONVERSATIONS[0]!;
+  const summary =
+    MOCK_CONVERSATIONS.find((c) => c.id === id) ?? MOCK_CONVERSATIONS[0]!;
   return {
     id: summary.id,
     title: summary.title,
+    created_at: summary.created_at,
     turns: [
       {
         id: 'm_1',
@@ -307,70 +382,109 @@ export function mockConversation(id: string): Conversation {
 /* Governed metrics + dashboard                                               */
 /* -------------------------------------------------------------------------- */
 
-export const MOCK_METRICS: MetricDef[] = [
-  { key: 'revenue', label: 'Revenue', description: 'Net revenue after returns.', unit: 'currency', grain: ['order_date__month', 'region', 'category'], default_agg: 'sum' },
-  { key: 'orders', label: 'Orders', description: 'Distinct completed orders.', unit: 'count', grain: ['order_date__month', 'region', 'category'], default_agg: 'count' },
-  { key: 'aov', label: 'Average order value', description: 'Revenue per order.', unit: 'currency', grain: ['order_date__month', 'region'], default_agg: 'avg' },
-  { key: 'return_rate', label: 'Return rate', description: 'Returned orders / total orders.', unit: 'ratio', grain: ['order_date__month', 'category'], default_agg: 'ratio' },
-];
-
-const KPI_SUMMARIES: Record<string, MetricResult['summary']> = {
-  revenue: { value: 3680000, unit: 'currency', delta_pct: -0.124, previous: 4201000 },
-  orders: { value: 26240, unit: 'count', delta_pct: -0.11, previous: 29480 },
-  aov: { value: 129, unit: 'currency', delta_pct: -0.015, previous: 131 },
-  return_rate: { value: 0.068, unit: 'ratio', delta_pct: 0.009, previous: 0.059 },
+export const MOCK_CATALOG: MetricsCatalog = {
+  metrics: [
+    { key: 'revenue', label: 'Revenue', description: 'Net revenue after returns.', unit: 'currency', grain: ['date', 'region', 'category', 'product'], default_agg: 'sum' },
+    { key: 'orders', label: 'Orders', description: 'Distinct completed orders.', unit: 'count', grain: ['date', 'region', 'category'], default_agg: 'count' },
+    { key: 'avg_order_value', label: 'Average order value', description: 'Revenue per order.', unit: 'currency', grain: ['date', 'region'], default_agg: 'avg' },
+    { key: 'return_rate', label: 'Return rate', description: 'Returned units / total units.', unit: 'ratio', grain: ['date', 'category'], default_agg: 'ratio' },
+    { key: 'units_on_hand', label: 'Units on hand', description: 'Latest inventory snapshot.', unit: 'count', grain: ['date', 'product', 'category'], default_agg: 'sum' },
+  ],
+  dimensions: [
+    { key: 'date', grains: ['day', 'week', 'month', 'quarter', 'year'], is_date: true },
+    { key: 'region', grains: [], is_date: false },
+    { key: 'category', grains: [], is_date: false },
+    { key: 'product', grains: [], is_date: false },
+    { key: 'channel', grains: [], is_date: false },
+  ],
 };
 
-export function mockMetricResult(metric: string): MetricResult {
-  const summary = KPI_SUMMARIES[metric];
-  const isTrend = metric === 'revenue' || metric === 'orders';
+const MOCK_TOTALS: Record<string, number> = {
+  revenue: 3680000,
+  orders: 26240,
+  avg_order_value: 129,
+  return_rate: 0.068,
+  units_on_hand: 41820,
+};
+
+const MOCK_BY_PRODUCT: Array<[string, number, number]> = [
+  // [product, revenue, units_on_hand]
+  ['Wireless Earbuds Pro', 412000, 180],
+  ['Ceramic Dutch Oven', 356000, 240],
+  ['4K Streaming Stick', 298000, 96],
+  ['Trail Running Shoe', 264000, 310],
+  ['Cordless Drill 18V', 231000, 64],
+  ['Patio Umbrella XL', 41000, 420],
+];
+
+const MOCK_BY_REGION: Array<[string, number]> = [
+  ['North', 1024000],
+  ['South', 986000],
+  ['East', 902000],
+  ['West', 768000],
+];
+
+/** Builds a `MetricResult` that honours dimensions, ordering, and limits. */
+export function mockMetricResult(query: MetricQuery): MetricResult {
+  const metric = query.metric;
+  const unitDtype =
+    metric === 'return_rate'
+      ? ('ratio' as const)
+      : metric === 'revenue' || metric === 'avg_order_value'
+        ? ('currency' as const)
+        : ('number' as const);
+  const dimension = query.dimensions?.[0];
+  // Mock filters shift the totals so the dashboard visibly reacts to controls.
+  const scale = query.filters?.length ? 0.4 : 1;
+
+  let rows: Cell[][];
+  let columns: ColumnSpec[] = [{ name: metric, dtype: unitDtype }];
+
+  if (!dimension) {
+    rows = [[round(MOCK_TOTALS[metric] ?? 0, scale, metric)]];
+  } else if (dimension === 'date') {
+    columns = [{ name: 'date', dtype: 'string' as const }, ...columns];
+    rows = REVENUE_TREND.map((r) => [
+      r.month,
+      round(metric === 'orders' ? r.orders : r.revenue, scale, metric),
+    ]);
+  } else if (dimension === 'region') {
+    columns = [{ name: 'region', dtype: 'string' as const }, ...columns];
+    rows = MOCK_BY_REGION.map(([name, value]) => [name, round(value, scale, metric)]);
+  } else {
+    columns = [{ name: dimension, dtype: 'string' as const }, ...columns];
+    rows = MOCK_BY_PRODUCT.map(([name, revenue, onHand]) => [
+      name,
+      round(metric === 'units_on_hand' ? onHand : revenue, scale, metric),
+    ]);
+  }
+
+  if (query.order_by_metric && rows.length > 1) {
+    const valueIndex = columns.length - 1;
+    rows = [...rows].sort((a, b) => {
+      const av = Number(a[valueIndex] ?? 0);
+      const bv = Number(b[valueIndex] ?? 0);
+      return query.order_by_metric === 'asc' ? av - bv : bv - av;
+    });
+  }
+  const truncated = typeof query.limit === 'number' && rows.length > query.limit;
+  if (truncated) rows = rows.slice(0, query.limit);
+
   return {
-    columns: [
-      { name: 'month', dtype: 'string' },
-      { name: metric, dtype: metric === 'return_rate' ? 'ratio' : metric === 'orders' ? 'number' : 'currency' },
-    ],
-    rows: isTrend
-      ? REVENUE_TREND.map((r) => [r.month, metric === 'orders' ? r.orders : r.revenue])
-      : [],
-    sql: `SELECT date_trunc('month', order_date) AS month, ${metric === 'return_rate' ? 'SUM(returned)::float/COUNT(*)' : metric === 'orders' ? 'COUNT(DISTINCT order_id)' : 'SUM(net_revenue)'} AS ${metric}\nFROM marts.fct_orders\nWHERE order_date >= date '2026-01-01'\nGROUP BY 1 ORDER BY 1;`,
-    row_count: isTrend ? REVENUE_TREND.length : 0,
-    truncated: false,
-    summary,
+    columns,
+    rows,
+    sql: `SELECT ${dimension ? `${dimension}, ` : ''}${metric}\nFROM marts.metric_${metric}\n${
+      query.time_range ? `WHERE date BETWEEN '${query.time_range.start}' AND '${query.time_range.end}'\n` : ''
+    }${query.order_by_metric ? `ORDER BY ${metric} ${query.order_by_metric.toUpperCase()}\n` : ''}LIMIT ${query.limit ?? 1000}`,
+    row_count: rows.length,
+    truncated,
   };
 }
 
-export const MOCK_TREND_DATA = REVENUE_TREND;
-
-export const MOCK_TOP_PRODUCTS = [
-  { name: 'Wireless Earbuds Pro', revenue: 412000 },
-  { name: 'Ceramic Dutch Oven', revenue: 356000 },
-  { name: '4K Streaming Stick', revenue: 298000 },
-  { name: 'Trail Running Shoe', revenue: 264000 },
-  { name: 'Cordless Drill 18V', revenue: 231000 },
-];
-
-export const MOCK_BOTTOM_PRODUCTS = [
-  { name: 'Patio Umbrella XL', revenue: 41000 },
-  { name: 'Garden Hose 50ft', revenue: 38000 },
-  { name: 'Bird Feeder Deluxe', revenue: 22000 },
-];
-
-export interface AtRiskRow {
-  sku: string;
-  name: string;
-  category: string;
-  days_of_cover: number;
-  lead_time_days: number;
-  severity: 'high' | 'medium' | 'low';
+function round(value: number, scale: number, metric: string): number {
+  const scaled = value * scale;
+  return metric === 'return_rate' ? Number(scaled.toFixed(4)) : Math.round(scaled);
 }
-
-export const MOCK_AT_RISK: AtRiskRow[] = [
-  { sku: 'TL-DR18', name: 'Cordless Drill 18V', category: 'Tools', days_of_cover: 6, lead_time_days: 11, severity: 'high' },
-  { sku: 'FW-TRS9', name: 'Trail Running Shoe', category: 'Footwear', days_of_cover: 8, lead_time_days: 10, severity: 'high' },
-  { sku: 'HK-DO55', name: 'Ceramic Dutch Oven', category: 'Home & Kitchen', days_of_cover: 9, lead_time_days: 12, severity: 'medium' },
-  { sku: 'EL-EBP2', name: 'Wireless Earbuds Pro', category: 'Electronics', days_of_cover: 10, lead_time_days: 14, severity: 'medium' },
-  { sku: 'OG-PU01', name: 'Patio Umbrella XL', category: 'Outdoor & Garden', days_of_cover: 13, lead_time_days: 15, severity: 'low' },
-];
 
 /* -------------------------------------------------------------------------- */
 /* Pipelines                                                                  */
@@ -378,29 +492,35 @@ export const MOCK_AT_RISK: AtRiskRow[] = [
 
 export const MOCK_PIPELINES: Pipeline[] = [
   {
-    name: 'warehouse_elt',
-    description: 'Land raw sources, run dbt transforms to the star schema and semantic marts.',
+    name: 'full_ingest',
+    description: 'Full reload of every registered source into the raw layer.',
     schedule: '0 */6 * * *',
-    last_run: { id: 'r_1001', status: 'success', started_at: '2026-08-24T06:00:00Z', finished_at: '2026-08-24T06:04:12Z' },
+    last_run: { id: 'r_1001', pipeline: 'full_ingest', status: 'success', started_at: '2026-08-24T06:00:00Z', finished_at: '2026-08-24T06:04:12Z' },
   },
   {
-    name: 'document_index',
-    description: 'Chunk, embed, and index tickets/reviews/reports into the vector store.',
+    name: 'reindex_docs',
+    description: 'Chunk, embed, and index tickets, reviews, and reports.',
     schedule: '0 */12 * * *',
-    last_run: { id: 'r_1002', status: 'partial', started_at: '2026-08-24T00:00:00Z', finished_at: '2026-08-24T00:09:41Z' },
+    last_run: { id: 'r_1002', pipeline: 'reindex_docs', status: 'partial', started_at: '2026-08-24T00:00:00Z', finished_at: '2026-08-24T00:09:41Z' },
   },
   {
-    name: 'metrics_refresh',
-    description: 'Recompute rollups feeding the governed metric layer.',
+    name: 'incremental_sync',
+    description: 'Pull only rows changed since the last successful run.',
+    schedule: '*/30 * * * *',
+    last_run: { id: 'r_1004', pipeline: 'incremental_sync', status: 'success', started_at: '2026-08-24T09:30:00Z', finished_at: '2026-08-24T09:30:48Z' },
+  },
+  {
+    name: 'dbt_build',
+    description: 'Run dbt transforms into the star schema and semantic marts.',
     schedule: null,
-    last_run: { id: 'r_1003', status: 'running', started_at: '2026-08-24T09:10:00Z', finished_at: null },
+    last_run: { id: 'r_1003', pipeline: 'dbt_build', status: 'running', started_at: '2026-08-24T09:10:00Z', finished_at: null },
   },
 ];
 
 export const MOCK_RUNS: PipelineRun[] = [
   {
     id: 'r_1001',
-    pipeline: 'warehouse_elt',
+    pipeline: 'full_ingest',
     status: 'success',
     trigger: 'scheduled',
     started_at: '2026-08-24T06:00:00Z',
@@ -416,7 +536,7 @@ export const MOCK_RUNS: PipelineRun[] = [
   },
   {
     id: 'r_1002',
-    pipeline: 'document_index',
+    pipeline: 'reindex_docs',
     status: 'partial',
     trigger: 'scheduled',
     started_at: '2026-08-24T00:00:00Z',
@@ -427,12 +547,12 @@ export const MOCK_RUNS: PipelineRun[] = [
       { name: 'fetch_documents', rows_in: 0, rows_out: 4210, ms: 22100 },
       { name: 'chunk', rows_in: 4210, rows_out: 18640, ms: 31400 },
       { name: 'embed', rows_in: 18640, rows_out: 18102, ms: 168000, error: '538 chunks failed embedding' },
-      { name: 'upsert_qdrant', rows_in: 18102, rows_out: 18102, ms: 24200 },
+      { name: 'upsert_index', rows_in: 18102, rows_out: 18102, ms: 24200 },
     ],
   },
   {
     id: 'r_1003',
-    pipeline: 'metrics_refresh',
+    pipeline: 'dbt_build',
     status: 'running',
     trigger: 'manual',
     started_at: '2026-08-24T09:10:00Z',
@@ -443,7 +563,7 @@ export const MOCK_RUNS: PipelineRun[] = [
   },
   {
     id: 'r_0999',
-    pipeline: 'warehouse_elt',
+    pipeline: 'full_ingest',
     status: 'failed',
     trigger: 'scheduled',
     started_at: '2026-08-24T00:00:00Z',
@@ -459,16 +579,37 @@ export function mockRun(id: string): PipelineRun {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Sources                                                                    */
+/* Sources (mutable so the register/delete flows are exercised in mock mode)  */
 /* -------------------------------------------------------------------------- */
 
-export const MOCK_SOURCES: Source[] = [
+let mockSources: Source[] = [
   { id: 's_1', name: 'orders_pg', kind: 'postgres', status: 'ok', last_tested_at: '2026-08-24T06:00:00Z' },
   { id: 's_2', name: 'catalog_csv', kind: 'csv', status: 'ok', last_tested_at: '2026-08-23T18:00:00Z' },
   { id: 's_3', name: 'support_tickets', kind: 'documents', status: 'ok', last_tested_at: '2026-08-24T00:00:00Z' },
   { id: 's_4', name: 'legacy_mysql', kind: 'mysql', status: 'error', last_tested_at: '2026-08-20T12:00:00Z' },
   { id: 's_5', name: 'reviews_export', kind: 'excel', status: 'untested', last_tested_at: null },
 ];
+
+export function listMockSources(): Source[] {
+  return [...mockSources];
+}
+
+export function addMockSource(config: SourceConfig): Source {
+  const source: Source = {
+    id: `s_${Date.now()}`,
+    name: config.name,
+    kind: config.kind,
+    status: 'untested',
+    last_tested_at: null,
+    active: true,
+  };
+  mockSources = [...mockSources, source];
+  return source;
+}
+
+export function removeMockSource(id: string): void {
+  mockSources = mockSources.filter((s) => s.id !== id);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Reports                                                                    */
@@ -480,17 +621,28 @@ export const MOCK_REPORTS: ReportSummary[] = [
   { id: 'rep_3', title: 'Voice of Customer — August', status: 'generating', created_at: '2026-08-24T09:15:00Z' },
 ];
 
+export function addMockReport(body: ReportRequest): string {
+  const id = `rep_${Date.now()}`;
+  MOCK_REPORTS.unshift({
+    id,
+    title: body.title,
+    status: 'ready',
+    created_at: new Date().toISOString(),
+  });
+  return id;
+}
+
 export function mockReport(id: string): Report {
   const summary = MOCK_REPORTS.find((r) => r.id === id) ?? MOCK_REPORTS[0]!;
   return {
     id: summary.id,
-    status: summary.status === 'generating' ? 'generating' : 'ready',
+    status: summary.status,
     title: summary.title,
     period: { grain: 'quarter', start: '2026-04-01', end: '2026-06-30' },
     created_at: summary.created_at,
     blocks: [
       {
-        id: 'b_kpi',
+        id: `${summary.id}_b0`,
         heading: 'Headline metrics',
         prose:
           'Revenue for the period was $3.68M, down 12.4% versus the prior ' +
@@ -498,29 +650,40 @@ export function mockReport(id: string): Report {
           'flat, indicating a volume-driven decline rather than a pricing or ' +
           'basket-size effect.',
         chart_spec: FLAGSHIP_ENVELOPE.chart_spec,
+        citations: [],
       },
       {
-        id: 'b_sales',
+        id: `${summary.id}_b1`,
         heading: 'Sales decomposition',
         prose:
           'Two-thirds of the shortfall traces to Outdoor & Garden, where the ' +
-          'Q1 seasonal promotion was not repeated. The West region ' +
+          'Q1 seasonal promotion was not repeated [1]. The West region ' +
           'underperformed by 15%, coinciding with elevated delivery-delay ' +
-          'complaints after an April carrier change.',
+          'complaints after an April carrier change [2].',
+        chart_spec: null,
         citations: FLAGSHIP_ENVELOPE.citations,
       },
       {
-        id: 'b_voc',
+        id: `${summary.id}_b2`,
         heading: 'Voice of customer',
         prose:
           'Shipping-related complaints rose 41% quarter-over-quarter, ' +
           'concentrated in the West. Sentiment on delivery fell from 4.1 to ' +
-          '3.4 stars. Resolving the carrier issue is the single highest-' +
-          'leverage action for Q3 recovery.',
-        citations: FLAGSHIP_ENVELOPE.citations.slice(0, 2),
+          '3.4 stars.',
+        chart_spec: null,
+        citations: FLAGSHIP_ENVELOPE.citations.slice(1, 3),
       },
     ],
   };
+}
+
+/** Stand-in for the server-rendered export so the download flow is testable. */
+export function mockReportMarkdown(id: string): string {
+  const report = mockReport(id);
+  const blocks = report.blocks
+    .map((block) => `## ${block.heading}\n\n${block.prose}\n`)
+    .join('\n');
+  return `# ${report.title}\n\n_${report.period.start} — ${report.period.end}_\n\n${blocks}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -529,13 +692,21 @@ export function mockReport(id: string): Report {
 
 export const MOCK_STATUS: SystemStatus = {
   status: 'ok',
+  version: '0.1.0',
+  uptime_s: 4820,
   services: {
     postgres: { status: 'ok', latency_ms: 4 },
-    qdrant: { status: 'ok', latency_ms: 11 },
+    vector_index: { status: 'ok', latency_ms: 11 },
     worker: { status: 'ok', latency_ms: 2 },
-    llm_provider: { status: 'ok', latency_ms: 320 },
+    llm: { status: 'ok', latency_ms: 320 },
   },
-  warehouse: { marts_rows: 91240, last_dbt_run: '2026-08-24T06:04:12Z' },
-  index: { collection_size: 18102, last_index: '2026-08-24T00:09:41Z' },
+  warehouse: [
+    { label: 'Marts rows', value: '91,240' },
+    { label: 'Last dbt run', value: '2026-08-24T06:04:12Z' },
+  ],
+  index: [
+    { label: 'Collection size', value: '18,102' },
+    { label: 'Last index', value: '2026-08-24T00:09:41Z' },
+  ],
   llm: { provider: 'ollama', model: 'llama3.1:8b', reachable: true },
 };

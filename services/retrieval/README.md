@@ -76,7 +76,9 @@ uv pip install pytest ruff     # dev tooling
 
 ```bash
 insight-retrieval setup                         # create the `documents` collection
-insight-retrieval index                         # index the built-in sample corpus
+insight-retrieval index                         # index the ingestion corpus, changed-only
+insight-retrieval index --full                  # re-embed every document
+insight-retrieval index --samples               # index the built-in demo corpus instead
 insight-retrieval index path/to/docs/           # index a folder of JSON files
 insight-retrieval index docs.json               # index one JSON file (object or list)
 insight-retrieval search "why are North electronics deliveries late?"
@@ -84,17 +86,34 @@ insight-retrieval eval                          # golden-set scoreboard (RRF vs 
 insight-retrieval status                         # collection point count
 ```
 
-(Also runnable as `python -m retrieval.cli ...`.) Input JSON matches
-`services/api/app/fixtures/retail.py::get_sample_documents`; each object needs
-`doc_id`, `source_type`, `title`, `body`, and optionally `date`/`created_at`,
-`region`, `category`, `product_ref`, `order_ref`, `author_role`, `channel`.
+(Also runnable as `python -m retrieval.cli ...`.)
+
+With no path, `index` reads the corpus `services/ingestion` publishes to
+`data/ingested/documents.json` and re-embeds only the documents whose content
+hash changed since the last successful run, deleting the chunks of any document
+that vanished from the corpus. State lives in `.index_state.json` beside the
+corpus, keyed by collection name. `--samples` is an **explicit** fallback: a
+missing corpus is an error, because quietly indexing six demo documents looks
+exactly like success.
+
+Input JSON is tolerant of producer spellings — `retrieval/schema.py` maps
+`doc_type`/`source_type`, `created_ts`/`date`/`created_at`,
+`product_sku`/`product_id`/`product_ref`, and normalizes `author_role` onto the
+closed `customer | agent | manager` enum. Each object needs `doc_id`, a type,
+and a `title`/`body`; `region`, `category`, `order_ref`, and `channel` are
+carried through as filter metadata.
 
 ## Evaluation
 
-`insight-retrieval eval` scores a golden `question → expected-doc(s)` set against
-the live index, reporting **Recall@1 / Recall@3 / MRR** with reranking off vs.
-on (rerank lift), and fails if reranked Recall@3 falls below the floor. Needs
-live Qdrant + Ollama. See `retrieval/eval.py`.
+`insight-retrieval eval` scores a golden set against the live index, reporting
+**Recall@1 / Recall@3 / MRR** with reranking off vs. on (rerank lift), and fails
+if reranked Recall@3 falls below the floor. Needs live Qdrant + Ollama, and an
+index built from the corpus being scored.
+
+There are two golden sets, matching the two indexable corpora: the default
+scores the **generated corpus**, judging a hit by its `region`/`category`
+metadata since that corpus's document ids are sequential and carry no meaning;
+`--samples` scores the six built-in demo documents by id. See `retrieval/eval.py`.
 
 ## Tests
 
@@ -131,6 +150,8 @@ services/retrieval/
     sample_docs.py         # small runnable corpus (planted North-electronics story)
     eval.py                # Recall@1/@3 + MRR golden-set harness
     cli.py                 # setup / index / search / eval / status
+    schema.py              # THE canonical document schema + normalizer
+    corpus.py              # corpus loading + changed-only index state
   tests/                   # offline unit tests + gated live integration test
 ```
 

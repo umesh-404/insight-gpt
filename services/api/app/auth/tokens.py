@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 log = logging.getLogger("insightgpt.auth")
 
@@ -88,7 +88,12 @@ def decode_token(token: str, *, expected_type: str = "access") -> TokenClaims:
         raise TokenError("token has expired") from exc
     except jwt.InvalidTokenError as exc:
         raise TokenError("token is invalid") from exc
-    claims = TokenClaims(**raw)
+    try:
+        claims = TokenClaims(**raw)
+    except ValidationError as exc:
+        # A correctly signed but structurally wrong token (missing claim, an
+        # unknown role) is still an auth failure, not a server error.
+        raise TokenError("token claims are malformed") from exc
     if claims.typ != expected_type:
         raise TokenError(f"expected a {expected_type} token, got {claims.typ!r}")
     return claims

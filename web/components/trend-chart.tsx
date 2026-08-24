@@ -7,12 +7,12 @@ import type { ChartSpec } from '@/lib/types';
 
 interface TrendChartProps {
   title: string;
-  spec?: ChartSpec;
+  spec?: ChartSpec | null;
   loading?: boolean;
   height?: number;
 }
 
-/** Card-wrapped line/area time series driven by a ChartSpec (docs/07 §5). */
+/** Card-wrapped time series driven by a ChartSpec. */
 export function TrendChart({ title, spec, loading, height = 260 }: TrendChartProps) {
   return (
     <Card>
@@ -20,10 +20,17 @@ export function TrendChart({ title, spec, loading, height = 260 }: TrendChartPro
         <CardTitle className="text-base">{title}</CardTitle>
       </CardHeader>
       <CardContent>
-        {loading || !spec ? (
+        {loading ? (
           <Skeleton className="h-[260px] w-full" />
-        ) : (
+        ) : spec ? (
           <ChartRenderer spec={spec} height={height} />
+        ) : (
+          <div
+            className="flex items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground"
+            style={{ height }}
+          >
+            No data for the selected range.
+          </div>
         )}
       </CardContent>
     </Card>

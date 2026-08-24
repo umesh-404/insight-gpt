@@ -56,9 +56,11 @@ COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3
 COPY --from=build /usr/local/bin /usr/local/bin
 COPY --from=build /app /app
 
-# data/generated is written at runtime by the seed step; keep it writable.
+# data/generated (seed output) and data/ingested (the document corpus handed to
+# retrieval) are written at runtime and are compose volume mount points. Create
+# them here so the named volumes inherit appuser ownership rather than root's.
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /app/data/generated \
+    && mkdir -p /app/data/generated /app/data/ingested \
     && chown -R appuser:appuser /app
 USER appuser
 

@@ -1,12 +1,23 @@
 # InsightGPT — full-stack Docker Compose topology (docs/09-deployment.md §1).
 #
 # Six services on a private network. Only `web` and `api` publish ports to the
-# host; postgres/qdrant/ollama/worker are internal-only. Bring the stack up from
-# the REPO ROOT so the root .env and the build contexts resolve:
+# host; postgres/qdrant/ollama/worker are internal-only.
 #
-#   docker compose --env-file .env -f docker/compose.yml up --build
+# HOW TO BRING THIS UP
+# --------------------
+# Use one of these, both from the REPO ROOT:
 #
-# (the Makefile wraps this). First run then needs a one-time bootstrap:
+#   make up                                   # recommended
+#   docker compose up --build                 # via the root compose.yaml
+#
+# Do NOT run `docker compose -f docker/compose.yml up` directly. Compose takes
+# its PROJECT DIRECTORY from the first -f file, so that form looks for a .env in
+# docker/, never finds the root one, and every ${VAR:-default} below silently
+# falls back to its default — you would get LLM_PROVIDER=ollama no matter what
+# your .env says. The root compose.yaml exists precisely so the plain command
+# works; the Makefile passes `--env-file .env` explicitly for the same reason.
+#
+# First run then needs a one-time bootstrap:
 #
 #   make bootstrap
 #
@@ -85,6 +96,11 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      # Cloud keys for the OpenAI-compatible providers. Blank unless
+      # LLM_PROVIDER names one; without them `LLM_PROVIDER=openai` (or `groq`)
+      # fails at request time because the key never reaches the container.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
       WAREHOUSE: ${WAREHOUSE:-postgres}
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://insight:insight@postgres:5432/insight}
       RETRIEVER: ${RETRIEVER:-qdrant}
@@ -133,8 +149,24 @@ services:
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       RERANK_MODEL: ${RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:F16}
+      # reindex_docs reads the corpus services/ingestion publishes. "samples"
+      # switches it to the built-in demo set (explicit fallback only).
+      REINDEX_SOURCE: ${REINDEX_SOURCE:-ingested}
+      # One variable relocates all three sides of the hand-off: ingestion writes
+      # here, the reindex job reads here, the retrieval CLI defaults to here.
+      DOCUMENT_CORPUS_PATH: ${DOCUMENT_CORPUS_PATH:-/app/data/ingested/documents.json}
       INSIGHT_REFERENCE_DATE: ${TODAY:-2026-07-15}
       TODAY: ${TODAY:-2026-07-15}
+    volumes:
+      # The generator's output and the published document corpus must OUTLIVE the
+      # container that produced them: `make bootstrap` / `make seed` run in a
+      # throwaway `compose run --rm worker`, while the scheduler that reindexes
+      # from the corpus is the long-running worker service. Without these volumes
+      # the scheduled reindex_docs would never find a corpus to index.
+      # Mounted at the two OUTPUT directories, not at /app/data, so the baked-in
+      # `data/generator` package stays visible.
+      - generated_data:/app/data/generated
+      - ingested_data:/app/data/ingested
     healthcheck:
       # The worker serves GET /health on 8090 (internal only).
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8090/health', timeout=4).status==200 else 1)"]
@@ -166,3 +198,5 @@ volumes:
   pgdata:
   qdrant_storage:
   ollama_models:
+  generated_data:   # synthetic CSVs + document JSON written by scripts/seed.py
+  ingested_data:    # the redacted document corpus handed to retrieval

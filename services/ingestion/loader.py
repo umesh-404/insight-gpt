@@ -181,6 +181,17 @@ class RawLoader:
                 fq, sql.SQL(", ").join(col_defs)
             )
         )
+        # A source that GAINED a column would otherwise fail every load from now
+        # on ("column does not exist") — which is exactly the case docs/03 §3.3
+        # says a full ingest recovers from. Raw is a landing zone: widen it.
+        # Columns are only added, never dropped, so an older column keeps its
+        # history and staging decides what to read.
+        for col in cols:
+            con.execute(
+                sql.SQL("ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} text").format(
+                    fq, sql.Identifier(col)
+                )
+            )
 
     def _stored_fingerprint(self, con, source: str, unit_id: str) -> str | None:
         from psycopg import sql

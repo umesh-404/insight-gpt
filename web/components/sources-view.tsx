@@ -8,17 +8,14 @@ import {
   Loader2,
   Lock,
   Plug,
+  Plus,
   Server,
+  Trash2,
 } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusBadge } from '@/components/status-badge';
-import { EmptyState, ErrorState } from '@/components/states';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { describeError, EmptyState, ErrorState } from '@/components/states';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -34,36 +31,109 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useToast } from '@/components/ui/toast';
-import { useSources, useTestSource } from '@/lib/hooks';
+import {
+  useCreateSource,
+  useDeleteSource,
+  useSources,
+  useTestSource,
+} from '@/lib/hooks';
 import { useAuth } from '@/lib/auth';
 import { formatDateTime } from '@/lib/utils';
-import type { SourceKind } from '@/lib/types';
+import { SOURCE_KINDS, type SourceKind } from '@/lib/types';
 
 const KIND_ICON: Record<SourceKind, React.ReactNode> = {
-  postgres: <Database className="size-4" />,
-  mysql: <Server className="size-4" />,
-  csv: <FileSpreadsheet className="size-4" />,
-  excel: <FileSpreadsheet className="size-4" />,
-  documents: <FileText className="size-4" />,
+  postgres: <Database className="size-4" aria-hidden />,
+  mysql: <Server className="size-4" aria-hidden />,
+  csv: <FileSpreadsheet className="size-4" aria-hidden />,
+  excel: <FileSpreadsheet className="size-4" aria-hidden />,
+  documents: <FileText className="size-4" aria-hidden />,
 };
 
-const KIND_OPTIONS = [
-  { value: 'postgres', label: 'PostgreSQL' },
-  { value: 'mysql', label: 'MySQL' },
-  { value: 'csv', label: 'CSV' },
-  { value: 'excel', label: 'Excel' },
-  { value: 'documents', label: 'Documents' },
-];
+const KIND_LABEL: Record<SourceKind, string> = {
+  postgres: 'PostgreSQL',
+  mysql: 'MySQL',
+  csv: 'CSV',
+  excel: 'Excel',
+  documents: 'Documents',
+};
+
+const KIND_OPTIONS = SOURCE_KINDS.map((kind) => ({
+  value: kind,
+  label: KIND_LABEL[kind],
+}));
+
+/** Kinds that need a connection string; file/document kinds do not. */
+const NEEDS_DSN: SourceKind[] = ['postgres', 'mysql'];
 
 export function SourcesView() {
   const { toast } = useToast();
   const { hasRole } = useAuth();
   const sources = useSources();
   const testSource = useTestSource();
+  const createSource = useCreateSource();
+  const deleteSource = useDeleteSource();
   const [name, setName] = React.useState('');
   const [kind, setKind] = React.useState<SourceKind>('postgres');
+  const [dsn, setDsn] = React.useState('');
+  const isAdmin = hasRole('admin');
 
-  if (!hasRole('admin')) {
+  const onTest = (id: string, sourceName: string) => {
+    testSource.mutate(id, {
+      onSuccess: (res) =>
+        toast({
+          title: res.ok ? `${sourceName} reachable` : `${sourceName} failed`,
+          description: `${res.message} · ${res.tables_seen} tables · ${Math.round(res.latency_ms)}ms`,
+          variant: res.ok ? 'success' : 'destructive',
+        }),
+      onError: (err) =>
+        toast({
+          title: `Could not test ${sourceName}`,
+          description: describeError(err),
+          variant: 'destructive',
+        }),
+    });
+  };
+
+  const onDelete = (id: string, sourceName: string) => {
+    deleteSource.mutate(id, {
+      onSuccess: () =>
+        toast({ title: `Removed ${sourceName}`, variant: 'success' }),
+      onError: (err) =>
+        toast({
+          title: `Could not remove ${sourceName}`,
+          description: describeError(err),
+          variant: 'destructive',
+        }),
+    });
+  };
+
+  const onRegister = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    createSource.mutate(
+      { name: trimmed, kind, dsn: dsn.trim() || null },
+      {
+        onSuccess: (source) => {
+          toast({
+            title: `Source “${source.name}” registered`,
+            description: 'Run a connectivity test to verify credentials and schema.',
+            variant: 'success',
+          });
+          setName('');
+          setDsn('');
+        },
+        onError: (err) =>
+          toast({
+            title: 'Could not register the source',
+            description: describeError(err),
+            variant: 'destructive',
+          }),
+      },
+    );
+  };
+
+  if (!isAdmin) {
     return (
       <div className="p-4 sm:p-6">
         <PageHeader title="Data sources" />
@@ -71,37 +141,12 @@ export function SourcesView() {
           <EmptyState
             title="Admins only"
             description="Data-source administration requires the admin role."
-            icon={<Lock className="size-5" />}
+            icon={<Lock className="size-5" aria-hidden />}
           />
         </div>
       </div>
     );
   }
-
-  const onTest = (id: string, sourceName: string) => {
-    testSource.mutate(id, {
-      onSuccess: (res) =>
-        toast({
-          title: res.ok ? `${sourceName} reachable` : `${sourceName} failed`,
-          description: `${res.message} · ${res.tables_seen} tables · ${res.latency_ms}ms`,
-          variant: res.ok ? 'success' : 'destructive',
-        }),
-      onError: () =>
-        toast({ title: `Could not test ${sourceName}`, variant: 'destructive' }),
-    });
-  };
-
-  const onRegister = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    // POST /sources would persist this; the DSN/secret never returns in reads.
-    toast({
-      title: `Source “${name}” registered`,
-      description: 'Run a connectivity test to verify credentials and schema.',
-      variant: 'success',
-    });
-    setName('');
-  };
 
   return (
     <div className="space-y-6 p-4 sm:p-6">
@@ -121,55 +166,86 @@ export function SourcesView() {
             ) : sources.isError ? (
               <ErrorState error={sources.error} onRetry={() => void sources.refetch()} />
             ) : sources.data && sources.data.length ? (
-              <div className="rounded-lg border">
+              <div className="scrollbar-thin overflow-x-auto rounded-lg border">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Kind</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Last tested</TableHead>
-                      <TableHead className="text-right">Action</TableHead>
+                      <TableHead scope="col">Name</TableHead>
+                      <TableHead scope="col">Kind</TableHead>
+                      <TableHead scope="col">Status</TableHead>
+                      <TableHead scope="col">Last tested</TableHead>
+                      <TableHead scope="col" className="text-right">
+                        Actions
+                      </TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {sources.data.map((source) => (
-                      <TableRow key={source.id}>
-                        <TableCell className="font-medium">{source.name}</TableCell>
-                        <TableCell>
-                          <Badge variant="muted" className="gap-1.5 capitalize">
-                            {KIND_ICON[source.kind]}
-                            {source.kind}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge status={source.status} />
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {formatDateTime(source.last_tested_at)}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={testSource.isPending}
-                            onClick={() => onTest(source.id, source.name)}
-                          >
-                            {testSource.isPending && testSource.variables === source.id ? (
-                              <Loader2 className="size-3.5 animate-spin" />
-                            ) : (
-                              <Plug className="size-3.5" />
-                            )}
-                            Test
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {sources.data.map((source) => {
+                      const icon = KIND_ICON[source.kind as SourceKind];
+                      return (
+                        <TableRow key={source.id}>
+                          <TableCell className="font-medium">{source.name}</TableCell>
+                          <TableCell>
+                            <Badge variant="muted" className="gap-1.5 capitalize">
+                              {icon ?? <Database className="size-4" aria-hidden />}
+                              {source.kind}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge status={source.status} />
+                          </TableCell>
+                          <TableCell className="text-muted-foreground">
+                            {formatDateTime(source.last_tested_at)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex justify-end gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={
+                                  testSource.isPending &&
+                                  testSource.variables === source.id
+                                }
+                                onClick={() => onTest(source.id, source.name)}
+                              >
+                                {testSource.isPending &&
+                                testSource.variables === source.id ? (
+                                  <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                                ) : (
+                                  <Plug className="size-3.5" aria-hidden />
+                                )}
+                                Test
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Remove ${source.name}`}
+                                disabled={
+                                  deleteSource.isPending &&
+                                  deleteSource.variables === source.id
+                                }
+                                onClick={() => onDelete(source.id, source.name)}
+                              >
+                                {deleteSource.isPending &&
+                                deleteSource.variables === source.id ? (
+                                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                                ) : (
+                                  <Trash2 className="size-4" aria-hidden />
+                                )}
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                   </TableBody>
                 </Table>
               </div>
             ) : (
-              <EmptyState title="No sources registered" />
+              <EmptyState
+                title="No sources registered"
+                description="Add a connector with the form on the right, then run a connectivity test."
+              />
             )}
           </CardContent>
         </Card>
@@ -187,6 +263,7 @@ export function SourcesView() {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="orders_pg"
+                  maxLength={120}
                   required
                 />
               </div>
@@ -199,20 +276,36 @@ export function SourcesView() {
                   onChange={(e) => setKind(e.target.value as SourceKind)}
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="source-dsn">Connection string</Label>
-                <Input
-                  id="source-dsn"
-                  type="password"
-                  placeholder="postgresql://…"
-                  autoComplete="off"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Stored encrypted and redacted from every read response.
-                </p>
-              </div>
-              <Button type="submit" className="w-full">
-                Register source
+              {NEEDS_DSN.includes(kind) ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="source-dsn">Connection string</Label>
+                  <Input
+                    id="source-dsn"
+                    type="password"
+                    value={dsn}
+                    onChange={(e) => setDsn(e.target.value)}
+                    placeholder="postgresql://…"
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Stored encrypted and redacted from every read response.
+                  </p>
+                </div>
+              ) : null}
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={createSource.isPending || !name.trim()}
+              >
+                {createSource.isPending ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" aria-hidden /> Registering…
+                  </>
+                ) : (
+                  <>
+                    <Plus className="size-4" aria-hidden /> Register source
+                  </>
+                )}
               </Button>
             </form>
           </CardContent>

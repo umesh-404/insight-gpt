@@ -2,7 +2,7 @@ import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
-import type { MetricResult, MetricUnit } from '@/lib/types';
+import type { MetricSummary, MetricUnit } from '@/lib/types';
 
 function formatMetric(value: number, unit: MetricUnit): string {
   switch (unit) {
@@ -19,14 +19,15 @@ function formatMetric(value: number, unit: MetricUnit): string {
 
 export interface StatTileProps {
   label: string;
-  result?: MetricResult;
+  /** Derived client-side from a current + prior-period governed query. */
+  summary?: MetricSummary | null;
   /** For return rate, a rise is bad — invert the color semantics. */
   invertDelta?: boolean;
   loading?: boolean;
 }
 
-export function StatTile({ label, result, invertDelta, loading }: StatTileProps) {
-  if (loading || !result?.summary) {
+export function StatTile({ label, summary, invertDelta, loading }: StatTileProps) {
+  if (loading) {
     return (
       <Card>
         <CardContent className="p-5">
@@ -38,10 +39,26 @@ export function StatTile({ label, result, invertDelta, loading }: StatTileProps)
     );
   }
 
-  const { value, unit, delta_pct } = result.summary;
-  const hasDelta = typeof delta_pct === 'number';
-  const positive = hasDelta ? delta_pct! > 0 : false;
-  const negative = hasDelta ? delta_pct! < 0 : false;
+  // A metric with no rows in the selected window is a real, reportable state —
+  // show it rather than spinning forever.
+  if (!summary) {
+    return (
+      <Card>
+        <CardContent className="p-5">
+          <p className="text-sm font-medium text-muted-foreground">{label}</p>
+          <p className="mt-2 text-3xl font-semibold tracking-tight text-muted-foreground">
+            —
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">No data in range</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const { value, unit, delta_pct: delta } = summary;
+  const hasDelta = typeof delta === 'number' && Number.isFinite(delta);
+  const positive = hasDelta && delta > 0;
+  const negative = hasDelta && delta < 0;
   // "Good" direction depends on the metric (revenue up = good; returns up = bad).
   const good = invertDelta ? negative : positive;
   const bad = invertDelta ? positive : negative;
@@ -70,11 +87,15 @@ export function StatTile({ label, result, invertDelta, loading }: StatTileProps)
               ) : (
                 <Minus className="size-3.5" />
               )}
-              {formatPercent(Math.abs(delta_pct!))}
+              {formatPercent(Math.abs(delta))}
             </span>
             <span className="text-muted-foreground">vs. prior period</span>
           </div>
-        ) : null}
+        ) : (
+          <p className="mt-2 text-xs text-muted-foreground">
+            No prior-period baseline
+          </p>
+        )}
       </CardContent>
     </Card>
   );

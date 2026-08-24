@@ -3,6 +3,7 @@
 import { Monitor, Moon, Sun } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusBadge } from '@/components/status-badge';
+import { ErrorState } from '@/components/states';
 import {
   Card,
   CardContent,
@@ -15,8 +16,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/lib/auth';
 import { useTheme } from '@/lib/theme';
 import { useStatus } from '@/lib/hooks';
-import { cn, formatDateTime, formatNumber } from '@/lib/utils';
-import type { ServiceStatus } from '@/lib/types';
+import { cn, formatDuration } from '@/lib/utils';
+import { displayName } from '@/lib/types';
 
 export function SettingsView() {
   const { user, hasRole } = useAuth();
@@ -28,7 +29,7 @@ export function SettingsView() {
     <div className="mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
       <PageHeader
         title="Settings"
-        description="Manage your profile, appearance, and — for admins — provider status."
+        description="Manage your profile, appearance, and — for admins — service status."
       />
 
       {/* Profile */}
@@ -41,11 +42,11 @@ export function SettingsView() {
             <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
                 <dt className="text-xs text-muted-foreground">Name</dt>
-                <dd className="text-sm font-medium">{user.name}</dd>
+                <dd className="text-sm font-medium">{displayName(user)}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">Email</dt>
-                <dd className="text-sm font-medium">{user.email}</dd>
+                <dd className="text-sm font-medium">{user.email || '—'}</dd>
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">Role</dt>
@@ -82,6 +83,7 @@ export function SettingsView() {
             ).map(({ value, label, icon: Icon }) => (
               <button
                 key={value}
+                type="button"
                 role="radio"
                 aria-checked={theme === value}
                 onClick={() => setTheme(value)}
@@ -92,7 +94,7 @@ export function SettingsView() {
                     : 'text-muted-foreground hover:text-foreground',
                 )}
               >
-                <Icon className="size-4" />
+                <Icon className="size-4" aria-hidden />
                 {label}
               </button>
             ))}
@@ -100,12 +102,12 @@ export function SettingsView() {
         </CardContent>
       </Card>
 
-      {/* Provider / status (admin only) */}
+      {/* Service status (admin only) */}
       {isAdmin ? (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Monitor className="size-4" /> System status
+              <Monitor className="size-4" aria-hidden /> System status
             </CardTitle>
             <CardDescription>
               Active provider and dependency health from <code>/status</code>.
@@ -114,64 +116,93 @@ export function SettingsView() {
           <CardContent className="space-y-5">
             {status.isLoading ? (
               <Skeleton className="h-40 w-full" />
+            ) : status.isError ? (
+              <ErrorState error={status.error} onRetry={() => void status.refetch()} />
             ) : status.data ? (
               <>
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="rounded-md border bg-muted/30 px-3 py-2">
-                    <p className="text-xs text-muted-foreground">LLM provider</p>
+                    <p className="text-xs text-muted-foreground">Model provider</p>
                     <p className="text-sm font-medium">
-                      {status.data.llm.provider} · {status.data.llm.model}
+                      {status.data.llm.provider}
+                      {status.data.llm.model ? ` · ${status.data.llm.model}` : ''}
                     </p>
                   </div>
                   <StatusBadge status={status.data.status} />
+                  {status.data.version ? (
+                    <Badge variant="muted">v{status.data.version}</Badge>
+                  ) : null}
+                  {typeof status.data.uptime_s === 'number' ? (
+                    <span className="text-xs text-muted-foreground">
+                      Up {formatDuration(status.data.uptime_s * 1000)}
+                    </span>
+                  ) : null}
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   {Object.entries(status.data.services).map(([name, svc]) => (
                     <div
                       key={name}
-                      className="flex items-center justify-between rounded-md border p-3"
+                      className="flex items-center justify-between gap-3 rounded-md border p-3"
                     >
-                      <div>
+                      <div className="min-w-0">
                         <p className="text-sm font-medium capitalize">
                           {name.replace(/_/g, ' ')}
                         </p>
-                        {typeof svc.latency_ms === 'number' ? (
+                        {svc.detail ? (
+                          <p className="truncate text-xs text-muted-foreground">
+                            {svc.detail}
+                          </p>
+                        ) : typeof svc.latency_ms === 'number' ? (
                           <p className="text-xs text-muted-foreground">
                             {svc.latency_ms}ms
                           </p>
                         ) : null}
                       </div>
-                      <StatusBadge status={svc.status as ServiceStatus} />
+                      <StatusBadge status={svc.status} />
                     </div>
                   ))}
                 </div>
 
-                <dl className="grid grid-cols-2 gap-3 text-sm">
-                  <div className="rounded-md border p-3">
-                    <dt className="text-xs text-muted-foreground">Warehouse rows</dt>
-                    <dd className="font-semibold tabular-nums">
-                      {formatNumber(status.data.warehouse.marts_rows)}
-                    </dd>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      dbt · {formatDateTime(status.data.warehouse.last_dbt_run)}
-                    </p>
-                  </div>
-                  <div className="rounded-md border p-3">
-                    <dt className="text-xs text-muted-foreground">Indexed chunks</dt>
-                    <dd className="font-semibold tabular-nums">
-                      {formatNumber(status.data.index.collection_size)}
-                    </dd>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      {formatDateTime(status.data.index.last_index)}
-                    </p>
-                  </div>
-                </dl>
+                {/* The warehouse/index payloads differ per deployment mode, so
+                    they are rendered as whatever labelled facts arrive. */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <FactList title="Warehouse" facts={status.data.warehouse} />
+                  <FactList title="Document index" facts={status.data.index} />
+                </div>
               </>
             ) : null}
           </CardContent>
         </Card>
       ) : null}
+    </div>
+  );
+}
+
+function FactList({
+  title,
+  facts,
+}: {
+  title: string;
+  facts: Array<{ label: string; value: string }>;
+}) {
+  return (
+    <div className="rounded-md border p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        {title}
+      </p>
+      {facts.length ? (
+        <dl className="mt-2 space-y-1.5">
+          {facts.map((fact) => (
+            <div key={fact.label} className="flex items-baseline justify-between gap-3">
+              <dt className="text-xs text-muted-foreground">{fact.label}</dt>
+              <dd className="text-sm font-medium tabular-nums">{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="mt-2 text-sm text-muted-foreground">No statistics reported.</p>
+      )}
     </div>
   );
 }

@@ -63,7 +63,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            role="status"
+            // Failures interrupt; confirmations wait their turn.
+            role={t.variant === 'destructive' ? 'alert' : 'status'}
             className={cn(
               'pointer-events-auto flex animate-fade-in items-start gap-3 rounded-lg border bg-card p-4 shadow-soft',
             )}
@@ -80,6 +81,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               ) : null}
             </div>
             <button
+              type="button"
               onClick={() => dismiss(t.id)}
               className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               aria-label="Dismiss notification"

@@ -7,77 +7,196 @@ import { StatTile } from '@/components/stat-tile';
 import { TrendChart } from '@/components/trend-chart';
 import { InventoryAtRiskTable } from '@/components/inventory-at-risk-table';
 import { ChartRenderer } from '@/components/chart-renderer';
+import { EmptyState, ErrorState } from '@/components/states';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
-import {
+  ALL_VALUES,
   DateRangeFilter,
   type DashboardFilters,
 } from '@/components/date-range-filter';
-import { useMetricQuery } from '@/lib/hooks';
-import { MOCK_AT_RISK, MOCK_TOP_PRODUCTS } from '@/lib/mock';
-import type { ChartSpec, MetricResult } from '@/lib/types';
+import { useMetricQueries, useMetricsCatalog } from '@/lib/hooks';
+import {
+  grainFor,
+  previousRange,
+  resolveRange,
+  summarize,
+  toMetricChart,
+  unitOf,
+} from '@/lib/metrics';
+import type { Cell, MetricFilter, MetricQuery, MetricUnit } from '@/lib/types';
 
-function toTrendSpec(
-  result: MetricResult | undefined,
-  key: string,
-  label: string,
-  currency: boolean,
-): ChartSpec | undefined {
-  if (!result) return undefined;
-  const monthIdx = result.columns.findIndex((c) => c.name === 'month');
-  const valueIdx = result.columns.findIndex((c) => c.name !== 'month');
-  if (monthIdx < 0 || valueIdx < 0 || !result.rows.length) return undefined;
-  return {
-    kind: 'area',
-    x: 'month',
-    series: [{ y: key, label }],
-    options: currency ? { yFormat: 'currency' } : {},
-    data: result.rows.map((row) => ({
-      month: String(row[monthIdx]),
-      [key]: Number(row[valueIdx]),
-    })),
-  };
+const TOP_N = 8;
+
+/** KPI tiles, in display order. `unit` is refined from the live catalog. */
+const KPIS: Array<{ metric: string; label: string; unit: MetricUnit; invertDelta?: boolean }> = [
+  { metric: 'revenue', label: 'Revenue', unit: 'currency' },
+  { metric: 'orders', label: 'Orders', unit: 'count' },
+  { metric: 'avg_order_value', label: 'Avg. order value', unit: 'currency' },
+  { metric: 'return_rate', label: 'Return rate', unit: 'ratio', invertDelta: true },
+];
+
+/** Distinct values of a dimension, read out of a grouped metric result. */
+function dimensionValues(
+  result: { columns: Array<{ name: string }>; rows: Cell[][] } | undefined,
+  dimension: string,
+): string[] {
+  if (!result) return [];
+  const index = result.columns.findIndex((c) => c.name === dimension);
+  if (index < 0) return [];
+  const seen = new Set<string>();
+  for (const row of result.rows) {
+    const value = row[index];
+    if (typeof value === 'string' && value.trim()) seen.add(value);
+  }
+  return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
 export function DashboardView({ title = 'Retail overview' }: { title?: string }) {
   const [filters, setFilters] = React.useState<DashboardFilters>({
-    range: 'quarter',
-    region: 'all',
-    category: 'all',
+    range: 'ytd',
+    region: ALL_VALUES,
+    category: ALL_VALUES,
   });
 
-  // Each control change re-issues governed metric queries (docs/07 §4.2).
-  const timeRange = React.useMemo(
-    () => ({ grain: 'month' as const, start: '2026-01-01', end: '2026-06-30' }),
-    [],
+  const catalog = useMetricsCatalog();
+
+  const timeRange = React.useMemo(() => resolveRange(filters.range), [filters.range]);
+  const priorRange = React.useMemo(() => previousRange(timeRange), [timeRange]);
+  const grain = grainFor(timeRange);
+
+  // Dimension predicates shared by every query on the page.
+  const dimensionFilters = React.useMemo<MetricFilter[]>(() => {
+    const list: MetricFilter[] = [];
+    if (filters.region !== ALL_VALUES) {
+      list.push({ dimension: 'region', op: 'eq', values: [filters.region] });
+    }
+    if (filters.category !== ALL_VALUES) {
+      list.push({ dimension: 'category', op: 'eq', values: [filters.category] });
+    }
+    return list;
+  }, [filters.region, filters.category]);
+
+  const availableMetrics = React.useMemo(
+    () => new Set(catalog.data?.metrics.map((m) => m.key) ?? []),
+    [catalog.data],
   );
-  const baseFilters = React.useMemo(
-    () => ({
-      ...(filters.region !== 'all' ? { region: filters.region } : {}),
-      ...(filters.category !== 'all' ? { category: filters.category } : {}),
-    }),
-    [filters.region, filters.category],
+  // Before the catalog resolves, assume the standard set so the first paint
+  // still issues queries instead of showing four empty tiles.
+  const has = (metric: string) => !catalog.data || availableMetrics.has(metric);
+
+  const queries = React.useMemo(() => {
+    const list: Array<{ name: string; query: MetricQuery }> = [];
+    const base = { filters: dimensionFilters, time_range: timeRange };
+
+    for (const kpi of KPIS) {
+      if (!has(kpi.metric)) continue;
+      list.push({ name: kpi.metric, query: { metric: kpi.metric, ...base } });
+      list.push({
+        name: `${kpi.metric}__prev`,
+        query: { metric: kpi.metric, filters: dimensionFilters, time_range: priorRange },
+      });
+    }
+
+    // Trends over the selected window.
+    for (const metric of ['revenue', 'orders'] as const) {
+      if (!has(metric)) continue;
+      list.push({
+        name: `${metric}__trend`,
+        query: { metric, dimensions: ['date'], time_grain: grain, ...base },
+      });
+    }
+
+    // Top products by revenue.
+    if (has('revenue')) {
+      list.push({
+        name: 'top_products',
+        query: {
+          metric: 'revenue',
+          dimensions: ['product'],
+          ...base,
+          order_by_metric: 'desc',
+          limit: TOP_N,
+        },
+      });
+    }
+
+    // Inventory at risk: the lowest on-hand SKUs. Deliberately not time-bound —
+    // the inventory snapshot is a current-state metric.
+    if (has('units_on_hand')) {
+      list.push({
+        name: 'at_risk',
+        query: {
+          metric: 'units_on_hand',
+          dimensions: ['product'],
+          filters: dimensionFilters,
+          order_by_metric: 'asc',
+          limit: TOP_N,
+        },
+      });
+    }
+
+    // Unfiltered breakdowns that populate the filter dropdowns.
+    if (has('revenue')) {
+      list.push({ name: 'regions', query: { metric: 'revenue', dimensions: ['region'] } });
+      list.push({ name: 'categories', query: { metric: 'revenue', dimensions: ['category'] } });
+    }
+    return list;
+    // `has` closes over catalog.data, which is in the dep list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dimensionFilters, timeRange, priorRange, grain, catalog.data]);
+
+  const { byName, isLoading, isError, error, refetch } = useMetricQueries(queries);
+
+  // Render hints, in order of authority: the result's own `meta`, then the
+  // catalog definition, then the compile-time default.
+  const unitFor = React.useCallback(
+    (metric: string, fallback: MetricUnit): MetricUnit =>
+      unitOf(
+        byName[metric] ?? byName[`${metric}__trend`],
+        catalog.data?.metrics.find((m) => m.key === metric)?.unit ?? fallback,
+      ),
+    [byName, catalog.data],
   );
 
-  const revenue = useMetricQuery({ metric: 'revenue', time_range: timeRange, filters: baseFilters });
-  const orders = useMetricQuery({ metric: 'orders', time_range: timeRange, filters: baseFilters });
-  const aov = useMetricQuery({ metric: 'aov', time_range: timeRange, filters: baseFilters });
-  const returnRate = useMetricQuery({ metric: 'return_rate', time_range: timeRange, filters: baseFilters });
+  const dimensionLabel = React.useCallback(
+    (key: string, fallback: string): string =>
+      catalog.data?.dimensions.find((d) => d.key === key)?.label ?? fallback,
+    [catalog.data],
+  );
 
-  const revenueSpec = toTrendSpec(revenue.data, 'revenue', 'Revenue', true);
-  const ordersSpec = toTrendSpec(orders.data, 'orders', 'Orders', false);
+  const additiveFor = React.useCallback(
+    (metric: string): boolean | undefined =>
+      catalog.data?.metrics.find((m) => m.key === metric)?.additive,
+    [catalog.data],
+  );
 
-  const topProductsSpec: ChartSpec = {
-    kind: 'bar',
-    x: 'name',
-    series: [{ y: 'revenue', label: 'Revenue' }],
-    options: { yFormat: 'currency' },
-    data: MOCK_TOP_PRODUCTS,
-  };
+  const regions = dimensionValues(byName.regions, 'region');
+  const categories = dimensionValues(byName.categories, 'category');
+
+  const revenueTrend = toMetricChart(
+    byName.revenue__trend,
+    'revenue',
+    'Revenue',
+    unitFor('revenue', 'currency'),
+    'area',
+  );
+  const ordersTrend = toMetricChart(
+    byName.orders__trend,
+    'orders',
+    'Orders',
+    unitFor('orders', 'count'),
+    'area',
+  );
+  const topProducts = toMetricChart(
+    byName.top_products,
+    'revenue',
+    'Revenue',
+    unitFor('revenue', 'currency'),
+    'bar',
+  );
+
+  const catalogFailed = catalog.isError;
 
   return (
     <div className="space-y-6 p-4 sm:p-6">
@@ -86,48 +205,97 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
         description="Governed metrics over the semantic layer — tiles and charts always agree."
       />
 
-      <DateRangeFilter value={filters} onChange={setFilters} />
+      <DateRangeFilter
+        value={filters}
+        onChange={setFilters}
+        regions={regions}
+        categories={categories}
+        regionLabel={dimensionLabel('region', 'Region')}
+        categoryLabel={dimensionLabel('category', 'Category')}
+        loading={isLoading}
+      />
 
-      {/* KPI tiles */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Revenue" result={revenue.data} loading={revenue.isLoading} />
-        <StatTile label="Orders" result={orders.data} loading={orders.isLoading} />
-        <StatTile label="Avg. order value" result={aov.data} loading={aov.isLoading} />
-        <StatTile
-          label="Return rate"
-          result={returnRate.data}
-          loading={returnRate.isLoading}
-          invertDelta
+      {isError || catalogFailed ? (
+        <ErrorState
+          error={error ?? catalog.error}
+          onRetry={() => {
+            refetch();
+            void catalog.refetch();
+          }}
         />
-      </div>
+      ) : (
+        <>
+          {/* KPI tiles */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {KPIS.filter((kpi) => has(kpi.metric)).map((kpi) => {
+              const current = byName[kpi.metric];
+              return (
+                <StatTile
+                  key={kpi.metric}
+                  label={kpi.label}
+                  summary={summarize(
+                    kpi.metric,
+                    unitFor(kpi.metric, kpi.unit),
+                    current,
+                    byName[`${kpi.metric}__prev`],
+                    additiveFor(kpi.metric),
+                  )}
+                  loading={isLoading && !current}
+                  invertDelta={kpi.invertDelta}
+                />
+              );
+            })}
+          </div>
 
-      {/* Trends */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <TrendChart title="Revenue" spec={revenueSpec} loading={revenue.isLoading} />
-        <TrendChart title="Orders" spec={ordersSpec} loading={orders.isLoading} />
-      </div>
+          {/* Trends */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <TrendChart
+              title="Revenue"
+              spec={revenueTrend}
+              loading={isLoading && !byName.revenue__trend}
+            />
+            <TrendChart
+              title="Orders"
+              spec={ordersTrend}
+              loading={isLoading && !byName.orders__trend}
+            />
+          </div>
 
-      {/* Top products + at-risk */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Top products by revenue</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ChartRenderer spec={topProductsSpec} height={260} />
-          </CardContent>
-        </Card>
+          {/* Top products + at-risk inventory */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Top products by revenue</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {isLoading && !byName.top_products ? (
+                  <Skeleton className="h-[260px] w-full" />
+                ) : topProducts ? (
+                  <ChartRenderer spec={topProducts} height={260} />
+                ) : (
+                  <EmptyState
+                    title="No revenue in this window"
+                    description="Widen the date range or clear a filter."
+                  />
+                )}
+              </CardContent>
+            </Card>
 
-        <Card>
-          <CardHeader className="flex-row items-center gap-2 pb-2">
-            <PackageX className="size-4 text-warning" aria-hidden />
-            <CardTitle className="text-base">Inventory at risk</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <InventoryAtRiskTable rows={MOCK_AT_RISK} />
-          </CardContent>
-        </Card>
-      </div>
+            <Card>
+              <CardHeader className="flex-row items-center gap-2 pb-2">
+                <PackageX className="size-4 text-warning" aria-hidden />
+                <CardTitle className="text-base">Inventory at risk</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <InventoryAtRiskTable
+                  result={byName.at_risk}
+                  loading={isLoading && !byName.at_risk}
+                />
+              </CardContent>
+            </Card>
+          </div>
+        </>
+      )}
     </div>
   );
 }

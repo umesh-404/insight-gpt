@@ -1,0 +1,27 @@
+# Root entry point for Docker Compose. The real topology lives in
+# docker/compose.yml; this file exists so that plain
+#
+#   docker compose up --build
+#
+# run from the repo root does the right thing.
+#
+# Why it is needed: Compose derives its PROJECT DIRECTORY from the first `-f`
+# file, and only loads the `.env` sitting in that directory. So
+# `docker compose -f docker/compose.yml up` looks for `docker/.env`, never finds
+# the root `.env`, and every `${VAR:-default}` in the topology quietly falls
+# back to its in-file default — a user who set `LLM_PROVIDER=openai` would get
+# ollama with no warning at all. With this file the project directory IS the
+# repo root, so the root `.env` is picked up automatically and no flag is
+# needed. (`make up` passes `--env-file .env` explicitly and works either way.)
+#
+# Relative paths inside an included file are resolved against that file's own
+# directory, so `context: ..` in docker/compose.yml still means the repo root.
+
+# The project name is NOT inherited from an included file — without this line
+# Compose would name the project after this directory and create a SECOND set of
+# containers and volumes alongside the ones `make up` manages. Keep it identical
+# to the `name:` in docker/compose.yml.
+name: insightgpt
+
+include:
+  - docker/compose.yml

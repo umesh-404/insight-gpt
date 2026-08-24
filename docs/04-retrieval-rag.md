@@ -45,26 +45,46 @@ and keeps retrieval focused on language.
 ### 1.1 Metadata (payload) schema
 
 Every chunk stored in Qdrant carries a payload used for **filtering**,
-**citation**, and **diversity**. Fields are normalized at ingestion so a filter
-works identically across document types.
+**citation**, and **diversity**. Producers disagree on field names — the
+generator writes `doc_type` / `created_ts` / `author_role: support_agent`, the
+built-in sample set writes `source_type` / `date` / `author_role: agent` — so a
+single normalizer, `retrieval/schema.py`, maps every producer onto the table
+below before anything is indexed. A filter therefore works identically across
+document types and across corpora.
 
 | Field | Type | Purpose |
 |---|---|---|
 | `doc_id` | string | Stable id of the source document (for delete-then-write, citations) |
 | `source_type` | enum `ticket \| review \| report \| email` | Filter + per-source diversity key |
 | `title` | string | Human-readable citation label |
-| `created_at` | ISO-8601 date | Date-range filtering ("this month"), recency |
-| `product_ref` | string \| null | SKU / product id the document is about |
+| `created_at` | ISO-8601 date/timestamp | Date-range filtering ("this month"), recency |
+| `product_ref` | string \| null | SKU the document is about (falls back to the product id) |
 | `order_ref` | string \| null | Order id, when the document references one |
-| `author_role` | enum `customer \| agent \| manager \| system` | Scope who is speaking (complaint vs. resolution) |
+| `author_role` | enum `customer \| agent \| manager` | Scope who is speaking (complaint vs. resolution) |
+| `region` / `category` | string \| null | The engine's two entity filters; must match the warehouse's dimension values |
 | `channel` | string \| null | e.g. email, web, phone — provenance |
 | `chunk_index` / `chunk_total` | int | Position within the document (context expansion) |
 | `heading_path` | string \| null | Breadcrumb for report sections (see §2) |
+| `indexed_at` / `schema_version` | string / int | When the point was written, under which payload contract |
 | `content` | string | The chunk text actually shown/quoted |
+
+Keyword payload indexes exist for `source_type`, `region`, `category`,
+`product_ref`, `order_ref`, and `author_role`; `created_at` gets a datetime
+index. Only those need an index — an unindexed field is still stored and still
+returned, it just cannot be filtered on.
+
+`author_role` is a **closed** enum, normalized from whatever the producer wrote.
+An un-normalized `support_agent` would not error; it would simply never match
+`author_role = "agent"`, and the question "what did agents say?" would come back
+empty. `region` and `category` matter for the same reason: they are the two
+filters the insight engine attaches when it scopes retrieval to a declining
+segment, and their values must be the ones the warehouse dimensions use.
 
 `product_ref` and `order_ref` are the join keys that let a hybrid question line
 up document evidence with warehouse rows ("the SKUs whose revenue fell *and*
-whose reviews turned negative").
+whose reviews turned negative"). The generator names the SKU in the document
+text as well as in the metadata, so the sparse half of hybrid search can match
+it exactly.
 
 ---
 
@@ -129,15 +149,19 @@ is an ingestion concern, not a retrieval one.
 ### 3.1 Embeddings via Ollama (local, batched)
 
 Chunks are embedded with a **local Ollama embedding model** — CPU-viable and
-private, no data leaves the box. The model is configurable; rememory's
-`qwen3-embedding:0.6b` (1024-dim) is the reference example. Documents are
-embedded in **batches** (rememory uses batch ≈ 32) rather than one call per
-chunk, which is the dominant cost in indexing.
+private, no data leaves the box. The model is configurable in
+`services/retrieval/config/retrieval.yaml`; the shipped default is
+**`nomic-embed-text`, 768-dimensional, cosine distance** (overridable with the
+`EMBED_MODEL` environment variable). Documents are embedded in **batches** of 32
+rather than one call per chunk, which is the dominant cost in indexing.
 
-Query and document use asymmetric prefixes (`search_query:` /
-`search_document:` in rememory) so the same text embeds differently as a
-question vs. as a passage. The query-side builder must use the **same model and
-prefixes** as indexing or retrieval silently degrades.
+Query and document use asymmetric prefixes — `search_query: ` and
+`search_document: ` — so the same text embeds differently as a question vs. as
+a passage. Both prefixes live in the same config block as the model name, so no
+caller can pair the wrong ones. The query-side builder uses the **same model and
+prefixes** as indexing; a mismatch degrades retrieval silently rather than
+erroring, which is why changing the model or its dimensions requires a **full
+re-index**, not a restart.
 
 ### 3.2 Qdrant: dense + sparse vectors
 
@@ -297,8 +321,12 @@ retrieval domains; InsightGPT's documents are one domain, so one collection with
 a type field is the right granularity.)
 
 Collection config (vector size, distance metric, sparse index) is declared in
-`config/*.yaml` and created idempotently at setup, matching rememory's
-`collections.yaml` approach — no hardcoded dimensions.
+`services/retrieval/config/retrieval.yaml` and created idempotently at setup,
+matching rememory's `collections.yaml` approach — no hardcoded dimensions.
+`ensure_collection()` also refuses to proceed when an existing collection's
+vector size differs from the configured model's: Qdrant cannot resize in place,
+and silently querying 768-d vectors against a 1024-d collection returns
+nonsense rather than an error.
 
 ---
 
@@ -316,9 +344,15 @@ Metrics tracked per change:
 - **Rerank lift** — the same metrics with reranking on vs. off, to justify the
   second stage's cost.
 
-The eval runs in CI against the seeded demo corpus so a regression in chunking,
-embedding config, or fusion is caught before it reaches a demo. Full harness,
-fixtures, and thresholds: [`10-testing-eval.md`](10-testing-eval.md).
+There are two golden sets, because there are two indexable corpora:
+`insight-retrieval eval` scores the **generated corpus** (judging hits by
+`region` / `category` metadata, since its document ids are sequential and
+carry no meaning), and `insight-retrieval eval --samples` scores the six
+built-in demo documents by id. Both need a live Qdrant + Ollama and an index
+built from the matching corpus; the offline unit tests cover the pure
+components (chunking, fusion, sparse tokenization, filter building, the
+schema normalizer, and changed-only planning). Full harness, fixtures, and
+thresholds: [`10-testing-eval.md`](10-testing-eval.md).
 
 ---
 

@@ -50,9 +50,19 @@ class WorkerSettings(BaseSettings):
     dbt_executable: str = "dbt"
     dbt_timeout_seconds: int = 1800
 
-    # What to reindex when no changed-set is supplied. "samples" indexes the
-    # built-in sample documents; a path indexes that folder / JSON file.
-    reindex_source: str = "samples"
+    # What `reindex_docs` indexes.
+    #   "ingested" (default) -> the corpus services/ingestion publishes, i.e.
+    #                           the REAL documents (`document_corpus_path`);
+    #   "samples"            -> the retrieval package's built-in demo set, an
+    #                           EXPLICIT fallback, never a silent one;
+    #   any other value      -> treated as a path to a folder / JSON file.
+    reindex_source: str = "ingested"
+    # The ingestion -> retrieval hand-off file. Must match
+    # `IngestionSettings.document_corpus_path`.
+    document_corpus_path: Path = _REPO_ROOT / "data" / "ingested" / "documents.json"
+    # Re-embed only documents whose content hash changed. Embedding is the
+    # expensive step, so the scheduled half-hourly reindex must not redo it all.
+    reindex_changed_only: bool = True
 
 
 def get_settings() -> WorkerSettings:

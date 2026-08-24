@@ -12,16 +12,24 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { StatusBadge } from '@/components/status-badge';
-import { formatDuration, timeAgo } from '@/lib/utils';
+import { RelativeTime } from '@/components/relative-time';
+import { formatDuration, formatNumber } from '@/lib/utils';
 import type { PipelineRun } from '@/lib/types';
 
 function runDuration(run: PipelineRun): number | null {
   if (!run.finished_at) return null;
-  return new Date(run.finished_at).getTime() - new Date(run.started_at).getTime();
+  const finished = new Date(run.finished_at).getTime();
+  const started = new Date(run.started_at).getTime();
+  if (Number.isNaN(finished) || Number.isNaN(started)) return null;
+  return finished - started;
 }
 
 function totalRows(run: PipelineRun): number {
-  return Object.values(run.row_counts).reduce((a, b) => a + b, 0);
+  // `row_counts` is optional on the wire and absent on queued runs.
+  return Object.values(run.row_counts ?? {}).reduce(
+    (a, b) => a + (typeof b === 'number' ? b : 0),
+    0,
+  );
 }
 
 /** Run-history table from GET /pipeline-runs (docs/07 §4.3). */
@@ -70,13 +78,13 @@ export function PipelineRunTable({ runs }: { runs: PipelineRun[] }) {
                 <Badge variant="outline">{run.trigger}</Badge>
               </TableCell>
               <TableCell className="text-muted-foreground">
-                {timeAgo(run.started_at)}
+                <RelativeTime iso={run.started_at} />
               </TableCell>
               <TableCell className="text-right tabular-nums text-muted-foreground">
                 {formatDuration(runDuration(run))}
               </TableCell>
               <TableCell className="text-right tabular-nums">
-                {totalRows(run).toLocaleString()}
+                {formatNumber(totalRows(run))}
               </TableCell>
               <TableCell>
                 <Link

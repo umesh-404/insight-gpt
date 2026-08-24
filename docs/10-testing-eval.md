@@ -49,6 +49,29 @@ Fast, no network, no containers. Cover the pure logic:
   emitted.
 - **Retrieval fusion** — RRF ordering, dedup, and per-source diversity are
   deterministic given fixed candidate lists (no model calls).
+- **The document hand-off** — that ingestion publishes a redacted, deterministic,
+  content-hashed corpus; that every producer spelling normalizes onto the same
+  canonical document; that a re-index over an unchanged corpus embeds *nothing*;
+  that a document dropped upstream has its chunks deleted; and that a missing
+  corpus fails loudly instead of falling back to the demo documents.
+- **Semantic-layer drift** — `tests/test_semantic_layer_drift.py` parses
+  `config/semantic_layer.yml` and `services/warehouse/models/metrics/metrics.yml`
+  and fails if the metric names, labels, aggregations, or dimensions stop
+  agreeing. The two files must both exist (see
+  [`02-data-model.md`](02-data-model.md) §6); this is what stops them drifting.
+
+Every Python package is its own uv project with its own suite. `make test` runs
+them all in order:
+
+```
+services/api        services/retrieval    services/ingestion
+services/worker     data/generator        tests/  (semantic-layer drift)
+```
+
+All of them are **offline** — no Postgres, no Qdrant, no Ollama, no network.
+The tests that genuinely need live services are skipped by default and gated on
+an explicit environment variable (`RETRIEVAL_LIVE=1` for
+`services/retrieval/tests/test_integration.py`).
 
 ### 1.2 Integration tests
 
@@ -97,21 +120,34 @@ harness drove **Recall@1 from 50% to 92%** through systematic tuning
 (chunking, hybrid fusion, reranking). We emulate that pattern: *change one knob,
 re-run the harness, keep the change only if the numbers improve.*
 
-- **Golden set** — `tests/eval/retrieval_golden.jsonl`: each row is a natural
-  question and the document id(s) that should be retrieved to answer it, across
-  tickets, reviews, and reports.
+- **Golden sets** — `services/retrieval/retrieval/eval.py`. There are two,
+  because there are two indexable corpora:
+  - `CORPUS_GOLDEN` (default) scores the **generated corpus**. Its document ids
+    are sequential and carry no meaning, so a case is judged by the hit's
+    `region` / `category` metadata — did the pipeline surface a North /
+    Electronics document for a North / Electronics question?
+  - `SAMPLE_GOLDEN` (`--samples`) scores the six built-in demo documents by
+    exact `doc_id`, including a South/apparel negative control that must *not*
+    match a North/electronics question.
 - **Metrics:**
   - **Recall@1 / Recall@3** — is a correct document in the top 1 / top 3?
   - **MRR** — mean reciprocal rank of the first correct document (rewards
     ranking correct docs higher, not just present).
-- **Run locally:**
+  - **Rerank lift** — every run scores the set twice, reranking off then on, so
+    the second stage has to justify its latency with numbers.
+- **Run locally** (needs live Qdrant + Ollama, and an index built from the
+  corpus being scored):
 
   ```bash
-  uv run python -m tests.eval.retrieval
+  cd services/retrieval
+  uv run insight-retrieval index          # index the ingestion corpus
+  uv run insight-retrieval eval           # score it
+
+  uv run insight-retrieval index --samples && uv run insight-retrieval eval --samples
   ```
 
-  Prints per-metric scores and a diff against the last committed baseline so a
-  regression is visible immediately.
+  Prints both pipelines side by side and exits non-zero when reranked Recall@3
+  falls below the floor (0.80), so it works as a gate as well as a report.
 
 ```mermaid
 graph LR

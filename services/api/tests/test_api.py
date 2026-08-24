@@ -12,17 +12,44 @@ os.environ.setdefault("LLM_PROVIDER", "fake")
 os.environ.setdefault("WAREHOUSE", "duckdb")
 os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
 
+import json
+from collections.abc import Iterator
+
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import reset_caches
+from app.api.deps import get_engine, reset_caches
 from app.api.main import create_app
+from app.engine.guardrails import GuardrailError
 
 
 @pytest.fixture(scope="module")
-def client() -> TestClient:
+def app():
     reset_caches()
-    return TestClient(create_app())
+    return create_app()
+
+
+@pytest.fixture(scope="module")
+def client(app) -> TestClient:
+    return TestClient(app)
+
+
+def _sse_events(body: str) -> list[tuple[str, dict]]:
+    """Parse an SSE body into ordered ``(event, data)`` pairs."""
+    events: list[tuple[str, dict]] = []
+    for record in body.split("\n\n"):
+        record = record.strip()
+        if not record:
+            continue
+        name, payload = "message", []
+        for line in record.split("\n"):
+            if line.startswith("event:"):
+                name = line[6:].strip()
+            elif line.startswith("data:"):
+                payload.append(line[5:].strip())
+        if payload:
+            events.append((name, json.loads("\n".join(payload))))
+    return events
 
 
 def _login(client: TestClient, email: str, password: str) -> str:
@@ -155,3 +182,132 @@ def test_refresh_mints_new_access_token(client: TestClient) -> None:
     r2 = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
     assert r2.status_code == 200
     assert r2.json()["access_token"]
+
+
+def test_sse_stream_emits_every_table_in_the_envelope(client: TestClient) -> None:
+    """The breakdown tables must survive streaming, not just tables[0]."""
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    question = "Why did sales decline last quarter?"
+
+    envelope = client.post(
+        "/api/v1/ask",
+        json={"question": question, "stream": False},
+        headers={**_auth(token), "Accept": "application/json"},
+    ).json()
+    assert len(envelope["tables"]) > 1, "fixture answer should carry breakdown tables"
+
+    resp = client.post(
+        "/api/v1/ask", json={"question": question, "stream": True}, headers=_auth(token)
+    )
+    streamed = [data for name, data in _sse_events(resp.text) if name == "tables"]
+    assert [t["name"] for t in streamed] == [t["title"] for t in envelope["tables"]]
+    assert [t["columns"] for t in streamed] == [t["columns"] for t in envelope["tables"]]
+    assert [t["rows"] for t in streamed] == [t["rows"] for t in envelope["tables"]]
+
+
+def test_assembled_stream_equals_the_json_envelope(client: TestClient) -> None:
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    question = "Why did sales decline last quarter?"
+
+    envelope = client.post(
+        "/api/v1/ask",
+        json={"question": question, "stream": False},
+        headers={**_auth(token), "Accept": "application/json"},
+    ).json()
+    events = _sse_events(
+        client.post(
+            "/api/v1/ask", json={"question": question, "stream": True}, headers=_auth(token)
+        ).text
+    )
+
+    answer = "".join(d["text"] for n, d in events if n == "token")
+    assert answer == envelope["answer"]
+
+    by_name = {n: d for n, d in events}
+    assert by_name["sql"]["sql"].split(";\n\n") == envelope["sql"]
+    assert by_name["citations"]["items"] == envelope["citations"]
+    assert by_name["chart"]["chart_spec"] == envelope["chart"]
+    assert by_name.get("caveats", {"items": []})["items"] == envelope["caveats"]
+    assert by_name["route"]["route"] == envelope["route"]
+    assert by_name["route"]["confidence"] == envelope["confidence"]
+
+
+class _BoomEngine:
+    """Stand-in engine whose ``ask`` always fails."""
+
+    def __init__(self, exc: Exception):
+        self._exc = exc
+
+    def ask(self, question: str):
+        raise self._exc
+
+
+@pytest.fixture()
+def failing_engine(app) -> Iterator[list[Exception]]:
+    """Override the engine dependency; the list holds the exception to raise."""
+    box: list[Exception] = [RuntimeError("boom")]
+    app.dependency_overrides[get_engine] = lambda: _BoomEngine(box[0])
+    yield box
+    app.dependency_overrides.pop(get_engine, None)
+
+
+def test_engine_failure_returns_a_clean_error_envelope(
+    client: TestClient, failing_engine: list[Exception]
+) -> None:
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask",
+        json={"question": "revenue last quarter?", "stream": False},
+        headers={**_auth(token), "Accept": "application/json"},
+    )
+    assert resp.status_code == 500
+    error = resp.json()["error"]
+    assert error["code"] == "internal_error"
+    assert "boom" not in error["message"] and "Traceback" not in error["message"]
+    assert error["request_id"]
+
+
+def test_guardrail_rejection_is_a_400_not_a_500(
+    client: TestClient, failing_engine: list[Exception]
+) -> None:
+    failing_engine[0] = GuardrailError("query references non-allow-listed table(s): ['secrets']")
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask",
+        json={"question": "select everything", "stream": False},
+        headers={**_auth(token), "Accept": "application/json"},
+    )
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["code"] == "bad_request"
+    assert "secrets" not in error["message"]
+
+
+def test_stream_failure_emits_a_terminal_error_event(
+    client: TestClient, failing_engine: list[Exception]
+) -> None:
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask", json={"question": "anything", "stream": True}, headers=_auth(token)
+    )
+    assert resp.status_code == 200
+    events = _sse_events(resp.text)
+    names = [n for n, _ in events]
+    assert names == ["meta", "error"]
+    error = events[-1][1]
+    assert error["code"] == "internal_error"
+    assert "boom" not in error["message"]
+    assert error["request_id"] != "-"
+
+
+def test_stream_guardrail_failure_is_labelled(
+    client: TestClient, failing_engine: list[Exception]
+) -> None:
+    failing_engine[0] = GuardrailError("nope")
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask", json={"question": "anything", "stream": True}, headers=_auth(token)
+    )
+    events = _sse_events(resp.text)
+    assert events[-1][0] == "error"
+    assert events[-1][1]["code"] == "guardrail_rejected"

@@ -3,8 +3,8 @@
 This document describes how InsightGPT is packaged, configured, brought up, and
 moved to the cloud. The design goal is the one stated in
 [`00-overview.md`](00-overview.md): **the full system comes up with a single
-`docker compose up`**, and the same artifacts deploy to a cloud host with
-documented, minimal changes.
+`docker compose up`** from the repo root, and the same artifacts deploy to a
+cloud host with documented, minimal changes.
 
 Related reading: architecture and topology in
 [`01-architecture.md`](01-architecture.md); the security posture that constrains
@@ -49,14 +49,18 @@ graph TB
 |---|---|---|---|
 | **web** | `docker/web.Dockerfile` (Next.js) | Frontend UI | Yes — `${WEB_PORT}:3000` |
 | **api** | `docker/api.Dockerfile` (FastAPI/uvicorn) | REST + SSE, insight engine, auth | Yes — `${API_PORT}:8000` |
-| **worker** | same image as api, different entrypoint | APScheduler jobs, pipeline runs, dbt invocations | No |
+| **worker** | `docker/worker.Dockerfile` | APScheduler jobs, pipeline runs, ingestion, dbt invocations | No |
 | **postgres** | `postgres:16` | Warehouse (`raw`/`staging`/`marts`) | No |
 | **qdrant** | `qdrant/qdrant` | Vector DB | No |
 | **ollama** | `ollama/ollama` | Local embeddings, rerank, default LLM | No |
 
-`api` and `worker` share one image so that connectors, redaction, the semantic
-layer, and DB models are defined once; only the entrypoint differs (uvicorn vs.
-the scheduler loop).
+`api` and `worker` are **separate images** built from the same repo root
+context. They need genuinely different dependency sets — the API carries the web
+stack, the worker carries dbt-postgres, the ingestion package, and the retrieval
+indexer — and keeping them apart means neither image ships a dependency it never
+calls. What is shared is the source, not the image: `services/ingestion`,
+`services/retrieval`, `config/`, and the semantic layer are single definitions
+copied into whichever image needs them.
 
 ### 1.2 Volumes (persistent state)
 
@@ -65,24 +69,47 @@ the scheduler loop).
 | `pgdata` | Postgres data dir | The warehouse — the durable source of truth |
 | `qdrant_storage` | Qdrant storage | Vectors + payloads; rebuildable from documents |
 | `ollama_models` | Pulled model blobs | Avoids re-downloading models on every restart |
+| `generated_data` | `worker:/app/data/generated` | The synthetic CSVs + document JSON `scripts/seed.py` writes |
+| `ingested_data` | `worker:/app/data/ingested` | The redacted document corpus handed to retrieval, plus its index state |
 
-`qdrant_storage` is **rebuildable** (re-index the documents), but `pgdata` for a
-real deployment is not — back it up (Section 6).
+The last two exist because `make bootstrap` and `make seed` run in a throwaway
+`docker compose run --rm worker` container, while the scheduler that reindexes
+from that corpus is the long-running `worker` service. Without shared volumes
+the corpus would die with the container that produced it and every scheduled
+`reindex_docs` would fail with "document corpus not found". They are mounted at
+the two output directories rather than at `/app/data`, so the baked-in
+`data/generator` package stays visible.
+
+`qdrant_storage`, `generated_data`, and `ingested_data` are all **rebuildable**
+(re-seed, re-index), but `pgdata` for a real deployment is not — back it up
+(Section 6).
 
 ### 1.3 Healthchecks & dependencies
 
-Each service declares a healthcheck so that dependents wait for *readiness*, not
-just container start:
+Where a healthcheck can be written, dependents wait for *readiness* rather than
+container start:
 
-- **postgres** — `pg_isready`.
-- **qdrant** — HTTP `GET /readyz`.
-- **ollama** — HTTP `GET /api/tags` (also confirms the model list is loadable).
-- **api** — `GET /health` (checks DB + Qdrant + provider reachability).
-- **web** — HTTP `GET /` on the app port.
+| Service | Healthcheck | Why this probe |
+|---|---|---|
+| **postgres** | `pg_isready -U $POSTGRES_USER -d $POSTGRES_DB` | Ships in the image |
+| **ollama** | `ollama list` | Same daemon as `GET /api/tags`, and the binary is always present |
+| **api** | `python -c` urllib `GET http://localhost:8000/health` | `python` is always in the image; no curl needed |
+| **worker** | `python -c` urllib `GET http://localhost:8090/health` | A stdlib health server on an internal-only port |
+| **qdrant** | **none** | See below |
+| **web** | **none** | Nothing depends on it |
 
-Compose `depends_on` uses `condition: service_healthy` so `api` starts only when
-`postgres`, `qdrant`, and `ollama` are healthy, and `web` starts after `api`.
-The `worker` waits on the same data services as `api`.
+**qdrant deliberately has no healthcheck.** The official image is distroless: it
+contains no shell and no curl, so a `CMD-SHELL` or curl probe can never pass and
+would leave the container permanently `unhealthy`, blocking every dependent
+forever. Dependents therefore use `condition: service_started` and rely on their
+own connection retries — plus `scripts/bootstrap.py`, which polls
+`GET /readyz` from the worker (where `httpx` *is* installed) before doing
+anything that needs Qdrant. That is a real readiness gate; it just lives in the
+client rather than in the container.
+
+So: `api` and `worker` wait on `postgres: service_healthy`,
+`ollama: service_healthy`, and `qdrant: service_started`; `web` waits on
+`api: service_healthy`.
 
 ## 2. Configuration
 
@@ -95,11 +122,31 @@ Configuration follows the **config-driven, no-hardcoded-ports** principle from
 - **`.env`** (gitignored) — secrets and per-deployment values. A committed
   **`.env.example`** documents every variable. No secrets in the repo or the
   vector store (see [`08-security.md`](08-security.md) §6).
-- **`config/runtime.json`** — **discovered** runtime values (actual bound ports,
-  resolved service hosts) written at bring-up so nothing downstream hardcodes a
-  port. Clients read the resolved values from here rather than assuming `8000`.
+Ports are not hardcoded in any service: `WEB_PORT` and `API_PORT` set what the
+host publishes, and `NEXT_PUBLIC_API_URL` tells the frontend where to find the
+API (including the `/api/v1` prefix — the value must carry that suffix, and it
+does in both `.env.example` and the compose build args).
 
-### 2.1 Key environment variables (`.env.example`)
+### 2.1 Reading `.env`: use `make up`, or run compose from the root
+
+Compose derives its **project directory** from the first `-f` file and loads
+`.env` from *that* directory. So:
+
+```bash
+make up                                       # correct — passes --env-file .env
+docker compose up --build                     # correct — root compose.yaml
+docker compose -f docker/compose.yml up       # WRONG — reads no .env at all
+```
+
+The wrong form does not error. It silently falls back to every in-file default,
+so a deployment configured for `LLM_PROVIDER=openai` comes up on ollama with no
+message. Two things make it hard to hit: the `Makefile` always passes
+`--env-file .env`, and the repo root has a `compose.yaml` that `include:`s
+`docker/compose.yml` (pinning the same project name, `insightgpt`, so both
+routes manage the same containers and volumes) — which makes the repo root the
+project directory and the root `.env` the one that gets read.
+
+### 2.2 Key environment variables (`.env.example`)
 
 ```dotenv
 # --- Ports (host-published; override to avoid conflicts) ---
@@ -107,100 +154,131 @@ WEB_PORT=3000
 API_PORT=8000
 
 # --- Database ---
+POSTGRES_DSN=postgresql://insight:insight@postgres:5432/insight
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
-POSTGRES_DB=insightgpt
-POSTGRES_USER=insight_app          # analytics/app role (read-only on marts)
-POSTGRES_PASSWORD=change-me
-POSTGRES_INGEST_USER=insight_etl   # write role for dbt/ingestion (not in request path)
-POSTGRES_INGEST_PASSWORD=change-me
+POSTGRES_DB=insight
+POSTGRES_USER=insight
+POSTGRES_PASSWORD=insight
 
 # --- Auth ---
-JWT_SECRET=change-me-long-random
-JWT_EXPIRES_MINUTES=60
+JWT_SECRET=                        # openssl rand -hex 32
 
 # --- Vector DB ---
-QDRANT_HOST=qdrant
-QDRANT_PORT=6333
-# QDRANT_API_KEY=                  # REQUIRED if qdrant is ever exposed beyond the compose net
+RETRIEVER=qdrant
+QDRANT_URL=http://qdrant:6333
 
 # --- Local models (Ollama) ---
 OLLAMA_HOST=http://ollama:11434
 EMBED_MODEL=nomic-embed-text
-RERANK_MODEL=<local-cross-encoder>
+RERANK_MODEL=dengcao/Qwen3-Reranker-0.6B:F16
 
-# --- LLM provider (pluggable) ---
-LLM_PROVIDER=ollama                # ollama (default) | openai | gemini | groq
-LLM_MODEL=<provider-model-name>
+# --- LLM provider (chat/reasoning step only) ---
+LLM_PROVIDER=ollama                # ollama (default) | openai | groq | gemini*
+LLM_MODEL=llama3.1:8b
 # OPENAI_API_KEY=                  # only if LLM_PROVIDER=openai
-# GEMINI_API_KEY=                  # only if LLM_PROVIDER=gemini
 # GROQ_API_KEY=                    # only if LLM_PROVIDER=groq
+
+# --- Pipeline ---
+REINDEX_SOURCE=ingested            # ingested | samples | <path>
+
+# --- Frontend ---
+NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
 ```
 
-The two Postgres roles are deliberate: the **app role is read-only on `marts`**
-and is the only role the API uses; the **ingest role can write** and is used
-only by dbt/ingestion in the worker. This is the DB half of the SQL-safety model
-(see [`08-security.md`](08-security.md) §3).
+`.env.example` is the authoritative list; the block above is a summary.
+
+**One database role.** The stack provisions a single `insight` role that owns
+`raw`, `marts`, and `insight` and is used by the API, ingestion, and dbt alike —
+that is what `docker/initdb/01-schemas.sql`, `docker/compose.yml`, and
+`services/warehouse/profiles.yml` all agree on. Splitting into a read-only app
+role and a writing ETL role is the right posture for a real deployment and is
+described as such in [`08-security.md`](08-security.md) §3, but it is **not**
+what this compose stack creates today. The SQL-safety guarantees the system
+actually relies on are enforced above the database: the engine never authors
+SQL, the query builder compiles only from the governed semantic layer, and the
+table allow-list rejects anything outside `marts`.
+
+**Cloud keys** reach the `api` container only if they are in the root `.env`
+*and* the stack was started a way that reads it (§2.1). Embeddings and reranking
+always use local Ollama models regardless of `LLM_PROVIDER`; only the
+chat/reasoning step follows it. `gemini` is declared but not implemented — the
+provider factory raises on it rather than pretending.
 
 ## 3. One-command bring-up & first-run bootstrap
 
 ```bash
-cp .env.example .env      # then edit secrets
-docker compose up         # builds, starts, and self-bootstraps
+make env                  # copies .env.example -> .env (edit secrets)
+make up                   # builds and starts the stack
+make bootstrap            # first run only: models, warehouse, index
 ```
 
-On first run, an **idempotent bootstrap** (`scripts/bootstrap.py`, invoked by
-the worker's entrypoint) brings the system from empty volumes to a demo-ready
-state. Idempotent means it is **safe to re-run** — every step checks state
-before acting, so a second `docker compose up` is a no-op, and a partial failure
-can simply be re-run.
+Bootstrap is a **separate, explicit command**, not something the worker
+entrypoint does on boot. That is deliberate: it pulls gigabytes of models and
+rebuilds the warehouse, which is not something a container restart should
+silently trigger. It is **idempotent** — every step checks state before acting —
+so re-running after a partial failure is the normal recovery path.
+
+The database schemas are not bootstrap's job either: `docker/initdb/01-schemas.sql`
+runs once when Postgres initializes an empty volume and creates `raw`, `marts`,
+`insight`, and `insight.pipeline_runs`.
 
 ```mermaid
 graph TB
-    START["worker entrypoint"] --> WAIT["wait for postgres/qdrant/ollama healthy"]
-    WAIT --> SCHEMA["create DB schemas + roles/grants<br/>(skip if present)"]
-    SCHEMA --> MODELS["pull Ollama models<br/>(skip if already pulled)"]
-    MODELS --> COLL["create Qdrant collections<br/>(skip if exist)"]
-    COLL --> SEEDDOCS["seed demo documents<br/>(skip if collection non-empty)"]
-    SEEDDOCS --> DBT["dbt seed + dbt run + dbt test"]
-    DBT --> INDEX["redact + chunk + embed demo docs"]
-    INDEX --> RUNTIME["write config/runtime.json"]
-    RUNTIME --> READY["mark bootstrap complete"]
+    START["make bootstrap<br/>(compose run --rm worker)"] --> WAIT["1 · wait for postgres / qdrant / ollama"]
+    WAIT --> MODELS["2 · pull Ollama models<br/>embed + rerank always, chat only if LLM_PROVIDER=ollama"]
+    MODELS --> SEED["3 · scripts/seed.py --require-postgres<br/>generate → load raw + publish corpus → dbt seed/run/test"]
+    SEED --> COLL["4 · create the Qdrant 'documents' collection"]
+    COLL --> INDEX["5 · index the published corpus (changed-only)"]
 ```
 
-Bootstrap steps in order:
+The five steps, and what each one really does:
 
-1. **Create DB schemas and roles.** Create `raw`/`staging`/`marts`, the app and
-   ingest roles, and apply the read-only grants — only if they do not yet exist.
-2. **Pull Ollama models.** Pull the embedding, rerank, and (for the local
-   default) reasoning models — skipped for any model already present in the
-   `ollama_models` volume.
-3. **Create Qdrant collections** with the configured vector params — skipped if
-   they exist.
-4. **Seed demo documents** (synthetic tickets/reviews/reports) — skipped if the
-   collection is already populated.
-5. **dbt `seed` + `run` + `test`** to build the star schema and semantic layer
-   from the synthetic dataset, and to assert data quality
+1. **Wait for postgres / qdrant / ollama.** Postgres via a real `SELECT 1`,
+   the other two via HTTP polling, each with a 120 s deadline and an actionable
+   message on timeout.
+2. **Pull Ollama models.** The embedding and reranker models always — retrieval
+   has no cloud embedding path. The **chat model only when
+   `LLM_PROVIDER=ollama`**, since pulling several gigabytes for a model an
+   openai/groq deployment will never call is pure waste. Already-present models
+   are skipped. A pull is retried up to three times: long pulls over a flaky
+   registry connection die with an incomplete chunked read, and Ollama keeps the
+   blobs it already fetched, so a retry resumes rather than restarts. The stream
+   is parsed rather than drained — Ollama reports a mid-pull failure as an
+   `error` event on a `200` response — and the model must then actually appear
+   in `/api/tags` before the step reports success.
+3. **Build the warehouse.** Delegates to `scripts/seed.py`, passing
+   `--require-postgres` so that a database this step already proved reachable
+   cannot be quietly skipped. Seed generates the dataset, loads `raw`, publishes
+   the redacted document corpus, then runs dbt `seed` + `run` + `test`
    ([`10-testing-eval.md`](10-testing-eval.md) §3).
-6. **Redact + chunk + embed** the demo documents into Qdrant.
-7. **Write `config/runtime.json`** with the resolved ports/hosts.
+4. **Create the Qdrant `documents` collection** — skipped if it exists. An
+   unreachable Qdrant fails the step instead of being mistaken for a first run.
+5. **Index the corpus step 3 published.** Not the built-in demo documents: the
+   real ones. There is no "skip if the collection is non-empty" shortcut here
+   because indexing is changed-only — a re-run over an unchanged corpus
+   re-embeds nothing anyway, whereas skipping on "has points" would ignore
+   documents that *did* change.
 
-A `bootstrap_complete` marker (a row in a metadata table) lets the step be
-skipped wholesale on subsequent boots, while individual steps remain
-independently idempotent.
+There is no `bootstrap_complete` marker; each step's own state check is what
+makes a re-run cheap.
 
 ## 4. Local development workflow
 
 Docker Compose is the integration path; day-to-day development runs services
 individually against the containerized data stores.
 
-- **Python (api, worker, ingestion, retrieval)** — managed with **uv**:
+- **Python (api, worker, ingestion, retrieval)** — each is its own **uv**
+  project with its own `pyproject.toml` and virtualenv, so a change to one
+  cannot drag another's dependencies along:
 
   ```bash
-  uv sync                         # install locked deps
-  uv run uvicorn services.api.main:app --reload    # api
-  uv run python -m services.worker                  # scheduler
-  uv run pytest                    # tests + eval harnesses
+  cd services/api        && uv run uvicorn app.api.main:app --reload
+  cd services/worker     && uv run python -m worker          # scheduler loop
+  cd services/worker     && uv run python -m worker run reindex_docs   # one job
+  cd services/retrieval  && uv run insight-retrieval index   # changed-only
+  make test                        # every suite, in order
+  make lint                        # ruff over every package
   ```
 
 - **Web (Next.js)** — **pnpm** (npm works too):
@@ -217,14 +295,23 @@ individually against the containerized data stores.
   docker compose up postgres qdrant ollama
   ```
 
-  The app reads `POSTGRES_HOST`, `QDRANT_HOST`, `OLLAMA_HOST` from `.env`, so
-  pointing a host-run API at container stores is a config change, not a code
-  change.
+  The app reads `POSTGRES_DSN` / `POSTGRES_HOST`, `QDRANT_URL`, and
+  `OLLAMA_HOST` from `.env`, so pointing a host-run API at container stores is a
+  config change, not a code change. (Only `postgres` publishes a host port, on
+  loopback; uncomment the `qdrant` ports block in `docker/compose.yml` if you
+  need to reach it from the host too.)
 
-- **dbt** — run from `services/warehouse`:
+- **dbt** — the project and the profile live in the same directory, and the
+  profile reads `POSTGRES_*` from the environment (no secrets on disk):
 
   ```bash
-  uv run dbt seed && uv run dbt run && uv run dbt test
+  dbt build --project-dir services/warehouse --profiles-dir services/warehouse
+  ```
+
+  Or, end to end and tracked as a pipeline run:
+
+  ```bash
+  python -m worker run dbt_build
   ```
 
 ## 5. Cloud portability
@@ -251,7 +338,7 @@ For a managed platform, decompose the compose file into managed pieces:
 | Compose service | On PaaS |
 |---|---|
 | **postgres** | **Managed Postgres** (the provider's add-on). Point `POSTGRES_HOST` at it; run bootstrap/dbt as a one-off job. |
-| **qdrant** | Qdrant as a container service **or** Qdrant Cloud. Set `QDRANT_HOST` and add `QDRANT_API_KEY` (now that it is network-exposed — see [`08-security.md`](08-security.md) §7). |
+| **qdrant** | Qdrant as a container service **or** Qdrant Cloud. Point `QDRANT_URL` at it and add an API key (now that it is network-exposed — see [`08-security.md`](08-security.md) §7; the retrieval client does not read one today, so this is a change to make, not a setting to flip). |
 | **ollama** | Usually **dropped** on GPU-less PaaS hosts. Set `LLM_PROVIDER` to a cloud key for reasoning; use a hosted/cloud embedding path or a small CPU embedding service for embeddings. |
 | **api** | Stateless web service; scale horizontally (Section 7). |
 | **worker** | Single background/worker instance (scheduler must be a singleton — Section 7). |
@@ -283,8 +370,11 @@ Two stores hold state; back up both, and treat backups as sensitive (see
 
 - **Vector data (Qdrant) — rebuildable:** use Qdrant **snapshots**
   (`POST /collections/{name}/snapshots`) for a fast restore, or simply
-  **re-index** the documents from source via bootstrap (Section 3), since the
-  redacted document corpus is the source of truth for the vectors.
+  **re-index** from `data/ingested/documents.json` (`make reindex`), which is
+  literally the source of truth for the vectors. After a restore from elsewhere,
+  delete the `.index_state.json` beside the corpus or run
+  `insight-retrieval index --full` — the state file describes a collection that
+  no longer exists, and changed-only would otherwise skip everything.
 
 - **Config/secrets:** `.env` and `config/*.yaml` are backed up out-of-band by
   the operator (a secret store), never committed.

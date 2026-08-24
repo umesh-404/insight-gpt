@@ -14,6 +14,7 @@ import { ApiError } from '@/lib/types';
 export default function LoginPage() {
   const router = useRouter();
   const { login, user, loading } = useAuth();
+  // Prefill only in demo mode; real mode must never suggest credentials.
   const [email, setEmail] = React.useState(USE_MOCK ? 'demo@insightgpt.local' : '');
   const [password, setPassword] = React.useState(USE_MOCK ? 'demo' : '');
   const [submitting, setSubmitting] = React.useState(false);
@@ -40,6 +41,20 @@ export default function LoginPage() {
       setSubmitting(false);
     }
   };
+
+  // While the silent refresh probe is still running we do not yet know whether
+  // there is a session — showing the form would flash it for a signed-in user.
+  if (loading) {
+    return (
+      <div
+        className="flex min-h-screen items-center justify-center bg-background"
+        aria-busy="true"
+      >
+        <Loader2 className="size-6 animate-spin text-muted-foreground" aria-hidden />
+        <span className="sr-only">Checking your session…</span>
+      </div>
+    );
+  }
 
   return (
     <div className="grid min-h-screen lg:grid-cols-2">

@@ -52,8 +52,10 @@ with one command; every service exists as a runnable stub.
   `config/`, `docker/`, `scripts/`, `tests/`).
 - `docker/compose.yml` with services: `postgres`, `qdrant`, `ollama`, `api`,
   `worker`, `web` — the last three as health-check stubs.
-- Configuration: YAML in `config/`, runtime discovery in `config/runtime.json`,
-  `.env.example`; no hardcoded ports/paths.
+- Configuration: YAML in `config/` and `services/retrieval/config/`, plus
+  `.env.example`; no hardcoded ports/paths. (A `config/runtime.json` for
+  discovered runtime values was planned here and not built — ports are passed
+  through the environment instead, which turned out to be enough.)
 - CI skeleton (lint + typecheck + a placeholder test job) that runs green.
 - `scripts/bootstrap` (or equivalent) that sets up the dev environment and pulls
   the default Ollama models.

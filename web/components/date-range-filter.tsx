@@ -2,46 +2,52 @@
 
 import { CalendarDays, SlidersHorizontal } from 'lucide-react';
 import { Select } from '@/components/ui/select';
+import { RANGE_OPTIONS, type RangeKey } from '@/lib/metrics';
 
 export interface DashboardFilters {
-  range: '7d' | '30d' | 'quarter' | 'ytd';
+  range: RangeKey;
+  /** `all` means "no predicate"; other values are governed dimension values. */
   region: string;
   category: string;
 }
 
-const RANGE_OPTIONS = [
-  { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' },
-  { value: 'quarter', label: 'This quarter' },
-  { value: 'ytd', label: 'Year to date' },
-];
+export const ALL_VALUES = 'all';
 
-const REGION_OPTIONS = [
-  { value: 'all', label: 'All regions' },
-  { value: 'north', label: 'North' },
-  { value: 'south', label: 'South' },
-  { value: 'east', label: 'East' },
-  { value: 'west', label: 'West' },
-];
-
-const CATEGORY_OPTIONS = [
-  { value: 'all', label: 'All categories' },
-  { value: 'electronics', label: 'Electronics' },
-  { value: 'home', label: 'Home & Kitchen' },
-  { value: 'outdoor', label: 'Outdoor & Garden' },
-  { value: 'apparel', label: 'Apparel' },
-];
+function withAll(
+  values: string[],
+  allLabel: string,
+): Array<{ value: string; label: string }> {
+  return [
+    { value: ALL_VALUES, label: allLabel },
+    ...values.map((value) => ({ value, label: value })),
+  ];
+}
 
 /**
- * Range + dimension filter bar. Each change should re-issue POST /metrics/query
- * so tiles and charts stay consistent (docs/07 §4.2).
+ * Range + dimension filter bar. Every change re-issues POST /metrics/query so
+ * tiles and charts stay consistent.
+ *
+ * Dimension values are supplied by the caller from a governed query rather than
+ * hard-coded, so the options always match what the warehouse actually contains
+ * (including their exact casing, which the filter predicate is sensitive to).
  */
 export function DateRangeFilter({
   value,
   onChange,
+  regions,
+  categories,
+  regionLabel = 'Region',
+  categoryLabel = 'Category',
+  loading,
 }: {
   value: DashboardFilters;
   onChange: (next: DashboardFilters) => void;
+  regions: string[];
+  categories: string[];
+  /** Human labels from the metric catalog, falling back to the dimension id. */
+  regionLabel?: string;
+  categoryLabel?: string;
+  loading?: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2 shadow-soft">
@@ -55,7 +61,7 @@ export function DateRangeFilter({
           options={RANGE_OPTIONS}
           value={value.range}
           onChange={(e) =>
-            onChange({ ...value, range: e.target.value as DashboardFilters['range'] })
+            onChange({ ...value, range: e.target.value as RangeKey })
           }
         />
       </div>
@@ -65,16 +71,18 @@ export function DateRangeFilter({
       </div>
       <div className="w-40">
         <Select
-          aria-label="Region"
-          options={REGION_OPTIONS}
+          aria-label={regionLabel}
+          disabled={loading || regions.length === 0}
+          options={withAll(regions, `All ${regionLabel.toLowerCase()}s`)}
           value={value.region}
           onChange={(e) => onChange({ ...value, region: e.target.value })}
         />
       </div>
       <div className="w-44">
         <Select
-          aria-label="Category"
-          options={CATEGORY_OPTIONS}
+          aria-label={categoryLabel}
+          disabled={loading || categories.length === 0}
+          options={withAll(categories, `All ${categoryLabel.toLowerCase()}s`)}
           value={value.category}
           onChange={(e) => onChange({ ...value, category: e.target.value })}
         />

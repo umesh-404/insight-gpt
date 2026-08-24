@@ -83,6 +83,9 @@ class Document:
     region: str | None
     category: str | None
     product_id: int | None
+    # The SKU as well as the surrogate id: retrieval indexes this as
+    # `product_ref`, and an exact SKU is what a lexical/sparse match keys on.
+    product_sku: str | None
     customer_id: int | None
     rating: int | None
     author_role: str
@@ -142,6 +145,9 @@ def build_documents(
             )
             region = cust.region
             resolution = rng.choice(["resolved", "closed"])
+        # Name the SKU in the text as well as the metadata: an exact identifier
+        # is what the sparse/lexical half of hybrid retrieval matches on.
+        body = f"{body} Item {product.sku}."
         docs.append(
             Document(
                 doc_id=f"TICKET-{40000 + n}",
@@ -152,6 +158,7 @@ def build_documents(
                 region=region,
                 category=category,
                 product_id=product.product_id,
+                product_sku=product.sku,
                 customer_id=cust.customer_id,
                 rating=None,
                 author_role="support_agent",
@@ -180,6 +187,7 @@ def build_documents(
             title = rng.choice(_POS_REVIEW_TITLES)
             body = rng.choice(_POS_REVIEW_BODIES).format(category=category.lower())
             region = cust.region
+        body = f"{body} Item {product.sku}."
         docs.append(
             Document(
                 doc_id=f"REVIEW-{90000 + n}",
@@ -190,6 +198,7 @@ def build_documents(
                 region=region,
                 category=category,
                 product_id=product.product_id,
+                product_sku=product.sku,
                 customer_id=cust.customer_id,
                 rating=rating,
                 author_role="customer",
@@ -254,6 +263,7 @@ def _build_reports(cfg: GeneratorConfig) -> list[Document]:
                 region=cfg.dip_region if is_dip else None,
                 category=cfg.dip_category if is_dip else None,
                 product_id=None,
+                product_sku=None,
                 customer_id=None,
                 rating=None,
                 author_role="ops_manager",

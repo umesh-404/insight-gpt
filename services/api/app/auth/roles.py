@@ -51,6 +51,27 @@ async def current_claims(
     return claims
 
 
+async def optional_claims(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> TokenClaims | None:
+    """Resolve claims when a valid token is present, else ``None``.
+
+    For endpoints that are reachable anonymously (``/auth/login``) but still
+    want per-caller behaviour when a token happens to be supplied. Never raises
+    on a missing or invalid token — authentication is not the point here.
+    """
+    if creds is None or not creds.credentials:
+        return None
+    try:
+        claims = decode_token(creds.credentials, expected_type="access")
+    except TokenError:
+        return None
+    request.state.user_id = claims.sub
+    request.state.role = claims.role
+    return claims
+
+
 def require_role(minimum: Role):
     """Return a dependency that enforces a minimum role on an endpoint."""
 

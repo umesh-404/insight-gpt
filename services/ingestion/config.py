@@ -24,6 +24,11 @@ class IngestionSettings(BaseSettings):
     # Where the generator wrote its output.
     generated_dir: Path = _REPO_ROOT / "data" / "generated"
 
+    # Where the redacted document corpus is published for services/retrieval to
+    # index. This file IS the ingestion -> retrieval hand-off contract; the
+    # worker's `reindex_docs` job reads exactly this path by default.
+    document_corpus_path: Path = _REPO_ROOT / "data" / "ingested" / "documents.json"
+
 
 def get_settings() -> IngestionSettings:
     return IngestionSettings()

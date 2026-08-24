@@ -18,14 +18,29 @@ and a job whose dependency is missing fails cleanly instead of crashing the loop
 
 | Job | Does | Schedule (default) |
 |---|---|---|
-| `full_ingest` | `services.ingestion` full reload of `raw.*` | on-demand |
-| `incremental_sync` | `services.ingestion` content-hash / watermark sync | every 30 min |
-| `reindex_docs` | retrieval indexer: re-chunk / re-embed into Qdrant | every 30 min (offset +15) |
+| `full_ingest` | `services.ingestion` full reload of `raw.*` + republish the document corpus | on-demand |
+| `incremental_sync` | `services.ingestion` content-hash sync + republish the document corpus | every 30 min |
+| `reindex_docs` | retrieval indexer: re-chunk / re-embed the **changed** documents from that corpus | every 30 min (offset +15) |
 | `dbt_build` | `dbt build` over the warehouse project (subprocess) | daily @ 02:00 |
 
 The two 30-minute interval jobs are offset so they do not fire in the same tick
-and contend for the box. Each job runs with `max_instances=1` — the
-single-instance execution lock docs/03 §5.2 calls for.
+and contend for the box. Each job runs with `max_instances=1` and
+`coalesce=True` — the single-instance execution lock docs/03 §5.2 calls for.
+
+### The ingest → reindex chain
+
+`full_ingest` / `incremental_sync` publish every redacted document to
+`data/ingested/documents.json`, and `reindex_docs` reads exactly that file. It
+re-embeds only documents whose content hash changed and deletes the chunks of
+documents that vanished from the corpus, so the half-hourly reindex over an
+unchanged corpus costs nothing.
+
+If that corpus does not exist, `reindex_docs` **fails with a message naming the
+command that creates it** rather than falling back to the retrieval package's
+six built-in demo documents. A reindex that reports success with a healthy chunk
+count while the real corpus was never touched is the exact failure this wiring
+exists to prevent. The demo set is still reachable, on purpose:
+`REINDEX_SOURCE=samples`.
 
 ## Run
 
@@ -60,7 +75,10 @@ curl http://localhost:8090/health      # -> {"status": "ok"}
 | `POSTGRES_DSN` | *(unset)* | Run-tracking DSN; unset ⇒ in-memory store (offline) |
 | `QDRANT_URL` | `http://qdrant:6333` | Vector store, passed to retrieval |
 | `OLLAMA_HOST` | `http://ollama:11434` | Embeddings host, passed to retrieval |
-| `EMBED_MODEL` | `nomic-embed-text` | Embedding model name |
+| `EMBED_MODEL` | `nomic-embed-text` | Embedding model name (768-d) |
+| `REINDEX_SOURCE` | `ingested` | `ingested` (the published corpus) / `samples` / an explicit path |
+| `DOCUMENT_CORPUS_PATH` | `data/ingested/documents.json` | The ingestion hand-off file |
+| `REINDEX_CHANGED_ONLY` | `true` | `false` re-embeds the whole corpus every run |
 | `HEALTH_PORT` | `8090` | Health endpoint port |
 | `INCREMENTAL_SYNC_MINUTES` | `30` | `incremental_sync` cadence |
 | `REINDEX_DOCS_MINUTES` | `30` | `reindex_docs` cadence |

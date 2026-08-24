@@ -5,15 +5,21 @@
 #   make down        # stop the stack (volumes preserved)
 #   make logs        # tail all service logs
 #   make seed        # (re)build the warehouse from synthetic data (host or worker)
+#   make reindex     # re-embed changed documents into Qdrant
 #   make test        # run every service's offline test suite
+#   make lint        # ruff over every Python package
 #
-# Compose lives in docker/compose.yml but is always driven from the repo root so
-# the root .env and the build contexts resolve correctly.
+# Compose lives in docker/compose.yml but is always driven from the repo root.
+# `--env-file .env` is REQUIRED with `-f docker/compose.yml`: compose takes its
+# project directory from the compose file's folder, so without the flag it looks
+# for `docker/.env`, never reads the root one, and every ${VAR:-default} in the
+# topology silently falls back to its default. (The root `compose.yaml` exists so
+# that a plain `docker compose up` from the root works too.)
 
 COMPOSE := docker compose --env-file .env -f docker/compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down restart bootstrap logs ps seed test clean
+.PHONY: help env up down restart bootstrap logs ps seed reindex test lint clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -42,8 +48,11 @@ logs: ## Tail logs for all services
 ps: ## Show service status
 	$(COMPOSE) ps
 
-seed: ## (Re)build the warehouse via the worker container
-	$(COMPOSE) run --rm worker python scripts/seed.py
+seed: ## (Re)build the warehouse + republish the document corpus
+	$(COMPOSE) run --rm worker python scripts/seed.py --require-postgres
+
+reindex: ## Re-embed changed documents into Qdrant (tracked as a pipeline run)
+	$(COMPOSE) run --rm worker python -m worker run reindex_docs
 
 clean: ## Stop the stack and DELETE all data volumes (destructive)
 	$(COMPOSE) down -v
@@ -54,4 +63,9 @@ test: ## Run each service's offline tests
 	@echo "== services/api ==";        cd services/api        && uv run pytest -q
 	@echo "== services/retrieval ==";  cd services/retrieval  && uv run pytest -q
 	@echo "== services/ingestion ==";  cd services/ingestion  && uv run pytest -q
+	@echo "== services/worker ==";     cd services/worker     && uv run pytest -q
 	@echo "== data/generator ==";      uv run pytest -q data/generator/tests
+	@echo "== tests (semantic-layer drift) =="; uv run --with pytest --with pyyaml pytest -q tests
+
+lint: ## Ruff over every Python package (line-length 100; E,F,I,UP,B,SIM)
+	uv run --with ruff ruff check services data scripts tests

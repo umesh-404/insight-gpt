@@ -22,7 +22,8 @@ import {
   ZAxis,
 } from 'recharts';
 import { Table as TableIcon, BarChart3 } from 'lucide-react';
-import type { ChartSpec, ColumnDtype } from '@/lib/types';
+// `Cell` is aliased: recharts exports a component with the same name.
+import type { Cell as CellValue, ChartSpec, ColumnDtype } from '@/lib/types';
 import { seriesColor } from '@/lib/chart-colors';
 import { formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
 import {
@@ -40,7 +41,12 @@ interface ChartRendererProps {
   className?: string;
 }
 
-type Row = Record<string, string | number | null>;
+type Row = Record<string, CellValue>;
+
+/** Series keys become SVG gradient ids; column names may contain spaces. */
+function gradientId(key: string): string {
+  return `fill-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+}
 
 const AXIS_TICK = { fill: 'hsl(var(--muted-foreground))', fontSize: 12 };
 const GRID_STROKE = 'hsl(var(--border))';
@@ -101,7 +107,7 @@ export function ChartRenderer({ spec, height = 280, className }: ChartRendererPr
   const [view, setView] = React.useState<'chart' | 'table'>(
     spec.kind === 'table' ? 'table' : 'chart',
   );
-  const data = (spec.data ?? []) as Row[];
+  const data: Row[] = spec.data ?? [];
   const xKey = spec.x ?? 'x';
   const yFormat = spec.options?.yFormat ?? spec.options?.unit;
 
@@ -123,8 +129,7 @@ export function ChartRenderer({ spec, height = 280, className }: ChartRendererPr
   }
 
   const caption =
-    spec.title ??
-    `${spec.kind[0]?.toUpperCase()}${spec.kind.slice(1)} chart`;
+    spec.title || `${spec.kind[0]?.toUpperCase() ?? ''}${spec.kind.slice(1)} chart`;
 
   return (
     <figure className={className}>
@@ -215,7 +220,7 @@ function renderChart(
         <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 4 }}>
           <defs>
             {series.map((s, i) => (
-              <linearGradient key={s.y} id={`fill-${s.y}`} x1="0" y1="0" x2="0" y2="1">
+              <linearGradient key={s.y} id={gradientId(s.y)} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor={seriesColor(i)} stopOpacity={0.3} />
                 <stop offset="95%" stopColor={seriesColor(i)} stopOpacity={0.02} />
               </linearGradient>
@@ -234,7 +239,7 @@ function renderChart(
               name={s.label ?? s.y}
               stroke={seriesColor(i)}
               strokeWidth={2}
-              fill={`url(#fill-${s.y})`}
+              fill={`url(#${gradientId(s.y)})`}
               stackId={spec.stacked ? 'stack' : undefined}
             />
           ))}

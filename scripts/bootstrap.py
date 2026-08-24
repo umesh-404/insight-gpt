@@ -13,11 +13,15 @@ Missing services fail with a clear, actionable message rather than a traceback.
 Steps
 -----
 1. Wait for postgres, qdrant, and ollama to be reachable.
-2. Pull the Ollama models (embedding + reranker + chat) — skipped if present.
-3. Build the warehouse: generate -> load raw -> dbt seed/run/test
-   (delegates to scripts/seed.py, which is itself idempotent).
+2. Pull the Ollama models — embedding + reranker always, the chat model only
+   when LLM_PROVIDER=ollama. Present models are skipped; flaky pulls are
+   retried and verified against Ollama's model list, never assumed.
+3. Build the warehouse: generate -> load raw + publish the redacted document
+   corpus -> dbt seed/run/test (delegates to scripts/seed.py, run with
+   --require-postgres because step 1 already proved the database is up).
 4. Create the Qdrant `documents` collection (skipped if it exists).
-5. Index the built-in sample documents (skipped if the collection is non-empty).
+5. Index the corpus step 3 published — changed-only, so a re-run re-embeds
+   nothing when nothing changed.
 
 Env (all have compose defaults):
     POSTGRES_DSN / POSTGRES_HOST ...  Postgres connection
@@ -30,6 +34,7 @@ Env (all have compose defaults):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -126,6 +131,37 @@ def _installed_models() -> set[str]:
         return set()
 
 
+PULL_ATTEMPTS = 3
+
+
+def _pull_once(name: str) -> None:
+    """One /api/pull attempt. Raises on transport OR in-stream failure.
+
+    Ollama streams NDJSON progress and reports a mid-pull failure as
+    ``{"error": ...}`` on a 200 response — draining the stream blindly would
+    print "done" for a pull that never completed.
+    """
+    with httpx.stream(
+        "POST", f"{OLLAMA_HOST}/api/pull",
+        json={"name": name}, timeout=None,
+    ) as resp:
+        resp.raise_for_status()
+        last_status = ""
+        for line in resp.iter_lines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if error := event.get("error"):
+                raise RuntimeError(error)
+            last_status = event.get("status", last_status)
+        if last_status and last_status != "success":
+            raise RuntimeError(f"pull ended with status {last_status!r}, not 'success'")
+
+
 def _pull_model(name: str) -> None:
     installed = _installed_models()
     # Ollama reports names as "model:tag"; accept a bare name as ":latest".
@@ -133,18 +169,38 @@ def _pull_model(name: str) -> None:
     if name in installed or canonical in installed:
         print(f"  - {name} already present, skipping")
         return
-    print(f"  - pulling {name} ...", flush=True)
-    try:
-        with httpx.stream(
-            "POST", f"{OLLAMA_HOST}/api/pull",
-            json={"name": name}, timeout=None,
-        ) as resp:
-            resp.raise_for_status()
-            for _ in resp.iter_lines():
-                pass  # drain progress; stream ends when the pull completes
-        print(f"    done: {name}")
-    except Exception as exc:  # noqa: BLE001
-        _fail(f"failed to pull Ollama model '{name}': {exc}")
+
+    # Long pulls over a flaky registry connection die with httpx's
+    # "incomplete chunked read" (or a plain read timeout / reset). Ollama keeps
+    # the blobs it already fetched, so a retry resumes rather than restarts —
+    # which is why retrying here is cheap and worth doing.
+    for attempt in range(1, PULL_ATTEMPTS + 1):
+        print(
+            f"  - pulling {name} (attempt {attempt}/{PULL_ATTEMPTS}) ...", flush=True
+        )
+        try:
+            _pull_once(name)
+        except (httpx.HTTPError, RuntimeError) as exc:
+            detail = f"{type(exc).__name__}: {exc}".strip()
+            if attempt == PULL_ATTEMPTS:
+                _fail(
+                    f"failed to pull Ollama model {name!r} after "
+                    f"{PULL_ATTEMPTS} attempts ({detail}).\n"
+                    f"Check the ollama service, then re-run bootstrap — completed "
+                    f"blobs are kept, so the retry resumes."
+                )
+            print(f"    retrying after {detail}", flush=True)
+            time.sleep(3.0 * attempt)
+            continue
+        # A successful stream should mean the model is listed; verify rather
+        # than assume, so a silent partial pull cannot pass as done.
+        if name in _installed_models() or canonical in _installed_models():
+            print(f"    done: {name}")
+            return
+        if attempt == PULL_ATTEMPTS:
+            _fail(f"pulled {name!r} but Ollama does not list it — pull did not complete.")
+        print("    pull reported success but the model is not listed; retrying", flush=True)
+        time.sleep(3.0 * attempt)
 
 
 def step_models(skip: bool) -> None:
@@ -152,17 +208,23 @@ def step_models(skip: bool) -> None:
     if skip:
         print("  - --skip-models set, skipping")
         return
+    # The embedding and reranker models are always local Ollama models: the
+    # retrieval pipeline has no cloud embedding path. Only the CHAT model
+    # follows LLM_PROVIDER, so pulling it for an openai/gemini/groq deployment
+    # would waste gigabytes on a model that is never called.
     models: list[str] = []
-    embed = os.environ.get("EMBED_MODEL", "nomic-embed-text")
-    rerank = os.environ.get("RERANK_MODEL", "")
-    models.append(embed)
-    if rerank:
+    models.append(os.environ.get("EMBED_MODEL", "nomic-embed-text"))
+    if rerank := os.environ.get("RERANK_MODEL", ""):
         models.append(rerank)
-    if os.environ.get("LLM_PROVIDER", "ollama").lower() == "ollama":
-        chat = os.environ.get("LLM_MODEL", "llama3.1:8b")
-        if chat:
+
+    provider = os.environ.get("LLM_PROVIDER", "ollama").strip().lower()
+    if provider == "ollama":
+        if chat := os.environ.get("LLM_MODEL", "llama3.1:8b"):
             models.append(chat)
-    for m in dict.fromkeys(models):  # de-dupe, preserve order
+    else:
+        print(f"  - LLM_PROVIDER={provider}: chat model is remote, not pulling one")
+
+    for m in dict.fromkeys(filter(None, models)):  # de-dupe, preserve order
         _pull_model(m)
 
 
@@ -170,14 +232,16 @@ def step_models(skip: bool) -> None:
 # 3. Build the warehouse (generate -> load -> dbt)                            #
 # --------------------------------------------------------------------------- #
 def step_warehouse() -> None:
-    _step(3, "Build warehouse (generate -> load raw -> dbt seed/run/test)")
+    _step(3, "Build warehouse (generate -> load raw + publish documents -> dbt)")
     seed = _REPO_ROOT / "scripts" / "seed.py"
     if not seed.exists():
         _fail(f"scripts/seed.py not found at {seed}")
-    print(f"  $ python {seed}")
-    completed = subprocess.run(
-        [sys.executable, str(seed)], cwd=str(_REPO_ROOT), check=False,
-    )
+    # --require-postgres: step 1 already proved the database is reachable, so a
+    # seed run that quietly skips the warehouse here would be a bug, not a
+    # graceful degradation. Make it fail loudly instead.
+    cmd = [sys.executable, str(seed), "--require-postgres"]
+    print("  $ " + " ".join(cmd))
+    completed = subprocess.run(cmd, cwd=str(_REPO_ROOT), check=False)
     if completed.returncode != 0:
         _fail("warehouse build failed (see seed.py output above).")
 
@@ -192,20 +256,30 @@ def _retrieval(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _collection_count() -> int:
+def _collection_count() -> int | None:
+    """Points in the collection, ``-1`` if it does not exist, ``None`` on error.
+
+    The three cases are kept distinct on purpose: conflating "Qdrant is
+    unreachable" with "the collection does not exist yet" makes a broken step
+    look like a first run.
+    """
     try:
         r = httpx.get(f"{QDRANT_URL}/collections/{COLLECTION}", timeout=10.0)
         if r.status_code == 404:
             return -1
         r.raise_for_status()
         return int(r.json().get("result", {}).get("points_count") or 0)
-    except Exception:  # noqa: BLE001
-        return -1
+    except Exception as exc:  # noqa: BLE001
+        print(f"  ! could not query Qdrant: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
 
 
 def step_collection() -> None:
     _step(4, f"Create Qdrant '{COLLECTION}' collection")
-    if _collection_count() >= 0:
+    count = _collection_count()
+    if count is None:
+        _fail(f"cannot reach Qdrant at {QDRANT_URL} to check for '{COLLECTION}'.")
+    if count >= 0:
         print("  - collection already exists, skipping")
         return
     proc = _retrieval("setup")
@@ -215,12 +289,13 @@ def step_collection() -> None:
 
 
 def step_index() -> None:
-    _step(5, "Index sample documents into Qdrant")
-    count = _collection_count()
-    if count > 0:
-        print(f"  - collection already has {count} points, skipping index")
-        return
-    proc = _retrieval("index")  # no path -> built-in sample documents
+    _step(5, "Index the ingested document corpus into Qdrant")
+    if _collection_count() is None:
+        _fail(f"cannot reach Qdrant at {QDRANT_URL} to index into.")
+    # No skip-if-non-empty here: indexing is changed-only, so a second run over
+    # an unchanged corpus re-embeds nothing anyway — and skipping on "the
+    # collection has points" would silently ignore documents that DID change.
+    proc = _retrieval("index")  # no path -> the corpus published by step 3
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         _fail(f"`retrieval.cli index` failed:\n{proc.stderr}")

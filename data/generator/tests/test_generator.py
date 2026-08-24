@@ -169,3 +169,41 @@ def test_different_seed_differs(tmp_path: Path) -> None:
     generate(GeneratorConfig(seed=1), out_dir=a)
     generate(GeneratorConfig(seed=2), out_dir=b)
     assert (a / "order_items.csv").read_bytes() != (b / "order_items.csv").read_bytes()
+
+
+def test_documents_are_deterministic_too(tmp_path: Path) -> None:
+    """The documents are half the demo; determinism has to cover them as well.
+
+    The CSVs were already pinned, but the document JSONs are what the ingestion
+    hand-off publishes and retrieval embeds — a non-deterministic corpus would
+    make every re-seed look like the whole corpus changed and re-embed it.
+    """
+    a, b = tmp_path / "a", tmp_path / "b"
+    generate(GeneratorConfig(seed=123), out_dir=a)
+    generate(GeneratorConfig(seed=123), out_dir=b)
+    for name in ("support_tickets", "reviews", "reports"):
+        assert (a / "documents" / f"{name}.json").read_bytes() == (
+            b / "documents" / f"{name}.json"
+        ).read_bytes()
+
+
+def test_documents_carry_the_product_sku(dataset: Path) -> None:
+    """`product_sku` becomes retrieval's `product_ref` and is the identifier a
+    lexical/sparse query can match exactly — the integer id cannot."""
+    import json
+
+    skus = {p["sku"] for p in _load(dataset, "products")}
+    for name in ("support_tickets", "reviews"):
+        docs = json.loads((dataset / "documents" / f"{name}.json").read_text(encoding="utf-8"))
+        assert docs, f"{name}.json is empty"
+        for doc in docs:
+            assert doc["product_sku"] in skus
+            # ...and it is named in the text, not only in the metadata.
+            assert doc["product_sku"] in doc["body"]
+
+
+def test_reports_have_no_product(dataset: Path) -> None:
+    import json
+
+    reports = json.loads((dataset / "documents" / "reports.json").read_text(encoding="utf-8"))
+    assert all(r["product_sku"] is None and r["product_id"] is None for r in reports)

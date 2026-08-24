@@ -8,53 +8,87 @@ import {
 } from '@/components/ui/table';
 import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import type { AtRiskRow } from '@/lib/mock';
+import { formatNumber } from '@/lib/utils';
+import type { MetricResult } from '@/lib/types';
 
-const SEVERITY: Record<AtRiskRow['severity'], BadgeProps['variant']> = {
+type Severity = 'high' | 'medium' | 'low';
+
+const SEVERITY: Record<Severity, BadgeProps['variant']> = {
   high: 'destructive',
   medium: 'warning',
   low: 'muted',
 };
 
-/** SKUs flagged by sell-through vs. lead time (docs/07 §4.2). */
+interface AtRiskRow {
+  product: string;
+  units: number;
+  severity: Severity;
+}
+
+/**
+ * Severity heuristic: stock is ranked against the largest on-hand figure in the
+ * returned set, so the badge reflects relative depletion rather than an
+ * arbitrary absolute threshold.
+ */
+function toRows(result: MetricResult): AtRiskRow[] {
+  const valueIndex = result.columns.findIndex(
+    (c) => c.dtype === 'number' || c.dtype === 'currency',
+  );
+  const labelIndex = result.columns.findIndex((_, i) => i !== valueIndex);
+  if (valueIndex < 0) return [];
+
+  const rows = result.rows.map((row) => ({
+    product: String(row[labelIndex] ?? '—'),
+    units: Number(row[valueIndex] ?? 0),
+  }));
+  const max = rows.reduce((acc, r) => Math.max(acc, r.units), 0);
+
+  return rows.map((row) => ({
+    ...row,
+    severity:
+      max === 0 || row.units <= max * 0.25
+        ? 'high'
+        : row.units <= max * 0.6
+          ? 'medium'
+          : 'low',
+  }));
+}
+
+/** Lowest-stock SKUs from the governed `units_on_hand` metric. */
 export function InventoryAtRiskTable({
-  rows,
+  result,
   loading,
 }: {
-  rows?: AtRiskRow[];
+  result?: MetricResult;
   loading?: boolean;
 }) {
-  if (loading || !rows) {
-    return <Skeleton className="h-64 w-full" />;
+  if (loading) return <Skeleton className="h-64 w-full" />;
+
+  const rows = result ? toRows(result) : [];
+  if (!rows.length) {
+    return (
+      <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
+        No inventory snapshot for the current filters.
+      </div>
+    );
   }
+
   return (
     <div className="rounded-lg border">
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>SKU</TableHead>
             <TableHead>Product</TableHead>
-            <TableHead>Category</TableHead>
-            <TableHead className="text-right">Cover</TableHead>
-            <TableHead className="text-right">Lead time</TableHead>
+            <TableHead className="text-right">Units on hand</TableHead>
             <TableHead>Risk</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {rows.map((row) => (
-            <TableRow key={row.sku}>
-              <TableCell className="font-mono text-xs text-muted-foreground">
-                {row.sku}
-              </TableCell>
-              <TableCell className="font-medium">{row.name}</TableCell>
-              <TableCell className="text-muted-foreground">
-                {row.category}
-              </TableCell>
+            <TableRow key={row.product}>
+              <TableCell className="font-medium">{row.product}</TableCell>
               <TableCell className="text-right tabular-nums">
-                {row.days_of_cover}d
-              </TableCell>
-              <TableCell className="text-right tabular-nums text-muted-foreground">
-                {row.lead_time_days}d
+                {formatNumber(row.units)}
               </TableCell>
               <TableCell>
                 <Badge variant={SEVERITY[row.severity]} className="capitalize">

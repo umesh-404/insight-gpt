@@ -5,7 +5,7 @@ import { Clock, Play, Loader2 } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
 import { PipelineRunTable } from '@/components/pipeline-run-table';
 import { StatusBadge } from '@/components/status-badge';
-import { ErrorState } from '@/components/states';
+import { describeError, ErrorState } from '@/components/states';
 import {
   Card,
   CardContent,
@@ -16,9 +16,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
+import { RelativeTime } from '@/components/relative-time';
 import { usePipelines, useRuns, useTriggerRun } from '@/lib/hooks';
 import { useAuth } from '@/lib/auth';
-import { timeAgo } from '@/lib/utils';
 import { ApiError } from '@/lib/types';
 
 export function PipelinesView() {
@@ -55,7 +55,7 @@ export function PipelinesView() {
         } else {
           toast({
             title: 'Could not trigger the run',
-            description: err instanceof Error ? err.message : 'Unknown error',
+            description: describeError(err),
             variant: 'destructive',
           });
         }
@@ -127,9 +127,11 @@ export function PipelinesView() {
                 </div>
                 {pipeline.last_run ? (
                   <p className="text-xs text-muted-foreground">
-                    Last run {timeAgo(pipeline.last_run.started_at)}
+                    Last run <RelativeTime iso={pipeline.last_run.started_at} />
                   </p>
-                ) : null}
+                ) : (
+                  <p className="text-xs text-muted-foreground">Never run</p>
+                )}
               </CardContent>
             </Card>
           ))}

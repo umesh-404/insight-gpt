@@ -12,12 +12,12 @@ the store.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .chunking import chunk_document, embed_text
 from .config import RetrievalConfig
+from .corpus import IndexState, load_corpus
 from .embedder import Embedder
 from .models import Document
 from .redact import redact
@@ -30,7 +30,16 @@ class IndexStats:
     documents: int = 0
     chunks: int = 0
     redactions: int = 0
+    skipped_unchanged: int = 0
+    removed: int = 0
     errors: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        return (
+            f"{self.documents} documents, {self.chunks} chunks, "
+            f"{self.redactions} redactions, {self.skipped_unchanged} unchanged, "
+            f"{self.removed} removed"
+        )
 
 
 class Indexer:
@@ -74,19 +83,50 @@ class Indexer:
 
         return self.store.write_document(doc, chunks, dense, sparse)
 
+    # ---------------------------------------------------------------- changed-only
+    def index_changed(
+        self, docs: list[Document], state: IndexState, *, full: bool = False
+    ) -> IndexStats:
+        """Re-index only what changed since the last recorded run.
+
+        Embedding is the expensive step, so an unchanged document must cost
+        nothing. Documents that vanished from the corpus have their chunks
+        deleted, otherwise a retracted ticket would stay retrievable forever.
+
+        The state file is written only for work that actually succeeded: a
+        document that errored is left out, so the next run retries it.
+        """
+        plan = state.plan(docs, full=full)
+        stats = IndexStats(skipped_unchanged=plan.unchanged)
+
+        for doc_id in plan.removed:
+            try:
+                self.store.delete_document(doc_id)
+            except Exception as exc:  # noqa: BLE001 — report, keep going
+                stats.errors.append(f"{doc_id}: delete failed: {type(exc).__name__}: {exc}")
+            else:
+                stats.removed += 1
+                state.forget([doc_id])
+
+        indexed: list[Document] = []
+        for doc in plan.to_index:
+            try:
+                stats.chunks += self._index_one(doc, stats)
+            except Exception as exc:  # noqa: BLE001 — one bad doc must not abort
+                stats.errors.append(f"{doc.doc_id}: {type(exc).__name__}: {exc}")
+            else:
+                stats.documents += 1
+                indexed.append(doc)
+
+        state.record(indexed)
+        state.save()
+        return stats
+
 
 def load_documents(path: Path) -> list[Document]:
     """Load documents from a JSON file (a list) or a folder of JSON files.
 
-    Each JSON object matches the sample-document shape. A folder is read
-    non-recursively, sorted by name for deterministic ordering.
+    Thin alias for :func:`retrieval.corpus.load_corpus`, kept because it is the
+    name callers (worker jobs, the CLI) already import.
     """
-    raws: list[dict] = []
-    if path.is_dir():
-        for f in sorted(path.glob("*.json")):
-            data = json.loads(f.read_text(encoding="utf-8"))
-            raws.extend(data if isinstance(data, list) else [data])
-    else:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        raws.extend(data if isinstance(data, list) else [data])
-    return [Document.from_dict(r) for r in raws]
+    return load_corpus(path)

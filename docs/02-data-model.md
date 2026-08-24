@@ -352,23 +352,47 @@ This is the reliability lever ([`01-architecture.md`](01-architecture.md) §1).
 The insight engine does **not** author free-form SQL over the star schema; it
 maps a natural-language question onto a **named metric** and a set of
 **allowed dimensions**, and the engine deterministically compiles that to SQL
-(detail in [`05-insight-engine.md`](05-insight-engine.md)). Metrics are defined
-once, in `models/metrics/metrics.yml`, so "revenue" means the same thing on a
-dashboard, in a report, and in a chat answer.
+(detail in [`05-insight-engine.md`](05-insight-engine.md)). "revenue" therefore
+means the same thing on a dashboard, in a report, and in a chat answer.
+
+The metrics live in **two** files, on purpose:
+
+* **`config/semantic_layer.yml`** — the catalog the engine's query builder
+  actually reads and compiles into SQL. It also carries the dimension
+  allow-lists, the table allow-list, and the execution limits.
+* **`services/warehouse/models/metrics/metrics.yml`** — the same metrics in
+  dbt's semantic layer (MetricFlow), so `dbt parse` validates them and the
+  definitions are versioned inside the warehouse project.
+
+Neither can be deleted: the engine cannot call MetricFlow, and dbt cannot read
+the engine's catalog. The danger is not the duplication but *silent divergence*,
+so `tests/test_semantic_layer_drift.py` parses both and fails if the metric
+names, labels, aggregations, or dimensions stop agreeing. Adding a metric means
+editing both files — and the test says so the moment you forget.
 
 ### 6.1 Metric definitions
 
-| Metric | Definition (measure) | Source fact | Grain / additivity | Typical dimensions |
+The eight governed metrics, exactly as `config/semantic_layer.yml` defines them:
+
+| Metric | Definition (measure) | Source fact | Grain / additivity | Allowed dimensions |
 |---|---|---|---|---|
-| `revenue` | `sum(gross_revenue - discount_amount)` | fact_order_items | additive | date, region, category, product, channel |
-| `gross_margin` | `sum(gross_revenue - discount_amount - cost_amount)` | fact_order_items | additive | date, region, category, product, channel |
-| `gross_margin_pct` | `gross_margin / nullif(revenue,0)` | derived | ratio (non-additive) | same |
-| `orders` | `count(distinct order_key)` | fact_sales | additive | date, region, channel, segment |
-| `units_sold` | `sum(quantity)` filtered to non-returned | fact_order_items | additive | date, category, product, channel |
-| `aov` | `revenue / nullif(orders,0)` | derived | ratio | date, region, channel, segment |
-| `return_rate` | `sum(quantity where is_returned) / nullif(sum(quantity),0)` | fact_order_items | ratio | date, category, product |
-| `sell_through_rate` | `units_sold / nullif(units_sold + units_on_hand, 0)` | order_items + inventory | ratio | product, store, category |
-| `days_of_inventory` | `units_on_hand / nullif(avg_daily_units_sold, 0)` | inventory + order_items | ratio (snapshot) | product, store |
+| `revenue` | `SUM(gross_revenue - discount_amount)` | fact_order_items | additive | date, region, category, subcategory, product, channel, segment |
+| `gross_margin` | `SUM(gross_revenue - discount_amount - cost_amount)` | fact_order_items | additive | date, region, category, subcategory, product, channel |
+| `gross_margin_pct` | `gross_margin / NULLIF(revenue, 0)` | fact_order_items | ratio (non-additive) | date, region, category, product, channel |
+| `orders` | `COUNT(DISTINCT order_key)` | fact_order_items | additive | date, region, category, channel, segment |
+| `units_sold` | `SUM(CASE WHEN is_returned THEN 0 ELSE quantity END)` | fact_order_items | additive | date, category, subcategory, product, channel |
+| `avg_order_value` (alias `aov`) | `revenue / NULLIF(orders, 0)` | fact_order_items | ratio | date, region, channel, segment |
+| `return_rate` | `SUM(quantity WHERE is_returned) / NULLIF(SUM(quantity), 0)` | fact_order_items | ratio | date, category, subcategory, product |
+| `units_on_hand` | `SUM(units_on_hand)` | fact_inventory_snapshot | additive (snapshot) | date, product, store |
+
+`orders` is counted on `fact_order_items` rather than on an orders fact, because
+distinct-counting the order key at line grain gives the same answer while
+keeping every metric on one fact and therefore one set of joins.
+
+The dbt file adds two building-block metrics, `returned_units` and
+`total_units`, purely so `return_rate` can be expressed as a MetricFlow ratio.
+They are deliberately **not** in the engine catalog — the engine exposes the
+ratio, not its parts — and the drift test asserts they stay out.
 
 Shared dimensions resolve to the conformed `dim_*` tables:
 
