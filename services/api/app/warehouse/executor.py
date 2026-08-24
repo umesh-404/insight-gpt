@@ -53,10 +53,14 @@ class DuckDBWarehouse:
 class PostgresWarehouse:
     """Production executor. Connects as a read-only role over the marts schema."""
 
-    def __init__(self, dsn: str, allow_tables: set[str], statement_timeout_ms: int = 10000):
+    def __init__(self, dsn: str, allow_tables: set[str], statement_timeout_ms: int = 10000,
+                 search_path: str = "marts, public"):
         self._dsn = dsn
         self._allow_tables = allow_tables
         self._timeout = statement_timeout_ms
+        # dbt builds the star schema into the `marts` schema; the builder emits
+        # unqualified table names, so the connection must resolve them there.
+        self._search_path = search_path
 
     def run(self, sql: str, params: list) -> QueryResult:
         import psycopg  # local import: only the production path needs psycopg
@@ -64,6 +68,7 @@ class PostgresWarehouse:
         validate_sql(sql, self._allow_tables, dialect="postgres")
         pg_sql = sql.replace("?", "%s")  # our builder emits qmark placeholders
         with psycopg.connect(self._dsn, autocommit=True) as con:
+            con.execute(f"SET search_path TO {self._search_path}")
             con.execute(f"SET statement_timeout = {int(self._timeout)}")
             cur = con.execute(pg_sql, params)
             columns = [d.name for d in cur.description]

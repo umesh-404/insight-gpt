@@ -68,12 +68,18 @@ function UserCard() {
     );
   }
 
-  const initials = user.name
-    .split(' ')
-    .map((p) => p[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
+  // Display name is defensive: fall back to the email local-part if the API
+  // did not return a name, so the shell can never crash on a missing field.
+  const displayName =
+    user.name && user.name.trim() ? user.name : user.email.split('@')[0];
+  const initials =
+    displayName
+      .split(/[\s._-]+/)
+      .map((p) => p[0])
+      .filter(Boolean)
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || 'U';
 
   return (
     <div className="flex items-center gap-3 rounded-md px-2 py-2">
@@ -81,7 +87,7 @@ function UserCard() {
         {initials}
       </span>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{user.name}</p>
+        <p className="truncate text-sm font-medium">{displayName}</p>
         <Badge variant="muted" className="mt-0.5 capitalize">
           {user.role}
         </Badge>

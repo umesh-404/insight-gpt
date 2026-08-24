@@ -25,6 +25,7 @@ class User(BaseModel):
     id: str
     email: str
     role: str
+    name: str
 
 
 class _StoredUser(User):
@@ -33,15 +34,19 @@ class _StoredUser(User):
 
 # Seeded demo accounts — one per role. Passwords are demo-only, not secrets.
 _SEED = [
-    ("u_admin", "admin@insightgpt.dev", "admin", "admin-pass"),
-    ("u_analyst", "analyst@insightgpt.dev", "analyst", "analyst-pass"),
-    ("u_viewer", "viewer@insightgpt.dev", "viewer", "viewer-pass"),
+    ("u_admin", "admin@insightgpt.dev", "admin", "admin-pass", "Admin User"),
+    ("u_analyst", "analyst@insightgpt.dev", "analyst", "analyst-pass", "Analyst User"),
+    ("u_viewer", "viewer@insightgpt.dev", "viewer", "viewer-pass", "Viewer User"),
 ]
 
 _USERS: dict[str, _StoredUser] = {
-    email: _StoredUser(id=uid, email=email, role=role, password_hash=_hash(pw))
-    for uid, email, role, pw in _SEED
+    email: _StoredUser(id=uid, email=email, role=role, name=name, password_hash=_hash(pw))
+    for uid, email, role, pw, name in _SEED
 }
+
+
+def _public(u: _StoredUser) -> User:
+    return User(id=u.id, email=u.email, role=u.role, name=u.name)
 
 
 def authenticate(email: str, password: str) -> User | None:
@@ -53,11 +58,11 @@ def authenticate(email: str, password: str) -> User | None:
         return None
     if not hmac.compare_digest(stored.password_hash, _hash(password)):
         return None
-    return User(id=stored.id, email=stored.email, role=stored.role)
+    return _public(stored)
 
 
 def get_user(user_id: str) -> User | None:
     for u in _USERS.values():
         if u.id == user_id:
-            return User(id=u.id, email=u.email, role=u.role)
+            return _public(u)
     return None
