@@ -84,19 +84,17 @@ a generated secret, picks free ports, builds the images, starts every service,
 loads the demo warehouse, indexes the documents, and then *proves it works* by
 asking a real question end to end.
 
+**Windows**
+
+```bash
+setup.cmd
+```
+
 **macOS / Linux**
 
 ```bash
 ./setup.sh
 ```
-
-**Windows**
-
-```bash
-powershell -ExecutionPolicy Bypass -File setup.ps1
-```
-
-Prefer make? `make setup` does the same thing.
 
 **Prerequisites:** Docker Desktop (running). Nothing else — the script installs
 the Python toolchain it needs if your machine has none. The first run pulls
@@ -115,7 +113,7 @@ it again — completed steps become fast no-ops.
 | `./setup.sh --skip-models` | Set up without pulling Ollama models (fast; retrieval quality degraded). |
 | `./setup.sh --native` | No Docker: prepare the local dev stack on the built-in sample dataset. |
 
-On Windows use the matching switches: `-Doctor`, `-Repair`, `-SkipModels`, `-Native`.
+On Windows the same flags work: `setup.cmd --doctor`, `setup.cmd --repair`, and so on.
 
 Your edits are safe: `.env` is created if missing and gap-filled when a `git
 pull` adds a new variable, but values you have set are never overwritten.

@@ -596,6 +596,11 @@ def step_native_smoke() -> None:
 # --------------------------------------------------------------------------- #
 # Doctor                                                                       #
 # --------------------------------------------------------------------------- #
+def _entrypoint() -> str:
+    """The command the user actually typed, so hints are copy-pasteable."""
+    return "setup.cmd" if IS_WINDOWS else "./setup.sh"
+
+
 def doctor() -> int:
     """Read-only diagnosis. Changes nothing; names the exact broken thing."""
     print(_c("1", "\nInsightGPT doctor — diagnosis only, nothing is changed.\n"))
@@ -655,7 +660,7 @@ def doctor() -> int:
                 info(f"{key}={port} ({'free' if free else 'in use'})")
     else:
         problems.append(".env is missing")
-        bad(".env missing — run: python scripts/setup.py")
+        bad(f".env missing — run: {_entrypoint()}")
         env = {}
 
     print(_c("1", "\nEndpoints"))
@@ -676,7 +681,8 @@ def doctor() -> int:
         bad(f"{len(problems)} problem(s) found:")
         for p in problems:
             print(f"       - {p}")
-        print(f"\n  Most issues are fixed by:  {_c('1', 'python scripts/setup.py --repair')}\n")
+        hint = f"{_entrypoint()} --repair"
+        print("\n  Most issues are fixed by:  " + _c("1", hint) + "\n")
         return 1
     ok("no problems detected")
     print()
