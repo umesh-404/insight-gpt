@@ -1,5 +1,8 @@
 # InsightGPT — one-command developer workflow.
 #
+#   make setup       # FIRST RUN: set up everything from a fresh clone
+#   make doctor      # diagnose an existing install (changes nothing)
+#   make repair      # clean rebuild + recreate, then re-verify
 #   make up          # build + start the whole stack (docker compose up --build)
 #   make bootstrap   # first-run: pull models, build warehouse, index documents
 #   make down        # stop the stack (volumes preserved)
@@ -19,11 +22,20 @@
 COMPOSE := docker compose --env-file .env -f docker/compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help env up down restart bootstrap logs ps seed reindex test lint clean
+.PHONY: help setup doctor repair env up down restart bootstrap logs ps seed reindex test lint clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+
+setup: ## FIRST RUN: check prerequisites, configure, build, start, seed and verify
+	python scripts/setup.py
+
+doctor: ## Diagnose the install and name what is broken (changes nothing)
+	python scripts/setup.py --doctor
+
+repair: ## Force a clean rebuild + recreate, re-seed and re-verify
+	python scripts/setup.py --repair
 
 env: ## Create .env from .env.example if it does not exist
 	@test -f .env || (cp .env.example .env && echo "Created .env from .env.example — edit secrets before production use.")

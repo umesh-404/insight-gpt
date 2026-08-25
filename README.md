@@ -77,12 +77,58 @@ Start with the docs index: [`docs/README.md`](docs/README.md).
 - [`10-testing-eval.md`](docs/10-testing-eval.md) — tests & eval harnesses
 - [`11-roadmap.md`](docs/11-roadmap.md) — phased build plan
 
-## Run the whole stack
+## Quick start
 
-The full system comes up with a single command. The topology is
-[`docker/compose.yml`](docker/compose.yml), reached through the root
-[`compose.yaml`](compose.yaml); a root [`Makefile`](Makefile) wraps the common
-tasks.
+**One command, from a fresh clone.** It checks prerequisites, writes `.env` with
+a generated secret, picks free ports, builds the images, starts every service,
+loads the demo warehouse, indexes the documents, and then *proves it works* by
+asking a real question end to end.
+
+**macOS / Linux**
+
+```bash
+./setup.sh
+```
+
+**Windows**
+
+```bash
+powershell -ExecutionPolicy Bypass -File setup.ps1
+```
+
+Prefer make? `make setup` does the same thing.
+
+**Prerequisites:** Docker Desktop (running). Nothing else — the script installs
+the Python toolchain it needs if your machine has none. The first run pulls
+local models, so it takes a while and benefits from a GPU (CPU works, slower —
+see [`docs/09-deployment.md`](docs/09-deployment.md) §5).
+
+The script is **idempotent**: if anything fails, fix the cause it names and run
+it again — completed steps become fast no-ops.
+
+### If something breaks
+
+| Command | What it does |
+|---|---|
+| `./setup.sh --doctor` | Diagnose only. Changes nothing, names the exact broken thing. |
+| `./setup.sh --repair` | Clean rebuild + recreate, re-seed, re-verify. Your `.env` is preserved. |
+| `./setup.sh --skip-models` | Set up without pulling Ollama models (fast; retrieval quality degraded). |
+| `./setup.sh --native` | No Docker: prepare the local dev stack on the built-in sample dataset. |
+
+On Windows use the matching switches: `-Doctor`, `-Repair`, `-SkipModels`, `-Native`.
+
+Your edits are safe: `.env` is created if missing and gap-filled when a `git
+pull` adds a new variable, but values you have set are never overwritten.
+
+### Running it by hand
+
+The individual steps are still available if you prefer them:
+
+```bash
+make env                    # copy .env.example -> .env
+make up                     # build + start all six services
+make bootstrap              # first run only: pull models, build warehouse, index docs
+```
 
 > **Run compose from the repo root.** `make up` and a plain
 > `docker compose up --build` both work. Do **not** run
@@ -91,21 +137,24 @@ tasks.
 > fall back to every built-in default — so your `LLM_PROVIDER` would be ignored
 > with no warning. See [`docs/09-deployment.md`](docs/09-deployment.md) §2.1.
 
-**Prerequisites:** Docker + Docker Compose. First run pulls local models into a
-named volume, so it takes a while and benefits from a GPU (CPU works, slower —
-see [`docs/09-deployment.md`](docs/09-deployment.md) §5).
-
-```bash
-make env                    # copy .env.example -> .env
-#                             then edit secrets (JWT_SECRET, any cloud LLM keys)
-make up                     # build + start all six services
-make bootstrap              # first run only: pull models, build warehouse, index docs
-```
-
 Then open:
 
 - **web** — http://localhost:3000
 - **api** — http://localhost:8000 (health: `GET /health`)
+
+Sign in with one of the seeded demo accounts:
+
+| Role | Email | Password |
+|---|---|---|
+| Admin | `admin@insightgpt.dev` | `admin-pass` |
+| Analyst | `analyst@insightgpt.dev` | `analyst-pass` |
+| Viewer | `viewer@insightgpt.dev` | `viewer-pass` |
+
+These are demo credentials for the local stack, not secrets — a real deployment
+replaces the in-memory user store (see [`docs/08-security.md`](docs/08-security.md)).
+
+Try asking *"Why did sales decline last quarter?"* — the answer arrives with the
+SQL that produced each number and the documents behind each claim.
 
 ### Topology
 
@@ -135,6 +184,9 @@ to be healthy.
 
 | Target | What it does |
 |---|---|
+| `make setup` | **First run.** Check prerequisites, configure, build, start, seed and verify end to end |
+| `make doctor` | Diagnose the install; changes nothing |
+| `make repair` | Clean rebuild + recreate, re-seed, re-verify |
 | `make up` | Build and start the full stack (`docker compose up --build -d`) |
 | `make bootstrap` | First-run: pull Ollama models, build the warehouse (generate → load raw + publish the document corpus → dbt), create the Qdrant collection, index that corpus. Idempotent. |
 | `make down` | Stop the stack (named volumes preserved) |
