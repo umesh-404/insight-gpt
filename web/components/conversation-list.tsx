@@ -15,7 +15,7 @@ export function ConversationList() {
   const items = data?.items ?? [];
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <div className="p-3">
         <Button asChild variant="outline" className="w-full justify-start gap-2">
           <Link href="/ask">
@@ -23,7 +23,7 @@ export function ConversationList() {
           </Link>
         </Button>
       </div>
-      <div className="scrollbar-thin flex-1 overflow-y-auto px-2 pb-3">
+      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         <p className="px-2 py-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           Recent
         </p>
