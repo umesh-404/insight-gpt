@@ -30,6 +30,7 @@ import type {
   ReportSummary,
   Source,
   SourceConfig,
+  SourceTestResult,
   SystemStatus,
   TokenPair,
   User,
@@ -422,9 +423,44 @@ export const MOCK_CONVERSATIONS: ConversationSummary[] = [
   },
 ];
 
+/**
+ * Rename in place so mock mode behaves like the real backend: the sidebar
+ * refetch after a rename must show the new title, not the seeded one.
+ */
+export function mockRenameConversation(
+  id: string,
+  title: string,
+): ConversationSummary {
+  const found = MOCK_CONVERSATIONS.find((c) => c.id === id);
+  const updated: ConversationSummary = {
+    ...(found ?? MOCK_CONVERSATIONS[0]!),
+    id,
+    title,
+  };
+  if (found) Object.assign(found, updated);
+  else MOCK_CONVERSATIONS.unshift(updated);
+  return { ...updated };
+}
+
+/** Drop a mock conversation; a no-op when the id is unknown. */
+export function mockDeleteConversation(id: string): void {
+  const index = MOCK_CONVERSATIONS.findIndex((c) => c.id === id);
+  if (index >= 0) MOCK_CONVERSATIONS.splice(index, 1);
+}
+
 export function mockConversation(id: string): Conversation {
-  const summary =
-    MOCK_CONVERSATIONS.find((c) => c.id === id) ?? MOCK_CONVERSATIONS[0]!;
+  // The list is mutable in mock mode (rename/delete), so it can legitimately be
+  // empty — synthesize a summary rather than reading off the end of the array.
+  const summary: ConversationSummary = MOCK_CONVERSATIONS.find(
+    (c) => c.id === id,
+  ) ??
+    MOCK_CONVERSATIONS[0] ?? {
+      id,
+      title: 'Untitled conversation',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      message_count: 0,
+    };
   return {
     id: summary.id,
     title: summary.title,
@@ -646,15 +682,25 @@ export function mockRun(id: string): PipelineRun {
 /* -------------------------------------------------------------------------- */
 
 let mockSources: Source[] = [
-  { id: 's_1', name: 'orders_pg', kind: 'postgres', status: 'ok', last_tested_at: '2026-08-24T06:00:00Z' },
-  { id: 's_2', name: 'catalog_csv', kind: 'csv', status: 'ok', last_tested_at: '2026-08-23T18:00:00Z' },
-  { id: 's_3', name: 'support_tickets', kind: 'documents', status: 'ok', last_tested_at: '2026-08-24T00:00:00Z' },
-  { id: 's_4', name: 'legacy_mysql', kind: 'mysql', status: 'error', last_tested_at: '2026-08-20T12:00:00Z' },
-  { id: 's_5', name: 'reviews_export', kind: 'excel', status: 'untested', last_tested_at: null },
+  { id: 's_1', name: 'warehouse (postgres)', kind: 'postgres', status: 'ok', last_tested_at: '2026-08-24T06:00:00Z', location: 'db.internal:5432', detail: 'Connected and introspected 18 table(s).' },
+  { id: 's_2', name: 'orders.csv', kind: 'csv', status: 'ok', last_tested_at: '2026-08-23T18:00:00Z', location: 'data/generated/orders.csv', detail: 'File is readable (482911 bytes).' },
+  { id: 's_3', name: 'document corpus', kind: 'documents', status: 'ok', last_tested_at: '2026-08-24T00:00:00Z', location: 'data/ingested/documents.json', detail: 'File is readable (1204873 bytes).' },
+  { id: 's_4', name: 'legacy_mysql', kind: 'mysql', status: 'error', last_tested_at: '2026-08-20T12:00:00Z', location: 'legacy.internal:3306', detail: 'TimeoutError: timed out' },
+  { id: 's_5', name: 'reviews_export', kind: 'excel', status: 'untested', last_tested_at: null, location: 'data/generated/reviews.xlsx', detail: null },
 ];
 
 export function listMockSources(): Source[] {
   return [...mockSources];
+}
+
+/** Mirrors the API's non-secret `location`: a path, or `host:port` for a DSN. */
+function mockLocation(config: SourceConfig): string | null {
+  if (config.dsn) {
+    const match = /@([^/?#]+)/.exec(config.dsn);
+    return match?.[1] ?? null;
+  }
+  const path = config.options?.path;
+  return typeof path === 'string' && path.trim() ? path.trim() : null;
 }
 
 export function addMockSource(config: SourceConfig): Source {
@@ -665,9 +711,38 @@ export function addMockSource(config: SourceConfig): Source {
     status: 'untested',
     last_tested_at: null,
     active: true,
+    location: mockLocation(config),
+    detail: 'Registered. Run a test to verify connectivity.',
   };
   mockSources = [...mockSources, source];
   return source;
+}
+
+/** Runs a plausible probe and, like the API, records its outcome on the row. */
+export function testMockSource(id: string): SourceTestResult {
+  const source = mockSources.find((s) => s.id === id);
+  const ok = source?.kind !== 'mysql';
+  const result: SourceTestResult = {
+    ok,
+    latency_ms: ok ? 42 : 5008,
+    tables_seen: ok ? 14 : 0,
+    message: ok
+      ? 'Connected and introspected 14 table(s).'
+      : 'TimeoutError: timed out',
+    checked: ok ? 'connect+introspect' : 'tcp',
+    error_code: ok ? null : 'connect_failed',
+  };
+  mockSources = mockSources.map((s) =>
+    s.id === id
+      ? {
+          ...s,
+          status: ok ? 'ok' : 'error',
+          last_tested_at: new Date().toISOString(),
+          detail: result.message,
+        }
+      : s,
+  );
+  return result;
 }
 
 export function removeMockSource(id: string): void {

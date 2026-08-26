@@ -473,11 +473,19 @@ export interface Source {
   status: 'ok' | 'untested' | 'error';
   last_tested_at?: string | null;
   active?: boolean;
+  /**
+   * Non-secret "where does this point": the configured path for file kinds,
+   * `host:port` for connection kinds. The API never puts credentials here.
+   */
+  location?: string | null;
+  /** Why the source is in its current status — the last probe message. */
+  detail?: string | null;
 }
 
 export interface SourceConfig {
   name: string;
   kind: SourceKind;
+  /** Write-only: accepted on create, never returned by any read. */
   dsn?: string | null;
   options?: Record<string, unknown>;
 }
@@ -487,6 +495,21 @@ export interface SourceTestResult {
   latency_ms: number;
   tables_seen: number;
   message: string;
+  /** What the probe actually verified (`filesystem`, `connect`, `tcp`, …). */
+  checked?: string;
+  error_code?: string | null;
+}
+
+/** Kinds configured by a filesystem path vs. by a connection string. */
+export const PATH_SOURCE_KINDS = ['csv', 'excel', 'documents'] as const;
+export const DSN_SOURCE_KINDS = ['postgres', 'mysql'] as const;
+
+export function sourceNeedsDsn(kind: SourceKind): boolean {
+  return (DSN_SOURCE_KINDS as readonly SourceKind[]).includes(kind);
+}
+
+export function sourceNeedsPath(kind: SourceKind): boolean {
+  return (PATH_SOURCE_KINDS as readonly SourceKind[]).includes(kind);
 }
 
 /* ----------------------------------------------------------------------------

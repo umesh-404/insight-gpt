@@ -32,6 +32,7 @@ import {
   type ColumnSpec,
   type Confidence,
   type Conversation,
+  type ConversationSummary,
   type CorrectionAttempt,
   type ConversationTurn,
   type MetricFormat,
@@ -44,6 +45,8 @@ import {
   type Route,
   type ServiceHealth,
   type ServiceStatus,
+  type Source,
+  type SourceTestResult,
   type StatusFact,
   type SystemStatus,
   type TableBlock,
@@ -400,6 +403,28 @@ export function fromEnvelope(raw: unknown): AnswerEnvelope {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * One sidebar row, from `GET /conversations` or the `PATCH` rename response.
+ *
+ * Total like every other `from*`: a summary missing its timestamps or count
+ * still renders, so a partial payload never blanks the history list.
+ */
+export function fromConversationSummary(
+  raw: unknown,
+  fallbackId = '',
+): ConversationSummary {
+  const o = obj(raw);
+  const created = str(o.created_at);
+  const updated = str(o.updated_at);
+  return {
+    id: str(o.id, fallbackId),
+    title: str(o.title) || 'Untitled conversation',
+    created_at: created || updated,
+    updated_at: updated || created,
+    message_count: num(o.message_count) ?? 0,
+  };
+}
+
+/**
  * `GET /conversations/{id}` returns a flat message log. Fold it into
  * question/answer turns: each assistant message closes the turn opened by the
  * user message before it. A trailing user message with no reply still renders.
@@ -708,6 +733,54 @@ export function fromStatus(raw: unknown): SystemStatus {
   };
 }
 
+
+/* ----------------------------------------------------------------------------
+ * Data sources
+ * ------------------------------------------------------------------------- */
+
+function sourceStatus(value: unknown): Source['status'] {
+  const raw = str(value).toLowerCase();
+  return raw === 'ok' || raw === 'error' ? raw : 'untested';
+}
+
+/**
+ * Normalize one `/sources` record.
+ *
+ * `location` and `detail` are recent additions; an older API omits them, and
+ * neither may ever carry a credential, so both stay optional and are only
+ * surfaced when the backend actually sent a string.
+ */
+export function fromSource(raw: unknown): Source {
+  const o = obj(raw);
+  return {
+    id: str(o.id),
+    name: str(o.name) || str(o.id) || 'Unnamed source',
+    kind: str(o.kind) || 'unknown',
+    status: sourceStatus(o.status),
+    last_tested_at: typeof o.last_tested_at === 'string' ? o.last_tested_at : null,
+    active: o.active !== false,
+    location: typeof o.location === 'string' ? o.location : null,
+    detail: typeof o.detail === 'string' ? o.detail : null,
+  };
+}
+
+export function fromSources(raw: unknown): Source[] {
+  return arr(raw)
+    .map(fromSource)
+    .filter((s) => s.id && s.active !== false);
+}
+
+export function fromSourceTestResult(raw: unknown): SourceTestResult {
+  const o = obj(raw);
+  return {
+    ok: o.ok === true,
+    latency_ms: num(o.latency_ms) ?? 0,
+    tables_seen: num(o.tables_seen) ?? 0,
+    message: str(o.message) || (o.ok === true ? 'Connection OK.' : 'Connection failed.'),
+    checked: str(o.checked) || undefined,
+    error_code: typeof o.error_code === 'string' ? o.error_code : null,
+  };
+}
 
 /* ----------------------------------------------------------------------------
  * Forecasting

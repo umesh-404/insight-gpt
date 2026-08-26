@@ -74,6 +74,92 @@ export function useConversation(id: string): UseQueryResult<Conversation> {
   });
 }
 
+/* ----------------------------------------------------------------------------
+ * Conversation mutations
+ *
+ * Both are optimistic: the sidebar is a navigation surface, so it must react on
+ * the click, not a round trip later. `onMutate` snapshots the cache and
+ * `onError` restores it, so a rejected rename or delete leaves the list exactly
+ * as it was rather than in a half-applied state.
+ * ------------------------------------------------------------------------- */
+
+type ConversationsPage = Paginated<ConversationSummary>;
+
+export function useRenameConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      api.renameConversation(id, title),
+    onMutate: async ({ id, title }) => {
+      // Cancel in-flight refetches first, or one could land after the optimistic
+      // write and revert the new title on screen.
+      await qc.cancelQueries({ queryKey: qk.conversations });
+      const previous = qc.getQueryData<ConversationsPage>(qk.conversations);
+      const clean = title.replace(/\s+/g, ' ').trim();
+      qc.setQueryData<ConversationsPage>(qk.conversations, (page) =>
+        page
+          ? {
+              ...page,
+              items: page.items.map((c) =>
+                c.id === id ? { ...c, title: clean } : c,
+              ),
+            }
+          : page,
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(qk.conversations, context.previous);
+      }
+    },
+    onSuccess: (summary, { id }) => {
+      // Reconcile with the server's normalized title (it collapses whitespace).
+      qc.setQueryData<ConversationsPage>(qk.conversations, (page) =>
+        page
+          ? { ...page, items: page.items.map((c) => (c.id === id ? summary : c)) }
+          : page,
+      );
+      void qc.invalidateQueries({ queryKey: qk.conversation(id) });
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qk.conversations });
+    },
+  });
+}
+
+/**
+ * Delete is deliberately *not* optimistic.
+ *
+ * Dropping the row in `onMutate` unmounts the component that owns the
+ * mutation, and TanStack Query does not run per-call `mutate(…, {onSuccess})`
+ * callbacks for an observer with no listeners — the "navigate away from the
+ * conversation you just deleted" step would silently never fire. Removing on
+ * success keeps the row mounted long enough to show its pending state, report
+ * a failure in place, and redirect.
+ */
+export function useDeleteConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.deleteConversation(id),
+    onSuccess: (_data, id) => {
+      qc.setQueryData<ConversationsPage>(qk.conversations, (page) =>
+        page
+          ? {
+              ...page,
+              items: page.items.filter((c) => c.id !== id),
+              total: Math.max(0, (page.total ?? page.items.length) - 1),
+            }
+          : page,
+      );
+      // The transcript is gone server-side; drop it so a stale back-navigation
+      // cannot render a conversation that no longer exists.
+      qc.removeQueries({ queryKey: qk.conversation(id) });
+      void qc.invalidateQueries({ queryKey: qk.conversations });
+    },
+  });
+}
+
 export function useMetricsCatalog(): UseQueryResult<MetricsCatalog> {
   return useQuery({
     queryKey: qk.metrics,
@@ -273,7 +359,12 @@ export function useDeleteSource() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.deleteSource(id),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      // Drop the row immediately so the table never shows a source the server
+      // has already removed, then reconcile with a refetch.
+      qc.setQueryData<Source[]>(qk.sources, (prev) =>
+        prev ? prev.filter((s) => s.id !== id) : prev,
+      );
       void qc.invalidateQueries({ queryKey: qk.sources });
     },
   });

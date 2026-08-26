@@ -528,10 +528,13 @@ export const api = {
       });
     }
     try {
-      const raw = await request<Paginated<ConversationSummary>>(
+      const raw = await request<{ items?: unknown[]; total?: number }>(
         '/conversations?limit=20&offset=0',
       );
-      return { items: raw?.items ?? [], total: raw?.total ?? 0 };
+      const items = (raw?.items ?? []).map((item) =>
+        wire.fromConversationSummary(item),
+      );
+      return { items, total: raw?.total ?? items.length };
     } catch (err) {
       // Persistence is optional in some deployments; an absent endpoint means
       // "no history", not "the Ask screen is broken".
@@ -548,6 +551,46 @@ export const api = {
       await request<unknown>(`/conversations/${encodeURIComponent(id)}`),
       id,
     );
+  },
+
+  /**
+   * `PATCH /conversations/{id}` — rename a thread. Returns the updated summary.
+   *
+   * The title is trimmed and whitespace-collapsed here as well as server-side,
+   * so an all-whitespace title never costs a round trip. The backend caps it at
+   * 120 characters and answers 404 (never 403) for an id the caller does not
+   * own, so a rejected rename is never a hint that the id exists.
+   */
+  async renameConversation(
+    id: string,
+    title: string,
+  ): Promise<ConversationSummary> {
+    const clean = title.replace(/\s+/g, ' ').trim();
+    if (!clean) {
+      throw new ApiError(400, {
+        code: 'bad_request',
+        message: 'Title cannot be empty.',
+      });
+    }
+    if (USE_MOCK) return delay(mock.mockRenameConversation(id, clean));
+    return wire.fromConversationSummary(
+      await request<unknown>(`/conversations/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: clean }),
+      }),
+      id,
+    );
+  },
+
+  /** `DELETE /conversations/{id}` — 200 on success, 404 when already gone. */
+  async deleteConversation(id: string): Promise<void> {
+    if (USE_MOCK) {
+      mock.mockDeleteConversation(id);
+      return delay(undefined, 200);
+    }
+    await request<void>(`/conversations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
   },
 
   async sendFeedback(
@@ -660,13 +703,14 @@ export const api = {
 
   async listSources(): Promise<Source[]> {
     if (USE_MOCK) return delay(mock.listMockSources());
-    const raw = await request<Source[]>('/sources');
-    return Array.isArray(raw) ? raw : [];
+    return wire.fromSources(await request<unknown>('/sources'));
   },
 
   async createSource(config: SourceConfig): Promise<Source> {
     if (USE_MOCK) return delay(mock.addMockSource(config), 500);
-    return request<Source>('/sources', {
+    // `dsn` is write-only: it goes out on this one request and is never read
+    // back, so it is deliberately not kept anywhere on the client.
+    const raw = await request<unknown>('/sources', {
       method: 'POST',
       body: JSON.stringify({
         name: config.name,
@@ -675,6 +719,7 @@ export const api = {
         ...(config.options ? { options: config.options } : {}),
       }),
     });
+    return wire.fromSource(raw);
   },
 
   async deleteSource(id: string): Promise<void> {
@@ -686,15 +731,11 @@ export const api = {
   },
 
   async testSource(id: string): Promise<SourceTestResult> {
-    if (USE_MOCK) {
-      return delay(
-        { ok: true, latency_ms: 42, tables_seen: 14, message: 'Connection OK' },
-        800,
-      );
-    }
-    return request<SourceTestResult>(`/sources/${encodeURIComponent(id)}/test`, {
+    if (USE_MOCK) return delay(mock.testMockSource(id), 800);
+    const raw = await request<unknown>(`/sources/${encodeURIComponent(id)}/test`, {
       method: 'POST',
     });
+    return wire.fromSourceTestResult(raw);
   },
 
   /* ---- Reports ---------------------------------------------------------- */

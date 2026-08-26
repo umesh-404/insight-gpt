@@ -11,7 +11,9 @@ the contract requires. Every table, citation and caveat in the envelope is
 emitted, so a client that reassembles the stream loses nothing.
 
 Both paths persist the turn into the conversation store, which is what backs
-``GET /conversations`` and ``GET /conversations/{id}``.
+``GET /conversations`` and ``GET /conversations/{id}``, plus the two mutations
+that keep the history sidebar usable: ``PATCH /conversations/{id}`` (rename)
+and ``DELETE /conversations/{id}``.
 """
 
 from __future__ import annotations
@@ -233,6 +235,43 @@ async def get_conversation(
     if conversation is None:
         raise NotFoundError("Conversation not found.")
     return conversation
+
+
+class RenameConversationRequest(BaseModel):
+    """``PATCH /conversations/{id}`` body.
+
+    ``max_length`` is enforced here so an over-long title is a clean 422 with
+    the offending field named, rather than a silent truncation.
+    """
+
+    title: str = Field(min_length=1, max_length=store.TITLE_INPUT_MAX_CHARS)
+
+
+@router.patch("/conversations/{conversation_id}", response_model=store.ConversationSummary)
+async def rename_conversation(
+    body: RenameConversationRequest,
+    conversation_id: str = Path(min_length=1, max_length=200),
+    claims: TokenClaims = Depends(current_claims),
+) -> store.ConversationSummary:
+    title = store.normalize_title(body.title)
+    if not title:
+        raise BadRequestError("Title must contain at least one non-whitespace character.")
+    # Same 404-not-403 rule as the read path: someone else's id must not be
+    # distinguishable from one that never existed.
+    summary = store.rename_conversation(claims.sub, conversation_id, title)
+    if summary is None:
+        raise NotFoundError("Conversation not found.")
+    return summary
+
+
+@router.delete("/conversations/{conversation_id}", status_code=200)
+async def delete_conversation(
+    conversation_id: str = Path(min_length=1, max_length=200),
+    claims: TokenClaims = Depends(current_claims),
+) -> dict[str, str]:
+    if not store.delete_conversation(claims.sub, conversation_id):
+        raise NotFoundError("Conversation not found.")
+    return {"status": "deleted", "id": conversation_id}
 
 
 def _trace(request: Request, engine: InsightEngine, started: float, env: AnswerEnvelope) -> None:

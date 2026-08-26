@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from ..engine.contribution import contribution
 from ..engine.engine import InsightEngine
 from ..engine.retrieval import Retriever
+from ..formatting import format_value as _fmt
 from ..semantic.catalog import Metric, SemanticCatalog
 from ..semantic.query_builder import MetricSelection, build_query
 from ..warehouse.executor import Warehouse
@@ -363,20 +364,25 @@ def _headline(
     return text
 
 
-def _fmt(value: float, fmt: str) -> str:
-    if fmt == "currency":
-        sign = "-" if value < 0 else ""
-        v = abs(value)
-        if v >= 1_000_000:
-            return f"{sign}${v / 1_000_000:.2f}M"
-        if v >= 1_000:
-            return f"{sign}${v / 1_000:.1f}K"
-        return f"{sign}${v:,.0f}"
-    if fmt == "percent":
-        return f"{value * 100:.1f}%"
-    if fmt == "integer":
-        return f"{value:,.0f}"
-    return f"{value:,.2f}"
+def _indian_group(value: float, decimals: int = 0) -> str:
+    """Group digits on the Indian scale: 1152000 -> ``11,52,000``.
+
+    The last three digits are grouped together, then every two before that, so
+    the standard ``{:,}`` (which groups in threes throughout) cannot be used.
+    """
+    sign = "-" if value < 0 else ""
+    text = f"{abs(value):.{decimals}f}"
+    whole, _, frac = text.partition(".")
+    if len(whole) > 3:
+        head, tail = whole[:-3], whole[-3:]
+        pairs = []
+        while len(head) > 2:
+            pairs.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            pairs.insert(0, head)
+        whole = ",".join([*pairs, tail])
+    return sign + whole + (f".{frac}" if frac else "")
 
 
 def _quarter_bounds(period: str) -> tuple[str, str] | None:

@@ -7,24 +7,33 @@ export function cn(...inputs: ClassValue[]): string {
 }
 
 /**
+ * Money and counts are rendered on the Indian scale: lakh/crore grouping and
+ * the rupee symbol. Kept as one constant so a figure can never appear in two
+ * conventions on the same screen.
+ */
+const MONEY_LOCALE = 'en-IN';
+
+/**
  * Format a number as currency, compacting large values.
  *
  * Compact form keeps **three significant digits** rather than zero decimals.
- * With whole-unit compaction, 1,300,000 and 1,152,000 both render "$1M", so a
- * before/after pair reads "$1M → $1M" and the change vanishes from a screen
- * whose entire job is to show it. Three significant digits gives "$1.3M →
- * $1.15M" while keeping round values clean ("$433K", not "$433.33K").
+ * With whole-unit compaction, 13,00,000 and 11,52,000 would both render "₹1Cr",
+ * so a before/after pair reads "₹1Cr → ₹1Cr" and the change vanishes from a
+ * screen whose entire job is to show it. Three significant digits gives
+ * "₹13L → ₹11.5L" while keeping round values clean ("₹4.33L", not "₹4.3333L").
  *
  * The threshold uses the magnitude, so large negatives compact too — a delta of
- * -1,152,000 must not render as "-$1,152,000" beside a compacted positive.
+ * -1,30,000 must not render as "-₹1,30,000" beside a compacted positive.
  */
 export function formatCurrency(
   value: number,
-  currency = 'USD',
+  currency = 'INR',
   maximumFractionDigits = 0,
 ): string {
+  // 1,00,000 is where the Indian scale switches to lakh, which is exactly the
+  // threshold at which compacting starts paying for itself.
   const compact = Math.abs(value) >= 100_000;
-  return new Intl.NumberFormat('en-US', {
+  return new Intl.NumberFormat(MONEY_LOCALE, {
     style: 'currency',
     currency,
     ...(compact
@@ -35,7 +44,7 @@ export function formatCurrency(
 
 /** Format a plain number with grouping. */
 export function formatNumber(value: number, maximumFractionDigits = 0): string {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits }).format(value);
+  return new Intl.NumberFormat(MONEY_LOCALE, { maximumFractionDigits }).format(value);
 }
 
 /** Format a 0..1 ratio as a percentage string. */

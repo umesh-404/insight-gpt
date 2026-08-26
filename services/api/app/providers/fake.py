@@ -13,6 +13,7 @@ import calendar
 import json
 from datetime import date
 
+from ..formatting import format_value
 from .base import Provider
 
 _METRIC_KEYWORDS = [
@@ -114,21 +115,22 @@ class FakeProvider(Provider):
         cites = "".join(f"[{e['n']}]" for e in evidence)
 
         if kind == "change":
+            fmt = f.get("format", "number")
             cur, prior = f["current"], f["prior"]
             pct = f["change_pct"]
             direction = "fell" if pct < 0 else "rose"
             parts = [
                 f"{_label(f['metric'])} {direction} {abs(pct):.1f}% "
-                f"({_num(prior['value'])} → {_num(cur['value'])}) from "
+                f"({_num(prior['value'], fmt)} → {_num(cur['value'], fmt)}) from "
                 f"{prior['label']} to {cur['label']}."
             ]
             drivers = []
             if f.get("top_region"):
                 tr = f["top_region"]
-                drivers.append(f"the {tr['region']} region ({_signed(tr['delta'])})")
+                drivers.append(f"the {tr['region']} region ({_signed(tr['delta'], fmt)})")
             if f.get("top_category"):
                 tc = f["top_category"]
-                drivers.append(f"the {tc['category']} category ({_signed(tc['delta'])})")
+                drivers.append(f"the {tc['category']} category ({_signed(tc['delta'], fmt)})")
             if drivers:
                 parts.append("The change was driven mainly by " + " and ".join(drivers) + ".")
             if evidence:
@@ -141,13 +143,15 @@ class FakeProvider(Provider):
 
         if kind == "scalar":
             return {
-                "answer": f"{_label(f['metric'])} for {f['period']} was {_num(f['value'])}.",
+                "answer": f"{_label(f['metric'])} for {f['period']} was "
+                          f"{_num(f['value'], f.get('format', 'number'))}.",
                 "confidence": "high", "caveats": f.get("caveats", []),
             }
 
         if kind == "grouped":
             top = f.get("rows", [])[:3]
-            listing = "; ".join(f"{r['label']}: {_num(r['value'])}" for r in top)
+            gfmt = f.get("format", "number")
+            listing = "; ".join(f"{r['label']}: {_num(r['value'], gfmt)}" for r in top)
             return {
                 "answer": f"{_label(f['metric'])} by {f['dimension']} for {f['period']} — "
                           f"top: {listing}.",
@@ -270,11 +274,12 @@ def _label(metric: str | None) -> str:
             }.get(metric or "", (metric or "Value").replace("_", " ").capitalize())
 
 
-def _num(v) -> str:
-    if isinstance(v, float) and not v.is_integer():
-        return f"{v:,.2f}"
-    return f"{int(v):,}"
+def _num(v, fmt: str = "number") -> str:
+    """Render a figure the way the UI will, so prose and tiles agree."""
+    return format_value(float(v), fmt)
 
 
-def _signed(v) -> str:
-    return f"+{_num(v)}" if v >= 0 else f"-{_num(abs(v))}"
+def _signed(v, fmt: str = "number") -> str:
+    """A delta always carries its sign, so a fall reads as one."""
+    body = _num(abs(v), fmt)
+    return f"+{body}" if v >= 0 else f"-{body}"

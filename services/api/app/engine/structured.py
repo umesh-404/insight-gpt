@@ -64,6 +64,14 @@ def _period_label(time_range: dict) -> str:
     return f"{start} to {end}"
 
 
+def _format_of(catalog: SemanticCatalog, metric: str) -> str:
+    """The governed display format for ``metric`` (``currency``/``percent``/...)."""
+    try:
+        return catalog.resolve_metric(metric).format
+    except Exception:  # noqa: BLE001 - an unknown metric simply has no format
+        return "number"
+
+
 def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
                    provider: Provider, question: str = "") -> StructuredResult:
     metric = route["metric"] or "revenue"
@@ -101,6 +109,7 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         findings = {
             "kind": "change",
             "metric": metric,
+            "format": _format_of(catalog, metric),
             "current": {"label": _period_label(time_range), "value": cur_total},
             "prior": {"label": _period_label(prior_range), "value": prior_total},
             "change_abs": change_abs,
@@ -131,6 +140,7 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
             value = float(out.result.rows[0][0]) if out.result.rows else 0.0
             tables.append(Table(title=f"{eff_metric}", columns=[eff_metric], rows=[[value]]))
             findings = {"kind": "scalar", "metric": eff_metric,
+                        "format": _format_of(catalog, eff_metric),
                         "period": _period_label(time_range), "value": value}
             return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
         eff_dim = eff_dims[0]
@@ -138,6 +148,7 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
                             columns=out.result.columns, rows=out.result.rows))
         rows = [{"label": r[0], "value": float(r[1])} for r in out.result.rows]
         findings = {"kind": "grouped", "metric": eff_metric, "dimension": eff_dim,
+                    "format": _format_of(catalog, eff_metric),
                     "period": _period_label(time_range), "rows": rows}
         return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
 
@@ -152,6 +163,7 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         else 0.0
     tables.append(Table(title=f"{eff_metric}", columns=[eff_metric], rows=[[value]]))
     findings = {"kind": "scalar", "metric": eff_metric,
+                "format": _format_of(catalog, eff_metric),
                 "period": _period_label(time_range), "value": value}
     return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
 

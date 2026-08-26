@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..formatting import format_value as _fmt
 from ..semantic.catalog import CatalogError, Metric, SemanticCatalog
 from ..semantic.query_builder import Filter, MetricSelection, build_query
 from ..warehouse.executor import Warehouse
@@ -422,19 +423,3 @@ def _headline(
     if confidence in ("none", "low"):
         text += " Confidence is low — this is an estimate, not a commitment."
     return text
-
-
-def _fmt(value: float, fmt: str) -> str:
-    if fmt == "currency":
-        sign = "-" if value < 0 else ""
-        v = abs(value)
-        if v >= 1_000_000:
-            return f"{sign}${v / 1_000_000:.2f}M"
-        if v >= 1_000:
-            return f"{sign}${v / 1_000:.1f}K"
-        return f"{sign}${v:,.0f}"
-    if fmt == "percent":
-        return f"{value * 100:.1f}%"
-    if fmt == "integer":
-        return f"{value:,.0f}"
-    return f"{value:,.2f}"
