@@ -12,6 +12,8 @@
  * (`credentials: 'include'`). This module never persists the access token.
  */
 import {
+  type ForecastResult,
+  type ForecastCapabilityReport,
   ApiError,
   emptyEnvelope,
   type AccessToken,
@@ -584,8 +586,37 @@ export const api = {
 
   async queryMetric(query: MetricQuery): Promise<MetricResult> {
     if (USE_MOCK) return delay(mock.mockMetricResult(query));
-    // Serialized: see `enqueueMetricQuery` for why this cannot fan out.
+    // Capped fan-out: see `enqueueMetricQuery`.
     return enqueueMetricQuery(() => postMetricQuery(query));
+  },
+
+  /* ---- Forecasting ------------------------------------------------------ */
+
+  async forecastMetrics(grain = 'quarter'): Promise<ForecastCapabilityReport> {
+    if (USE_MOCK) return delay(mock.mockForecastCapabilities(grain));
+    return wire.fromForecastCapabilityReport(
+      await request<unknown>(`/forecast/metrics?grain=${encodeURIComponent(grain)}`),
+    );
+  },
+
+  async forecast(body: {
+    metric: string;
+    grain?: string;
+    horizon?: number;
+    interval_level?: number;
+  }): Promise<ForecastResult> {
+    if (USE_MOCK) return delay(mock.mockForecast(body.metric, body.grain ?? 'quarter'));
+    return wire.fromForecast(
+      await request<unknown>('/forecast', {
+        method: 'POST',
+        body: JSON.stringify({
+          metric: body.metric,
+          grain: body.grain ?? 'quarter',
+          horizon: body.horizon ?? 4,
+          ...(body.interval_level ? { interval_level: body.interval_level } : {}),
+        }),
+      }),
+    );
   },
 
   /* ---- Pipelines -------------------------------------------------------- */

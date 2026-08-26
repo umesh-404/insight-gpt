@@ -638,6 +638,61 @@ export interface SystemStatus {
 }
 
 /* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+/** One observed period. Forecast points additionally carry an interval. */
+export interface ForecastPoint {
+  period: string;
+  value: number;
+  lower?: number | null;
+  upper?: number | null;
+}
+
+/** How much weight the answer deserves. `none` means it refused to project. */
+export type ForecastConfidence = 'none' | 'low' | 'medium' | 'high';
+
+export interface ForecastResult {
+  metric: string;
+  metric_label: string;
+  format: MetricFormat;
+  additive: boolean;
+  grain: string;
+  horizon: number;
+  history: ForecastPoint[];
+  /** Empty when the engine declined to forecast — see `caveats`. */
+  forecast: ForecastPoint[];
+  method: string;
+  method_family: string;
+  n_history: number;
+  interval_level: number;
+  confidence: ForecastConfidence;
+  low_confidence: boolean;
+  caveats: string[];
+  headline: string;
+}
+
+/** Whether one metric can be forecast at a grain, and if not, why not. */
+export interface ForecastCapability {
+  metric: string;
+  label: string;
+  format: MetricFormat;
+  additive: boolean;
+  grain: string;
+  n_history: number;
+  forecastable: boolean;
+  reason?: string | null;
+}
+
+export interface ForecastCapabilityReport {
+  grain: string;
+  min_history: number;
+  method_family: string;
+  method: string;
+  metrics: ForecastCapability[];
+}
+
+/* ----------------------------------------------------------------------------
  * Errors
  * ------------------------------------------------------------------------- */
 

@@ -16,6 +16,11 @@
  * screening a page.
  */
 import {
+  type ForecastResult,
+  type ForecastPoint,
+  type ForecastConfidence,
+  type ForecastCapabilityReport,
+  type ForecastCapability,
   emptyEnvelope,
   isRole,
   type AnswerEnvelope,
@@ -700,5 +705,107 @@ export function fromStatus(raw: unknown): SystemStatus {
       model: typeof llm.model === 'string' ? llm.model : null,
       reachable: llm.reachable === true,
     },
+  };
+}
+
+
+/* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+const FORECAST_CONFIDENCE: readonly ForecastConfidence[] = [
+  'none',
+  'low',
+  'medium',
+  'high',
+];
+
+function forecastConfidence(value: unknown): ForecastConfidence {
+  const text = str(value, 'none').toLowerCase();
+  return (FORECAST_CONFIDENCE as readonly string[]).includes(text)
+    ? (text as ForecastConfidence)
+    : 'none';
+}
+
+function forecastFormat(value: unknown): MetricFormat {
+  const text = str(value, 'decimal').toLowerCase();
+  return (['currency', 'percent', 'integer', 'decimal'] as string[]).includes(text)
+    ? (text as MetricFormat)
+    : 'decimal';
+}
+
+/** One point. A history point has no interval; a forecast point should. */
+export function fromForecastPoint(raw: unknown): ForecastPoint | null {
+  const row = obj(raw);
+  const value = num(row.value);
+  const period = str(row.period);
+  // A point without a finite value or a label cannot be plotted or explained,
+  // so it is dropped rather than rendered as a gap at zero.
+  if (value === null || !period) return null;
+  return {
+    period,
+    value,
+    lower: num(row.lower),
+    upper: num(row.upper),
+  };
+}
+
+function forecastPoints(raw: unknown): ForecastPoint[] {
+  return arr(raw)
+    .map(fromForecastPoint)
+    .filter((point): point is ForecastPoint => point !== null);
+}
+
+export function fromForecast(raw: unknown): ForecastResult {
+  const row = obj(raw);
+  const metric = str(row.metric, 'metric');
+  const forecast = forecastPoints(row.forecast);
+  const confidence = forecastConfidence(row.confidence);
+  return {
+    metric,
+    metric_label: str(row.metric_label, metric),
+    format: forecastFormat(row.format),
+    additive: row.additive !== false,
+    grain: str(row.grain, 'quarter'),
+    horizon: num(row.horizon) ?? forecast.length,
+    history: forecastPoints(row.history),
+    forecast,
+    method: str(row.method, 'unknown'),
+    method_family: str(row.method_family, 'none'),
+    n_history: num(row.n_history) ?? 0,
+    interval_level: num(row.interval_level) ?? 0.8,
+    confidence,
+    // An empty projection is a refusal however the flag arrived, so the two
+    // never disagree in the UI.
+    low_confidence: row.low_confidence === true || confidence === 'none'
+      || forecast.length === 0,
+    caveats: arr(row.caveats).map((c) => str(c)).filter(Boolean),
+    headline: str(row.headline),
+  };
+}
+
+export function fromForecastCapability(raw: unknown): ForecastCapability {
+  const row = obj(raw);
+  const metric = str(row.metric, 'metric');
+  return {
+    metric,
+    label: str(row.label, metric),
+    format: forecastFormat(row.format),
+    additive: row.additive !== false,
+    grain: str(row.grain, 'quarter'),
+    n_history: num(row.n_history) ?? 0,
+    forecastable: row.forecastable === true,
+    reason: typeof row.reason === 'string' ? row.reason : null,
+  };
+}
+
+export function fromForecastCapabilityReport(raw: unknown): ForecastCapabilityReport {
+  const row = obj(raw);
+  return {
+    grain: str(row.grain, 'quarter'),
+    min_history: num(row.min_history) ?? 0,
+    method_family: str(row.method_family, 'none'),
+    method: str(row.method, 'unknown'),
+    metrics: arr(row.metrics).map(fromForecastCapability),
   };
 }

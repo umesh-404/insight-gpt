@@ -13,6 +13,9 @@ import type {
   AskStreamEvent,
   Cell,
   ColumnSpec,
+  ForecastCapabilityReport,
+  ForecastPoint,
+  ForecastResult,
   Conversation,
   ConversationSummary,
   Insight,
@@ -893,4 +896,92 @@ export function mockInsightPage(limit = 20, offset = 0): InsightPage {
 
 export function mockInsight(id: string): Insight {
   return MOCK_INSIGHTS.find((i) => i.id === id) ?? MOCK_INSIGHTS[0]!;
+}
+
+/* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Mock mode carries enough history to actually project, so the happy path is
+ * reachable without a backend. The live fixture warehouse holds only two
+ * quarters and therefore refuses — `mockForecastRefusal` reproduces that state
+ * so the refusal UI can be exercised too.
+ */
+const MOCK_FORECAST_HISTORY: ForecastPoint[] = [
+  { period: '2025Q1', value: 1_010_000 },
+  { period: '2025Q2', value: 1_075_000 },
+  { period: '2025Q3', value: 1_140_000 },
+  { period: '2025Q4', value: 1_265_000 },
+  { period: '2026Q1', value: 1_300_000 },
+  { period: '2026Q2', value: 1_152_000 },
+];
+
+export function mockForecast(metric: string, grain = 'quarter'): ForecastResult {
+  const def = MOCK_CATALOG.metrics.find((m) => m.key === metric);
+  const last =
+    MOCK_FORECAST_HISTORY[MOCK_FORECAST_HISTORY.length - 1]?.value ?? 1_000_000;
+  const forecast: ForecastPoint[] = [
+    { period: '2026Q3', value: last * 0.99, lower: last * 0.9, upper: last * 1.08 },
+    { period: '2026Q4', value: last * 1.01, lower: last * 0.86, upper: last * 1.16 },
+  ];
+  return {
+    metric,
+    metric_label: def?.label ?? metric,
+    format: def?.format ?? 'currency',
+    additive: def?.additive ?? true,
+    grain,
+    horizon: forecast.length,
+    history: MOCK_FORECAST_HISTORY,
+    forecast,
+    method: 'damped Holt trend (pure-Python)',
+    method_family: 'fallback',
+    n_history: MOCK_FORECAST_HISTORY.length,
+    interval_level: 0.8,
+    confidence: 'low',
+    low_confidence: true,
+    caveats: [
+      'Only 6 period(s) of history exist at quarter grain; the interval is wide.',
+    ],
+    headline: `${def?.label ?? metric} is projected to stay roughly flat next quarter.`,
+  };
+}
+
+/** The state the live demo data actually produces: not enough history. */
+export function mockForecastRefusal(metric: string, grain = 'quarter'): ForecastResult {
+  const base = mockForecast(metric, grain);
+  return {
+    ...base,
+    history: MOCK_FORECAST_HISTORY.slice(-2),
+    forecast: [],
+    method: 'none - insufficient history',
+    method_family: 'none',
+    n_history: 2,
+    confidence: 'none',
+    low_confidence: true,
+    caveats: [
+      `Refused to forecast: 2 ${grain}(s) of history, 4 required. A projection `
+      + 'from this little data would be a guess dressed as an estimate.',
+    ],
+    headline: `Not enough history to forecast ${base.metric_label} at ${grain} grain.`,
+  };
+}
+
+export function mockForecastCapabilities(grain = 'quarter'): ForecastCapabilityReport {
+  return {
+    grain,
+    min_history: 4,
+    method_family: 'fallback',
+    method: 'damped Holt trend (pure-Python)',
+    metrics: MOCK_CATALOG.metrics.map((m) => ({
+      metric: m.key,
+      label: m.label,
+      format: m.format ?? 'decimal',
+      additive: m.additive ?? true,
+      grain,
+      n_history: MOCK_FORECAST_HISTORY.length,
+      forecastable: true,
+      reason: null,
+    })),
+  };
 }

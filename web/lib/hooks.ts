@@ -12,6 +12,8 @@ import { ApiError } from './types';
 import type {
   Conversation,
   ConversationSummary,
+  ForecastCapabilityReport,
+  ForecastResult,
   Insight,
   InsightPage,
   MetricQuery,
@@ -41,6 +43,9 @@ export const qk = {
   report: (id: string) => ['report', id] as const,
   insights: (limit: number, offset: number) => ['insights', limit, offset] as const,
   insight: (id: string) => ['insight', id] as const,
+  forecastMetrics: (grain: string) => ['forecast-metrics', grain] as const,
+  forecast: (metric: string, grain: string, horizon: number) =>
+    ['forecast', metric, grain, horizon] as const,
   status: ['status'] as const,
 };
 
@@ -271,5 +276,37 @@ export function useDeleteSource() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.sources });
     },
+  });
+}
+
+
+/* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+/** Which governed metrics can be projected at this grain, and why not. */
+export function useForecastMetrics(
+  grain = 'quarter',
+): UseQueryResult<ForecastCapabilityReport> {
+  return useQuery({
+    queryKey: qk.forecastMetrics(grain),
+    queryFn: () => api.forecastMetrics(grain),
+    staleTime: 5 * 60_000,
+    retry: retryUnlessClientError,
+  });
+}
+
+export function useForecast(
+  metric: string,
+  grain = 'quarter',
+  horizon = 4,
+  enabled = true,
+): UseQueryResult<ForecastResult> {
+  return useQuery({
+    queryKey: qk.forecast(metric, grain, horizon),
+    queryFn: () => api.forecast({ metric, grain, horizon }),
+    enabled: enabled && Boolean(metric),
+    staleTime: 60_000,
+    retry: retryUnlessClientError,
   });
 }

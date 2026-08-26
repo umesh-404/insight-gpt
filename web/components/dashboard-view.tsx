@@ -6,6 +6,7 @@ import { PageHeader } from '@/components/layout/page-header';
 import { StatTile, type GoodDirection } from '@/components/stat-tile';
 import { TrendChart } from '@/components/trend-chart';
 import { InventoryAtRiskTable } from '@/components/inventory-at-risk-table';
+import { ForecastPanel } from '@/components/forecast-panel';
 import { ChartRenderer } from '@/components/chart-renderer';
 import { EmptyState, ErrorState } from '@/components/states';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -340,6 +341,16 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
                 />
               </CardContent>
             </Card>
+          </section>
+
+          {/* Looking forward. Deliberately last: the dashboard reports what
+              happened before it suggests what might, and on the demo data this
+              panel usually explains why it will not project at all. */}
+          <section aria-labelledby="forecast-heading">
+            <h2 id="forecast-heading" className="sr-only">
+              Forecast
+            </h2>
+            <ForecastPanel />
           </section>
         </>
       )}
