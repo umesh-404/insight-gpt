@@ -46,6 +46,7 @@ from starlette.concurrency import run_in_threadpool
 from ...auth.roles import Role, require_role
 from ..deps import rate_limit
 from ..errors import BadRequestError, NotFoundError
+from ..sources_store import SourceRecord, sanitize_options, store_from_env
 
 router = APIRouter(tags=["sources"])
 
@@ -105,6 +106,73 @@ class TestResult(BaseModel):
 
 _SOURCES: dict[str, _StoredSource] = {}
 _SEEDED = False
+_STORE = None
+
+
+def _store():
+    """The durable registry, built lazily so tests can point it elsewhere."""
+    global _STORE
+    if _STORE is None:
+        _STORE = store_from_env()
+    return _STORE
+
+
+def _set_store(store) -> None:
+    """Swap the backing store (tests, and a restart simulation)."""
+    global _STORE, _SEEDED
+    _STORE = store
+    _SEEDED = False
+    _SOURCES.clear()
+
+
+def _to_record(stored: _StoredSource) -> SourceRecord:
+    """The persistable projection of a source. Never carries the secret."""
+    return SourceRecord(
+        id=stored.id, name=stored.name, kind=stored.kind, status=stored.status,
+        last_tested_at=stored.last_tested_at, active=stored.active,
+        location=stored.location, detail=stored.detail,
+        options=sanitize_options(stored.options),
+        dsn_env=stored.options.get("dsn_env"),
+        had_dsn=stored.dsn is not None,
+    )
+
+
+def _from_record(record: SourceRecord) -> _StoredSource:
+    """Rebuild a source from storage, re-resolving a DSN held in the environment.
+
+    A source registered with ``options.dsn_env`` comes back whole, because only
+    the variable's *name* was written down. One registered with a literal DSN
+    comes back without it: the row, its status and its history survive, but the
+    credential does not, and the detail says so rather than letting a later test
+    fail mysteriously.
+    """
+    dsn: SecretStr | None = None
+    detail = record.detail
+    if record.dsn_env:
+        value = (os.environ.get(record.dsn_env) or "").strip()
+        if value:
+            dsn = SecretStr(value)
+        else:
+            detail = (
+                f"Environment variable {record.dsn_env} is not set in this "
+                "process, so there is no connection string to test with."
+            )
+    elif record.had_dsn:
+        detail = (
+            "Connection string was not persisted (secrets are never written to "
+            "the registry). Re-register the source, or point it at an "
+            "environment variable with the 'dsn_env' option, to test it again."
+        )
+    return _StoredSource(
+        id=record.id, name=record.name, kind=record.kind, status=record.status,
+        last_tested_at=record.last_tested_at, active=record.active,
+        location=record.location, detail=detail,
+        dsn=dsn, options=dict(record.options),
+    )
+
+
+def _persist(stored: _StoredSource) -> None:
+    _store().upsert(_to_record(stored))
 
 
 def reset_state() -> None:
@@ -112,6 +180,8 @@ def reset_state() -> None:
     global _SEEDED
     _SOURCES.clear()
     _SEEDED = False
+    if _STORE is not None:
+        _STORE.clear()
 
 
 def _public(s: _StoredSource) -> Source:
@@ -447,17 +517,53 @@ def _seeds() -> list[_StoredSource]:
 
 
 def _ensure_seeded() -> None:
-    """Populate the registry once per process (and once per ``reset_state``).
+    """Load the registry once per process, seeding it only if it is brand new.
 
-    Seeding is a one-shot: a seeded source that an admin deletes stays deleted
-    instead of reappearing on the next list.
+    Order matters. A persisted registry is authoritative: it is loaded as-is, so
+    an admin's edits *and their deletions* survive a restart. Seeding happens
+    only when nothing has ever been stored, which makes it a genuine first-run
+    step rather than something that fights the operator every boot.
+
+    Seeds are refreshed on the way through: their paths are derived from this
+    deployment's layout, so a file that has since appeared (or vanished) is
+    reported accurately instead of replaying a stale status.
     """
     global _SEEDED
     if _SEEDED:
         return
     _SEEDED = True
-    for source in _seeds():
+
+    store = _store()
+    records = store.all()
+    if records:
+        for record in records:
+            _SOURCES[record.id] = _from_record(record)
+        _refresh_seed_status()
+        return
+
+    seeded = _seeds()
+    for source in seeded:
         _SOURCES.setdefault(source.id, source)
+    store.upsert_many([_to_record(s) for s in seeded])
+
+
+def _refresh_seed_status() -> None:
+    """Re-derive a seeded path source from disk, so a stale row cannot mislead.
+
+    A seed describes a file this deployment owns. If it has been generated since
+    the last run (or deleted), the registry must say what is true now — but only
+    for a seed that has never been tested, so a real probe result is never
+    overwritten by a filesystem guess.
+    """
+    for seed in _seeds():
+        current = _SOURCES.get(seed.id)
+        if current is None or current.last_tested_at is not None:
+            continue
+        if current.location != seed.location or current.detail != seed.detail:
+            current.location = seed.location
+            current.detail = seed.detail
+            current.status = seed.status
+            _persist(current)
 
 
 def _require(source_id: str) -> _StoredSource:
@@ -492,6 +598,7 @@ async def create_source(
         detail="Registered. Run a test to verify connectivity.",
     )
     _SOURCES[sid] = stored
+    _persist(stored)
     return _public(stored)
 
 
@@ -517,6 +624,7 @@ async def test_source(
     stored.last_tested_at = datetime.now(UTC)
     # ``result.message`` has already been scrubbed of every secret substring.
     stored.detail = result.message
+    _persist(stored)
     return result
 
 
@@ -526,4 +634,6 @@ async def delete_source(
 ) -> dict[str, str]:
     stored = _require(source_id)
     stored.active = False  # soft-delete, retains history for audit
+    # Persisted, so a deleted source does not reappear after a restart.
+    _persist(stored)
     return {"status": "deleted", "id": source_id}
