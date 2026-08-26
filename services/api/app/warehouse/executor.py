@@ -44,9 +44,21 @@ class DuckDBWarehouse:
     def run(self, sql: str, params: list) -> QueryResult:
         # Guardrails run against the same dialect we execute (belt-and-braces).
         validate_sql(sql, self._allow_tables, dialect="duckdb")
-        cur = self._con.execute(sql, params)
-        columns = [d[0] for d in cur.description]
-        rows = [list(r) for r in cur.fetchall()]
+        # A DuckDB *connection* holds a single result set, and `execute()`
+        # replaces it. The API runs queries in a threadpool, so two concurrent
+        # requests on one shared connection interleave: the second `execute()`
+        # discards the first's result before it is fetched, and the first caller
+        # reads the second's columns and rows. That silently returned another
+        # query's data (observed as blank dashboard tiles and mismatched rows).
+        # `cursor()` hands out an independent connection to the same in-memory
+        # database, so each call owns its own result set.
+        cur = self._con.cursor()
+        try:
+            cur.execute(sql, params)
+            columns = [d[0] for d in cur.description]
+            rows = [list(r) for r in cur.fetchall()]
+        finally:
+            cur.close()
         return QueryResult(columns=columns, rows=rows)
 
 

@@ -347,6 +347,47 @@ function applyOrdering(result: MetricResult, query: MetricQuery): MetricResult {
   return { ...result, rows };
 }
 
+/**
+ * Bounded concurrency for `POST /metrics/query`.
+ *
+ * This began as a strict serializing gate, working around a server defect: the
+ * fixture warehouse shared one DuckDB connection across a threadpool, so
+ * concurrent queries returned each other's columns and rows — wrong numbers,
+ * stated confidently, with a 200. That is fixed at the source (each query now
+ * gets its own cursor; see `DuckDBWarehouse.run` and
+ * `tests/test_warehouse_concurrency.py`), so full serialization is no longer
+ * needed.
+ *
+ * A small cap is kept deliberately: a dashboard fans out ~14 governed queries
+ * on one render, and firing all of them at once buys little over a few in
+ * flight while making the API's rate limiter far easier to trip.
+ */
+const METRIC_QUERY_CONCURRENCY = 4;
+
+let metricQueryActive = 0;
+const metricQueryWaiting: Array<() => void> = [];
+
+function enqueueMetricQuery<T>(run: () => Promise<T>): Promise<T> {
+  const start = async (): Promise<T> => {
+    metricQueryActive += 1;
+    try {
+      return await run();
+    } finally {
+      metricQueryActive -= 1;
+      // Hand the slot to the next waiter, if any. A rejection above still
+      // releases the slot, so one failure cannot stall the queue.
+      metricQueryWaiting.shift()?.();
+    }
+  };
+
+  if (metricQueryActive < METRIC_QUERY_CONCURRENCY) return start();
+  return new Promise<T>((resolve, reject) => {
+    metricQueryWaiting.push(() => {
+      start().then(resolve, reject);
+    });
+  });
+}
+
 async function postMetricQuery(query: MetricQuery): Promise<MetricResult> {
   const send = (body: Record<string, unknown>) =>
     request<unknown>('/metrics/query', {
@@ -543,7 +584,8 @@ export const api = {
 
   async queryMetric(query: MetricQuery): Promise<MetricResult> {
     if (USE_MOCK) return delay(mock.mockMetricResult(query));
-    return postMetricQuery(query);
+    // Serialized: see `enqueueMetricQuery` for why this cannot fan out.
+    return enqueueMetricQuery(() => postMetricQuery(query));
   },
 
   /* ---- Pipelines -------------------------------------------------------- */
@@ -979,9 +1021,31 @@ export function coerceEvent(name: string, data: unknown): AskStreamEvent | null 
       if (!route) return null;
       return {
         type: 'route',
-        data: { route, confidence: wire.toConfidence(payload.confidence) },
+        data: {
+          route,
+          confidence: wire.toConfidence(payload.confidence),
+          abstained: payload.abstained === true || route === 'abstain',
+        },
       };
     }
+    case 'abstain':
+      return {
+        type: 'abstain',
+        data: {
+          reason: String(payload.reason ?? ''),
+          suggestions: (Array.isArray(payload.suggestions)
+            ? payload.suggestions
+            : []
+          )
+            .map((s) => String(s))
+            .filter(Boolean),
+        },
+      };
+    case 'corrections':
+      return {
+        type: 'corrections',
+        data: { items: wire.fromCorrectionAttempts(payload.items) },
+      };
     case 'clarify':
       return {
         type: 'clarify',
@@ -1088,9 +1152,22 @@ export class EnvelopeAccumulator {
       case 'route':
         next.route = event.data.route;
         if (event.data.confidence) next.confidence = event.data.confidence;
+        // The `route` frame is the last word on abstention: it arrives after
+        // the `abstain` frame and is present even on a rollback that drops it.
+        if (event.data.abstained !== undefined) {
+          next.abstained = event.data.abstained;
+        }
         break;
       case 'clarify':
         next.clarifying_question = event.data.question;
+        break;
+      case 'abstain':
+        next.abstained = true;
+        next.abstain_reason = event.data.reason;
+        next.suggestions = event.data.suggestions;
+        break;
+      case 'corrections':
+        next.attempts = event.data.items;
         break;
       case 'done':
         this.done = true;

@@ -56,7 +56,11 @@ Engineering + AI pipeline.
 - **Runs on modest hardware.** Local-first defaults (embeddings/rerank on
   Ollama) with a pluggable path to cloud LLMs for the heavy reasoning step.
 - **Private by default.** Secrets and PII are redacted at ingestion; analytics
-  execute against a read-only database role.
+  execute under SELECT-only validation with a table allow-list, an enforced row
+  limit and a statement timeout. (A separate read-only Postgres role is designed
+  in [`08-security.md`](08-security.md) as a defence-in-depth layer and is not
+  part of the current deployment — see the status table in the repository
+  README.)
 
 ## 5. Non-goals (for the project scope)
 
@@ -111,3 +115,4 @@ Engineering + AI pipeline.
 - Retrieval / RAG → [`04-retrieval-rag.md`](04-retrieval-rag.md)
 - The insight engine → [`05-insight-engine.md`](05-insight-engine.md)
 - Build plan & milestones → [`11-roadmap.md`](11-roadmap.md)
+- Seeing it run, in five minutes → [`14-demo.md`](14-demo.md)

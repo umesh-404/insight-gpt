@@ -8,6 +8,8 @@ independently testable. See ``docs/05-insight-engine.md``.
 
 from __future__ import annotations
 
+import re
+
 from ..providers.base import Provider
 from ..providers.factory import get_provider
 from ..semantic.catalog import SemanticCatalog, load_catalog
@@ -56,7 +58,7 @@ class InsightEngine:
         # thing (docs/05 §9). Abstention is distinct from clarification — we
         # understood the question, we just cannot answer it reliably.
         if r.get("metric_unresolved") and not r["needs_docs"]:
-            requested = r.get("requested_metric")
+            requested = _safe_echo(r.get("requested_metric"))
             return self._abstain(
                 f"'{requested}' is not a governed metric, so I cannot compute it "
                 "reliably.",
@@ -130,6 +132,25 @@ class InsightEngine:
             caveats=["No rows matched a well-formed, governed query."],
             attempts=attempts,
         )
+
+
+_ECHO_ALLOWED = re.compile(r"[^A-Za-z0-9 _.\-]")
+
+
+def _safe_echo(value: object, limit: int = 60) -> str:
+    """Neutralize attacker-controlled text before quoting it back to the user.
+
+    An abstention names the metric the question asked for, so whatever the user
+    (or an upstream router) supplied is reflected into the answer. Nothing
+    executes it — but a client rendering the answer as HTML would turn a crafted
+    metric name into markup, so the echo is stripped to a safe character set and
+    truncated rather than passed through.
+    """
+    text = "" if value is None else str(value)
+    cleaned = _ECHO_ALLOWED.sub("", text).strip()
+    if len(cleaned) > limit:
+        cleaned = cleaned[:limit].rstrip() + "..."
+    return cleaned or "that metric"
 
 
 def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:

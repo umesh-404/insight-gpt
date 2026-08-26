@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarDays, SlidersHorizontal } from 'lucide-react';
+import { CalendarDays, SlidersHorizontal, X } from 'lucide-react';
 import { Select } from '@/components/ui/select';
 import { RANGE_OPTIONS, type RangeKey } from '@/lib/metrics';
 
@@ -87,6 +87,20 @@ export function DateRangeFilter({
           onChange={(e) => onChange({ ...value, category: e.target.value })}
         />
       </div>
+      {/* Only offered once a predicate is actually narrowing the page — a
+          permanent "Clear" implies a filter is applied when none is. */}
+      {value.region !== ALL_VALUES || value.category !== ALL_VALUES ? (
+        <button
+          type="button"
+          onClick={() =>
+            onChange({ ...value, region: ALL_VALUES, category: ALL_VALUES })
+          }
+          className="inline-flex items-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <X className="size-3.5" aria-hidden />
+          Clear filters
+        </button>
+      ) : null}
     </div>
   );
 }

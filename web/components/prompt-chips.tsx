@@ -1,54 +1,108 @@
 'use client';
 
-import { Sparkles, TrendingDown, Boxes, MessagesSquare } from 'lucide-react';
+import {
+  Boxes,
+  Code2,
+  FileText,
+  MessagesSquare,
+  Sparkles,
+  TrendingDown,
+  type LucideIcon,
+} from 'lucide-react';
 
-export const EXAMPLE_PROMPTS = [
+interface ExamplePrompt {
+  icon: LucideIcon;
+  label: string;
+  /** What the answer will contain — sets expectations before the first ask. */
+  hint: string;
+}
+
+/** The flagship questions from docs/07 §4.1, one per capability of the engine. */
+export const EXAMPLE_PROMPTS: readonly ExamplePrompt[] = [
   {
     icon: TrendingDown,
     label: 'Why did sales decline last quarter?',
+    hint: 'Root cause across SQL + documents',
   },
   {
     icon: Boxes,
     label: 'Which products should we restock?',
+    hint: 'Governed inventory metrics',
   },
   {
     icon: MessagesSquare,
     label: 'Summarize customer complaints this month.',
+    hint: 'Retrieval over tickets and reviews',
   },
 ] as const;
 
-/** Seed the flagship questions on an empty thread (docs/07 §4.1). */
+/** What every answer carries — the trust contract, stated up front. */
+const GUARANTEES: ReadonlyArray<{ icon: LucideIcon; label: string }> = [
+  { icon: Code2, label: 'The SQL that produced the numbers' },
+  { icon: FileText, label: 'The documents behind each claim' },
+  { icon: Sparkles, label: 'A refusal when it cannot be grounded' },
+];
+
+/**
+ * Empty-thread hero.
+ *
+ * Two jobs: give the evaluator something to click immediately, and state the
+ * product's promise before a single answer exists. The guarantee row is the
+ * part that distinguishes this from a generic chat box.
+ */
 export function PromptChips({
   onSelect,
 }: {
   onSelect: (prompt: string) => void;
 }) {
   return (
-    <div className="mx-auto max-w-2xl text-center">
-      <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl bg-primary/10">
-        <Sparkles className="size-6 text-primary" aria-hidden />
+    <div className="mx-auto w-full max-w-3xl px-2 text-center">
+      <div className="relative mx-auto mb-5 flex size-14 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-raised">
+        <Sparkles className="size-6" aria-hidden />
+        <span
+          className="absolute inset-0 -z-10 rounded-2xl bg-primary/25 blur-xl"
+          aria-hidden
+        />
       </div>
-      <h2 className="text-xl font-semibold tracking-tight">
+
+      <h2 className="text-2xl font-semibold text-foreground">
         Ask anything about your business data
       </h2>
-      <p className="mt-1.5 text-sm text-muted-foreground">
-        Every answer shows its SQL, sources, and a chart — one click away.
+      <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
+        Plain-English questions become governed SQL and grounded retrieval —
+        answered with the evidence attached.
       </p>
-      <div className="mt-6 grid gap-3 sm:grid-cols-3">
-        {EXAMPLE_PROMPTS.map(({ icon: Icon, label }) => (
+
+      <div className="stagger mt-8 grid gap-3 sm:grid-cols-3">
+        {EXAMPLE_PROMPTS.map(({ icon: Icon, label, hint }) => (
           <button
             key={label}
             type="button"
             onClick={() => onSelect(label)}
-            className="group flex flex-col items-start gap-2 rounded-lg border bg-card p-4 text-left transition-all hover:border-primary/50 hover:shadow-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            className="group flex h-full flex-col items-start gap-2.5 rounded-xl border bg-card p-4 text-left shadow-soft transition-[box-shadow,border-color,transform] duration-200 ease-out hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
-            <span className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
+            <span className="flex size-8 items-center justify-center rounded-lg bg-muted text-muted-foreground transition-colors group-hover:bg-primary/10 group-hover:text-primary">
               <Icon className="size-4" aria-hidden />
             </span>
-            <span className="text-sm font-medium text-foreground">{label}</span>
+            <span className="text-sm font-medium leading-snug text-foreground">
+              {label}
+            </span>
+            <span className="mt-auto text-2xs text-muted-foreground">{hint}</span>
           </button>
         ))}
       </div>
+
+      <ul className="mt-8 flex flex-wrap items-center justify-center gap-x-5 gap-y-2">
+        {GUARANTEES.map(({ icon: Icon, label }) => (
+          <li
+            key={label}
+            className="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+          >
+            <Icon className="size-3.5 text-primary/70" aria-hidden />
+            {label}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

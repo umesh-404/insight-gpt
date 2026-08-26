@@ -20,7 +20,11 @@ export function CitationList({ citations }: { citations: Citation[] }) {
       {citations.map((citation, i) => (
         <li
           key={`${citation.doc_id}-${citation.n}-${i}`}
-          className="rounded-lg border bg-card p-4 transition-colors hover:border-primary/40"
+          // Targeted by the inline `[n]` chips in an answer, which scroll the
+          // matching source into view and flash it.
+          id={`citation-${citation.n}`}
+          tabIndex={-1}
+          className="scroll-mt-4 rounded-lg border bg-card p-4 transition-colors target:border-primary target:bg-primary/[0.04] hover:border-primary/40"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="flex min-w-0 items-start gap-2.5">

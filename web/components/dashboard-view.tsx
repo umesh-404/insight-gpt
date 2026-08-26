@@ -3,7 +3,7 @@
 import * as React from 'react';
 import { PackageX } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
-import { StatTile } from '@/components/stat-tile';
+import { StatTile, type GoodDirection } from '@/components/stat-tile';
 import { TrendChart } from '@/components/trend-chart';
 import { InventoryAtRiskTable } from '@/components/inventory-at-risk-table';
 import { ChartRenderer } from '@/components/chart-renderer';
@@ -17,9 +17,11 @@ import {
 } from '@/components/date-range-filter';
 import { useMetricQueries, useMetricsCatalog } from '@/lib/hooks';
 import {
+  comparisonLabelFor,
   grainFor,
   previousRange,
   resolveRange,
+  seriesValues,
   summarize,
   toMetricChart,
   unitOf,
@@ -28,12 +30,33 @@ import type { Cell, MetricFilter, MetricQuery, MetricUnit } from '@/lib/types';
 
 const TOP_N = 8;
 
-/** KPI tiles, in display order. `unit` is refined from the live catalog. */
-const KPIS: Array<{ metric: string; label: string; unit: MetricUnit; invertDelta?: boolean }> = [
-  { metric: 'revenue', label: 'Revenue', unit: 'currency' },
-  { metric: 'orders', label: 'Orders', unit: 'count' },
-  { metric: 'avg_order_value', label: 'Avg. order value', unit: 'currency' },
-  { metric: 'return_rate', label: 'Return rate', unit: 'ratio', invertDelta: true },
+/**
+ * KPI tiles, in display order. `unit` is refined from the live catalog.
+ *
+ * `goodDirection` encodes business meaning, not arithmetic: a fall in revenue
+ * is bad, a fall in return rate is good. Without it every red arrow would say
+ * the same thing regardless of what the metric measures.
+ */
+const KPIS: Array<{
+  metric: string;
+  label: string;
+  unit: MetricUnit;
+  goodDirection: GoodDirection;
+}> = [
+  { metric: 'revenue', label: 'Revenue', unit: 'currency', goodDirection: 'up' },
+  { metric: 'orders', label: 'Orders', unit: 'count', goodDirection: 'up' },
+  {
+    metric: 'avg_order_value',
+    label: 'Avg. order value',
+    unit: 'currency',
+    goodDirection: 'up',
+  },
+  {
+    metric: 'return_rate',
+    label: 'Return rate',
+    unit: 'ratio',
+    goodDirection: 'down',
+  },
 ];
 
 /** Distinct values of a dimension, read out of a grouped metric result. */
@@ -96,14 +119,16 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
         name: `${kpi.metric}__prev`,
         query: { metric: kpi.metric, filters: dimensionFilters, time_range: priorRange },
       });
-    }
-
-    // Trends over the selected window.
-    for (const metric of ['revenue', 'orders'] as const) {
-      if (!has(metric)) continue;
+      // One per-period breakdown per KPI: it draws the tile's sparkline, and
+      // for revenue/orders it is the same result the big trend charts plot.
       list.push({
-        name: `${metric}__trend`,
-        query: { metric, dimensions: ['date'], time_grain: grain, ...base },
+        name: `${kpi.metric}__trend`,
+        query: {
+          metric: kpi.metric,
+          dimensions: ['date'],
+          time_grain: grain,
+          ...base,
+        },
       });
     }
 
@@ -226,7 +251,13 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
       ) : (
         <>
           {/* KPI tiles */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <section
+            aria-labelledby="dash-kpis"
+            className="stagger grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
+          >
+            <h2 id="dash-kpis" className="sr-only">
+              Key metrics
+            </h2>
             {KPIS.filter((kpi) => has(kpi.metric)).map((kpi) => {
               const current = byName[kpi.metric];
               return (
@@ -240,29 +271,45 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
                     byName[`${kpi.metric}__prev`],
                     additiveFor(kpi.metric),
                   )}
+                  points={seriesValues(byName[`${kpi.metric}__trend`], kpi.metric)}
+                  comparisonLabel={comparisonLabelFor(filters.range)}
                   loading={isLoading && !current}
-                  invertDelta={kpi.invertDelta}
+                  goodDirection={kpi.goodDirection}
                 />
               );
             })}
-          </div>
+          </section>
 
           {/* Trends */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <TrendChart
-              title="Revenue"
-              spec={revenueTrend}
-              loading={isLoading && !byName.revenue__trend}
-            />
-            <TrendChart
-              title="Orders"
-              spec={ordersTrend}
-              loading={isLoading && !byName.orders__trend}
-            />
-          </div>
+          <section aria-labelledby="dash-trends" className="space-y-3">
+            <h2
+              id="dash-trends"
+              className="text-2xs font-medium uppercase tracking-wider text-muted-foreground"
+            >
+              Trend over the selected range
+            </h2>
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <TrendChart
+                title="Revenue"
+                spec={revenueTrend}
+                loading={isLoading && !byName.revenue__trend}
+              />
+              <TrendChart
+                title="Orders"
+                spec={ordersTrend}
+                loading={isLoading && !byName.orders__trend}
+              />
+            </div>
+          </section>
 
           {/* Top products + at-risk inventory */}
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <section
+            aria-labelledby="dash-breakdowns"
+            className="grid grid-cols-1 gap-4 lg:grid-cols-2"
+          >
+            <h2 id="dash-breakdowns" className="sr-only">
+              Breakdowns
+            </h2>
             <Card>
               <CardHeader className="pb-2">
                 <CardTitle className="text-base">Top products by revenue</CardTitle>
@@ -293,7 +340,7 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
                 />
               </CardContent>
             </Card>
-          </div>
+          </section>
         </>
       )}
     </div>

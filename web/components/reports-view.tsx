@@ -104,12 +104,12 @@ export function ReportsView() {
           ) : reports.isError ? (
             <ErrorState error={reports.error} onRetry={() => void reports.refetch()} />
           ) : reports.data && reports.data.length ? (
-            <ul className="space-y-3">
+            <ul className="stagger space-y-3">
               {reports.data.map((report) => (
                 <li key={report.id}>
                   <Link
                     href={`/reports/${report.id}`}
-                    className="flex items-center gap-4 rounded-lg border bg-card p-4 transition-colors hover:border-primary/40"
+                    className="flex items-center gap-4 rounded-lg border bg-card p-4 shadow-soft transition-[box-shadow,border-color,transform] duration-200 ease-out hover:-translate-y-px hover:border-primary/40 hover:shadow-raised"
                   >
                     <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                       <FileText className="size-5" aria-hidden />

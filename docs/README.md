@@ -33,6 +33,9 @@ models, and is exposed through a FastAPI backend and a Next.js frontend.
 | 09 | [`09-deployment.md`](09-deployment.md) | Docker Compose bring-up, configuration, and the cloud-portability path |
 | 10 | [`10-testing-eval.md`](10-testing-eval.md) | dbt tests, pytest, and the retrieval + text-to-SQL evaluation harnesses |
 | 11 | [`11-roadmap.md`](11-roadmap.md) | Phased build plan, vertical-slice definition, risks, and current project state |
+| 12 | [`12-mcp.md`](12-mcp.md) | MCP server: governed metrics over the Model Context Protocol, its tool inventory, safety posture, and client setup |
+| 13 | [`13-forecasting.md`](13-forecasting.md) | Forecasting governed metrics: method, prediction intervals, when it refuses, the API, and the optional-dependency posture |
+| 14 | [`14-demo.md`](14-demo.md) | Five-minute demo walkthrough: what to show, in what order, what to say, and the terminal-only equivalent |
 
 Architecture Decision Records, when written, live under [`adr/`](adr/).
 

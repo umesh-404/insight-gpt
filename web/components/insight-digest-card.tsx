@@ -21,6 +21,7 @@ import {
 import { ChartRenderer } from '@/components/chart-renderer';
 import { CitationList } from '@/components/citation-list';
 import { InsightSeverityBadge } from '@/components/insight-severity-badge';
+import { goodDirectionFor } from '@/lib/metrics';
 import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
 import type {
   ChartSpec,
@@ -68,6 +69,21 @@ function trendSpec(insight: Insight): ChartSpec | null {
   };
 }
 
+/**
+ * Is this movement good news, bad news, or unjudged?
+ *
+ * The API reports direction and severity, never a verdict — so the verdict is
+ * only asserted for metrics whose meaning is unambiguous (`goodDirectionFor`).
+ * For anything else the movement is shown in neutral tones: the reader sees
+ * *what* happened without the UI inventing whether it was a win.
+ */
+function verdictOf(insight: Insight): 'good' | 'bad' | 'neutral' {
+  const good = goodDirectionFor(insight.metric);
+  if (good === 'neutral' || insight.change_pct === 0) return 'neutral';
+  const rose = insight.direction === 'up';
+  return (good === 'up') === rose ? 'good' : 'bad';
+}
+
 /** A tiny dependency-free sparkline for the collapsed card header. */
 function Sparkline({ insight }: { insight: Insight }) {
   const values = insight.trend.map((t) => t.value);
@@ -83,7 +99,13 @@ function Sparkline({ insight }: { insight: Insight }) {
     const y = height - ((v - min) / span) * height;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   });
-  const stroke = insight.direction === 'down' ? 'hsl(var(--destructive))' : 'hsl(var(--success))';
+  const verdict = verdictOf(insight);
+  const stroke =
+    verdict === 'bad'
+      ? 'hsl(var(--chart-negative))'
+      : verdict === 'good'
+        ? 'hsl(var(--chart-positive))'
+        : 'hsl(var(--chart-1))';
   const last = points[points.length - 1]?.split(',').map(Number) ?? [width, height];
   return (
     <svg
@@ -118,39 +140,65 @@ function evidenceToCitations(insight: Insight): Citation[] {
   }));
 }
 
+/**
+ * Severity is carried by a coloured rail down the left edge as well as by the
+ * badge, so the feed's priority order is legible from the page's shape before a
+ * single word is read.
+ */
+const SEVERITY_RAIL: Record<Insight['severity'], string> = {
+  high: 'before:bg-destructive',
+  medium: 'before:bg-warning',
+  low: 'before:bg-border',
+};
+
 export function InsightDigestCard({ insight }: { insight: Insight }) {
   const [open, setOpen] = React.useState(false);
   const spec = trendSpec(insight);
   const down = insight.direction === 'down';
+  const verdict = verdictOf(insight);
   const detailId = `insight-detail-${insight.id}`;
 
   return (
-    <Card className="animate-fade-in transition-shadow hover:shadow-md">
-      <CardContent className="p-5">
+    <Card
+      interactive
+      className={cn(
+        'animate-fade-in relative overflow-hidden',
+        'before:absolute before:inset-y-0 before:left-0 before:w-1 before:content-[""]',
+        SEVERITY_RAIL[insight.severity],
+      )}
+    >
+      <CardContent className="p-5 pl-6">
         <div className="flex flex-wrap items-center gap-2">
           <InsightSeverityBadge severity={insight.severity} />
           <Badge variant="secondary">{insight.metric_label}</Badge>
-          <span className="text-xs text-muted-foreground">
+          <span className="text-xs tabular-nums text-muted-foreground">
             {insight.period} vs {insight.prior_period}
           </span>
           <span
             className={cn(
               'ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium tabular-nums',
-              down ? 'bg-destructive/12 text-destructive' : 'bg-success/12 text-success',
+              verdict === 'bad' && 'bg-destructive/12 text-destructive',
+              verdict === 'good' && 'bg-success/12 text-success',
+              verdict === 'neutral' && 'bg-muted text-muted-foreground',
             )}
           >
             {down ? (
-              <ArrowDownRight className="size-3.5" />
+              <ArrowDownRight className="size-3.5" aria-hidden />
             ) : (
-              <ArrowUpRight className="size-3.5" />
+              <ArrowUpRight className="size-3.5" aria-hidden />
             )}
             {formatPercent(insight.change_pct)}
+            <span className="sr-only">
+              {verdict === 'neutral'
+                ? ` ${down ? 'decrease' : 'increase'}`
+                : `, ${verdict === 'good' ? 'an improvement' : 'a deterioration'}`}
+            </span>
           </span>
         </div>
 
-        <p className="mt-3 text-sm font-medium leading-relaxed text-foreground">
+        <h3 className="mt-3 text-lg font-medium leading-snug text-foreground">
           {insight.headline}
-        </p>
+        </h3>
 
         {/* At-a-glance row: sparkline · figures · root cause · evidence count */}
         <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -246,6 +294,14 @@ export function InsightDigestCard({ insight }: { insight: Insight }) {
 
 function ContributionTable({ insight }: { insight: Insight }) {
   const fmt = insight.metric_format;
+  const good = goodDirectionFor(insight.metric);
+  // Same rule as the headline delta: colour only where the metric's meaning is
+  // unambiguous, otherwise show the signed number in neutral type.
+  const deltaClass = (delta: number): string => {
+    if (good === 'neutral' || delta === 0) return '';
+    const helped = (delta > 0) === (good === 'up');
+    return helped ? 'text-success' : 'text-destructive';
+  };
   return (
     <div>
       <p className="mb-2 text-xs font-medium text-muted-foreground">
@@ -282,10 +338,7 @@ function ContributionTable({ insight }: { insight: Insight }) {
                     {formatMetricValue(row.current, fmt)}
                   </TableCell>
                   <TableCell
-                    className={cn(
-                      'text-right tabular-nums',
-                      row.delta < 0 ? 'text-destructive' : row.delta > 0 ? 'text-success' : '',
-                    )}
+                    className={cn('text-right tabular-nums', deltaClass(row.delta))}
                   >
                     {formatSigned(row.delta, fmt)}
                   </TableCell>

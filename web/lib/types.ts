@@ -138,10 +138,33 @@ export interface ChartSpec {
   data?: Array<Record<string, Cell>>;
 }
 
-export type Route = 'structured' | 'unstructured' | 'hybrid' | 'clarify';
+export type Route =
+  | 'structured'
+  | 'unstructured'
+  | 'hybrid'
+  | 'clarify'
+  /** The engine understood the question but refused to answer it (see below). */
+  | 'abstain';
 
 /** The backend grades confidence qualitatively, not as a probability. */
 export type Confidence = 'low' | 'medium' | 'high';
+
+/**
+ * One iteration of the engine's bounded self-correction loop.
+ *
+ * The structured path retries a *governed selection* (never free SQL) when it
+ * fails or comes back clearly wrong. Each attempt records what was tried, why
+ * it was rejected, and whether the loop recovered or gave up.
+ */
+export interface CorrectionAttempt {
+  attempt: number;
+  /** Which selection failed, e.g. `"scalar:revenue"`, `"grouped:region"`. */
+  stage: string;
+  /** Compact view of the governed selection that was tried. */
+  selection?: Record<string, unknown> | null;
+  error: string;
+  resolution: 'corrected' | 'gave_up';
+}
 
 export interface AnswerEnvelope {
   answer: string;
@@ -156,6 +179,16 @@ export interface AnswerEnvelope {
   confidence?: Confidence;
   /** Set when the router needs more information before it can answer. */
   clarifying_question?: string | null;
+  /** Bounded record of any governed-selection retries the structured path ran. */
+  attempts?: CorrectionAttempt[];
+  /**
+   * True when the engine refused to answer rather than fabricate a number.
+   * This is an *honest outcome*, not a failure: `route` is `"abstain"`, no
+   * figure is emitted, and `suggestions` points at the closest governed metric.
+   */
+  abstained?: boolean;
+  abstain_reason?: string | null;
+  suggestions?: string[];
 }
 
 export function emptyEnvelope(): AnswerEnvelope {
@@ -166,7 +199,42 @@ export function emptyEnvelope(): AnswerEnvelope {
     citations: [],
     chart_spec: null,
     caveats: [],
+    attempts: [],
+    abstained: false,
+    abstain_reason: null,
+    suggestions: [],
   };
+}
+
+/**
+ * True when a *well-formed* governed query executed and matched no rows.
+ *
+ * The backend does not flag this with a boolean — it returns an ordinary
+ * envelope whose distinguishing signal is the caveat it always attaches
+ * ("No rows matched a well-formed, governed query."). Detecting it here keeps
+ * the UI from rendering an honest empty result as either a failure or a zero.
+ */
+export function isNoDataEnvelope(envelope: AnswerEnvelope): boolean {
+  if (envelope.abstained) return false;
+  const flagged = (envelope.caveats ?? []).some((c) =>
+    /no rows matched/i.test(c),
+  );
+  if (!flagged) return false;
+  // Corroborate with the tables: a no-data envelope carries the executed query
+  // and its (empty) result, never populated rows.
+  return (envelope.tables ?? []).every((t) => t.rows.length === 0);
+}
+
+/**
+ * The metric key inside a governed suggestion, when the backend named one.
+ *
+ * Suggestions arrive as prose ("Try the governed metric 'return_rate'."), so
+ * the quoted key is extracted for a clickable chip; a suggestion with no quoted
+ * key still renders, using its own text as the follow-up question.
+ */
+export function suggestionMetricKey(suggestion: string): string | null {
+  const match = /['"`]([a-z0-9_]+)['"`]/i.exec(suggestion);
+  return match?.[1] ?? null;
 }
 
 /* ----------------------------------------------------------------------------
@@ -194,8 +262,15 @@ export type AskStreamEvent =
    *  against tables that may still be arriving. */
   | { type: 'chart'; data: { chart_spec: ChartSpec | null; raw: unknown } }
   | { type: 'caveats'; data: { items: string[] } }
-  | { type: 'route'; data: { route: Route; confidence?: Confidence } }
+  | {
+      type: 'route';
+      data: { route: Route; confidence?: Confidence; abstained?: boolean };
+    }
   | { type: 'clarify'; data: { question: string } }
+  /** The engine declined to answer; carries the reason + governed suggestions. */
+  | { type: 'abstain'; data: { reason: string; suggestions: string[] } }
+  /** Bounded self-correction record, emitted only when a retry happened. */
+  | { type: 'corrections'; data: { items: CorrectionAttempt[] } }
   | { type: 'done'; data: { message_id?: string; usage?: SseUsage } }
   | { type: 'error'; data: ApiErrorBody };
 

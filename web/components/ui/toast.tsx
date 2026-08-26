@@ -66,7 +66,14 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             // Failures interrupt; confirmations wait their turn.
             role={t.variant === 'destructive' ? 'alert' : 'status'}
             className={cn(
-              'pointer-events-auto flex animate-fade-in items-start gap-3 rounded-lg border bg-card p-4 shadow-soft',
+              // Floats above everything, so it takes the overlay elevation and
+              // a variant-coloured rail that reads before the icon does.
+              'pointer-events-auto relative flex animate-fade-in items-start gap-3 overflow-hidden rounded-lg border bg-card p-4 pl-5 shadow-overlay',
+              'before:absolute before:inset-y-0 before:left-0 before:w-1 before:content-[""]',
+              t.variant === 'success' && 'before:bg-success',
+              t.variant === 'warning' && 'before:bg-warning',
+              t.variant === 'destructive' && 'before:bg-destructive',
+              t.variant === 'default' && 'before:bg-primary',
             )}
           >
             <div className="mt-0.5">{ICONS[t.variant]}</div>

@@ -6,17 +6,30 @@ export function cn(...inputs: ClassValue[]): string {
   return twMerge(clsx(inputs));
 }
 
-/** Format a number as compact currency (USD by default). */
+/**
+ * Format a number as currency, compacting large values.
+ *
+ * Compact form keeps **three significant digits** rather than zero decimals.
+ * With whole-unit compaction, 1,300,000 and 1,152,000 both render "$1M", so a
+ * before/after pair reads "$1M → $1M" and the change vanishes from a screen
+ * whose entire job is to show it. Three significant digits gives "$1.3M →
+ * $1.15M" while keeping round values clean ("$433K", not "$433.33K").
+ *
+ * The threshold uses the magnitude, so large negatives compact too — a delta of
+ * -1,152,000 must not render as "-$1,152,000" beside a compacted positive.
+ */
 export function formatCurrency(
   value: number,
   currency = 'USD',
   maximumFractionDigits = 0,
 ): string {
+  const compact = Math.abs(value) >= 100_000;
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency,
-    maximumFractionDigits,
-    notation: value >= 100_000 ? 'compact' : 'standard',
+    ...(compact
+      ? { notation: 'compact' as const, maximumSignificantDigits: 3 }
+      : { notation: 'standard' as const, maximumFractionDigits }),
   }).format(value);
 }
 

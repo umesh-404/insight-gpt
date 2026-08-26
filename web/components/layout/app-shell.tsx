@@ -3,10 +3,11 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { LogOut, Menu, X } from 'lucide-react';
+import { LogOut, Menu, Search, X } from 'lucide-react';
 import { Logo } from './logo';
 import { ThemeToggle } from './theme-toggle';
 import { NAV_ITEMS } from './nav';
+import { CommandPalette, openCommandPalette } from '@/components/command-palette';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -18,7 +19,7 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const { hasRole } = useAuth();
   return (
-    <nav className="flex flex-1 flex-col gap-1 px-3" aria-label="Primary">
+    <nav className="flex flex-1 flex-col gap-0.5 px-3" aria-label="Primary">
       {NAV_ITEMS.filter((item) => hasRole(item.minRole)).map((item) => {
         const active =
           pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -29,17 +30,23 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
             href={item.href}
             onClick={onNavigate}
             aria-current={active ? 'page' : undefined}
+            title={item.description}
             className={cn(
-              'group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+              // The active item also gets a solid left marker, so the current
+              // section is identifiable without relying on the tint alone.
+              'group relative flex items-center gap-3 rounded-md py-2 pl-4 pr-3 text-sm font-medium transition-colors duration-150',
+              'before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-full before:transition-colors before:content-[""]',
               active
-                ? 'bg-primary/10 text-primary'
-                : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                ? 'bg-primary/10 text-primary before:bg-primary'
+                : 'text-muted-foreground before:bg-transparent hover:bg-accent hover:text-foreground',
             )}
           >
             <Icon
               className={cn(
-                'size-4 shrink-0',
-                active ? 'text-primary' : 'text-muted-foreground',
+                'size-4 shrink-0 transition-colors',
+                active
+                  ? 'text-primary'
+                  : 'text-muted-foreground group-hover:text-foreground',
               )}
               aria-hidden
             />
@@ -111,16 +118,34 @@ function UserCard() {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
 
+  // Escape closes the drawer — expected of any modal overlay, and the only way
+  // out for a keyboard user who opened it with the menu button.
+  React.useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileOpen]);
+
   return (
     <div className="flex min-h-screen bg-background">
       {/* Desktop sidebar */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r bg-card lg:flex">
-        <div className="flex h-16 items-center px-5">
-          <Link href="/ask" aria-label="InsightGPT home">
+        <div className="flex h-16 items-center border-b px-5">
+          <Link
+            href="/ask"
+            aria-label="InsightGPT home"
+            className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          >
             <Logo />
           </Link>
         </div>
-        <div className="flex flex-1 flex-col overflow-y-auto py-4">
+        <div className="scrollbar-thin flex flex-1 flex-col overflow-y-auto py-4">
+          <p className="px-4 pb-2 text-2xs font-medium uppercase tracking-wider text-muted-foreground">
+            Workspace
+          </p>
           <NavLinks />
         </div>
         <div className="border-t p-3">
@@ -172,7 +197,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="lg:hidden">
             <Logo />
           </div>
-          <div className="ml-auto flex items-center gap-1">
+
+          {/* Reads as a search field, behaves as the palette trigger — the
+              shortcut is only discoverable if something on screen shows it. */}
+          <button
+            type="button"
+            onClick={openCommandPalette}
+            className="ml-auto hidden h-9 w-64 items-center gap-2 rounded-lg border bg-card px-3 text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground sm:flex"
+          >
+            <Search className="size-4 shrink-0" aria-hidden />
+            <span className="flex-1 text-left">Search or jump to…</span>
+            <kbd className="rounded border bg-muted px-1.5 py-0.5 text-2xs">⌘K</kbd>
+          </button>
+
+          <div className="ml-auto flex items-center gap-1 sm:ml-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="sm:hidden"
+              onClick={openCommandPalette}
+              aria-label="Search or jump to a screen"
+            >
+              <Search className="size-5" />
+            </Button>
             <ThemeToggle />
           </div>
         </header>
@@ -180,6 +227,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+
+      <CommandPalette />
     </div>
   );
 }

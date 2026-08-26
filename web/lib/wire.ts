@@ -27,6 +27,7 @@ import {
   type ColumnSpec,
   type Confidence,
   type Conversation,
+  type CorrectionAttempt,
   type ConversationTurn,
   type MetricFormat,
   type MetricResult,
@@ -133,7 +134,13 @@ export function toDtype(value: unknown): ColumnDtype {
   return DTYPE_ALIASES[str(value).toLowerCase()] ?? 'string';
 }
 
-const ROUTES: Route[] = ['structured', 'unstructured', 'hybrid', 'clarify'];
+const ROUTES: Route[] = [
+  'structured',
+  'unstructured',
+  'hybrid',
+  'clarify',
+  'abstain',
+];
 
 export function toRoute(value: unknown): Route | undefined {
   const raw = str(value).toLowerCase();
@@ -331,9 +338,36 @@ export function fromCitations(raw: unknown): Citation[] {
 /* Answer envelope                                                            */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Self-correction record. `resolution` is the load-bearing field — it decides
+ * whether the UI says "recovered" or "gave up" — so anything unrecognised is
+ * treated as `gave_up` rather than silently claiming a successful correction.
+ */
+export function fromCorrectionAttempt(
+  raw: unknown,
+  index: number,
+): CorrectionAttempt {
+  const o = obj(raw);
+  return {
+    attempt: num(o.attempt) ?? index + 1,
+    stage: str(o.stage) || 'selection',
+    selection:
+      o.selection && typeof o.selection === 'object' && !Array.isArray(o.selection)
+        ? (o.selection as Record<string, unknown>)
+        : null,
+    error: str(o.error) || 'The governed selection was rejected.',
+    resolution: str(o.resolution) === 'corrected' ? 'corrected' : 'gave_up',
+  };
+}
+
+export function fromCorrectionAttempts(raw: unknown): CorrectionAttempt[] {
+  return arr(raw).map(fromCorrectionAttempt);
+}
+
 export function fromEnvelope(raw: unknown): AnswerEnvelope {
   const o = obj(raw);
   const tables = arr(o.tables).map(fromTable);
+  const route = toRoute(o.route);
   return {
     answer: str(o.answer),
     sql: sqlList(o.sql),
@@ -342,10 +376,17 @@ export function fromEnvelope(raw: unknown): AnswerEnvelope {
     citations: fromCitations(o.citations),
     chart_spec: fromChart(o.chart ?? o.chart_spec, tables),
     caveats: arr(o.caveats).map((c) => str(c)).filter(Boolean),
-    route: toRoute(o.route),
+    route,
     confidence: toConfidence(o.confidence),
     clarifying_question:
       typeof o.clarifying_question === 'string' ? o.clarifying_question : null,
+    attempts: fromCorrectionAttempts(o.attempts),
+    // Trust the explicit flag, but a rollback that only sets `route` must still
+    // render as an abstention rather than as a normal (empty) answer.
+    abstained: o.abstained === true || route === 'abstain',
+    abstain_reason:
+      typeof o.abstain_reason === 'string' ? o.abstain_reason : null,
+    suggestions: arr(o.suggestions).map((s) => str(s)).filter(Boolean),
   };
 }
 

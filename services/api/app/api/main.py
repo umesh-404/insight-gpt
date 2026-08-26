@@ -21,7 +21,17 @@ from .errors import (
     validation_error_handler,
 )
 from .observability import RequestContextMiddleware, configure_logging
-from .routers import ask, auth, insights, metrics, pipelines, reports, sources, system
+from .routers import (
+    ask,
+    auth,
+    forecast,
+    insights,
+    metrics,
+    pipelines,
+    reports,
+    sources,
+    system,
+)
 
 API_PREFIX = "/api/v1"
 
@@ -77,7 +87,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(Exception, unhandled_error_handler)
 
     # --- versioned application routers ----------------------------------------
-    for module in (auth, ask, metrics, sources, pipelines, reports, insights):
+    for module in (auth, ask, metrics, sources, pipelines, reports, insights, forecast):
         app.include_router(module.router, prefix=API_PREFIX)
 
     # --- unversioned operational routes ---------------------------------------

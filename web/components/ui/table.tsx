@@ -19,7 +19,13 @@ const TableHeader = React.forwardRef<
   HTMLTableSectionElement,
   React.HTMLAttributes<HTMLTableSectionElement>
 >(({ className, ...props }, ref) => (
-  <thead ref={ref} className={cn('[&_tr]:border-b', className)} {...props} />
+  // A tinted header keeps long result tables legible: without it the column
+  // names read as just another row once the table scrolls.
+  <thead
+    ref={ref}
+    className={cn('bg-elevated [&_tr]:border-b [&_tr]:hover:bg-transparent', className)}
+    {...props}
+  />
 ));
 TableHeader.displayName = 'TableHeader';
 

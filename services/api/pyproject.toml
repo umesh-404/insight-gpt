@@ -30,6 +30,14 @@ api = [
 real = [
     "insightgpt-retrieval",     # path/workspace dep — see [tool.uv.sources]
 ]
+# Statistical forecasting backend (AutoETS/ARIMA/Theta). Optional on purpose:
+# it pulls numpy + pandas + numba, which is a heavy, compiler-adjacent chain for
+# an offline-first default. app/forecast/ detects it at runtime and otherwise
+# runs a stdlib-only damped-Holt fallback, so CI never needs this installed.
+# See docs/13-forecasting.md §5.
+forecast = [
+    "statsforecast>=1.7",
+]
 
 [tool.uv.sources]
 insightgpt-retrieval = { path = "../retrieval" }

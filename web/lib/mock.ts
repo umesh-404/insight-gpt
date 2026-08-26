@@ -206,7 +206,11 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   if (envelope.route) {
     events.push({
       type: 'route',
-      data: { route: envelope.route, confidence: envelope.confidence },
+      data: {
+        route: envelope.route,
+        confidence: envelope.confidence,
+        abstained: envelope.abstained ?? false,
+      },
     });
   }
   const words = envelope.answer.split(' ');
@@ -243,6 +247,18 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   if (envelope.caveats.length) {
     events.push({ type: 'caveats', data: { items: envelope.caveats } });
   }
+  if (envelope.attempts?.length) {
+    events.push({ type: 'corrections', data: { items: envelope.attempts } });
+  }
+  if (envelope.abstained) {
+    events.push({
+      type: 'abstain',
+      data: {
+        reason: envelope.abstain_reason ?? '',
+        suggestions: envelope.suggestions ?? [],
+      },
+    });
+  }
   events.push({
     type: 'done',
     data: {
@@ -253,8 +269,39 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   return events;
 }
 
+/**
+ * Metric names a real business asks about that InsightGPT does **not** govern.
+ * The live engine abstains on these; demo mode must show the same behaviour,
+ * because "we refuse rather than guess" is a headline property of the product.
+ */
+const UNGOVERNED_METRICS =
+  /\b(churn|retention|attrition|nps|csat|ltv|lifetime value|cac|conversion rate|bounce rate)\b/i;
+
 /** A topic-matched fallback envelope for questions other than the flagship one. */
 export function mockEnvelopeFor(question: string): AnswerEnvelope {
+  if (UNGOVERNED_METRICS.test(question)) {
+    const requested = UNGOVERNED_METRICS.exec(question)?.[1] ?? 'that metric';
+    const reason =
+      `'${requested}' is not a governed metric, so I cannot compute it reliably.`;
+    return {
+      answer: `I can't answer that reliably, so I won't guess. ${reason}`,
+      route: 'abstain',
+      confidence: 'low',
+      sql: [],
+      tables: [],
+      citations: [],
+      chart_spec: null,
+      caveats: [],
+      abstained: true,
+      abstain_reason: reason,
+      suggestions: [
+        "Try the governed metric 'return_rate'.",
+        "Try the governed metric 'orders'.",
+        "Try the governed metric 'avg_order_value'.",
+      ],
+      attempts: [],
+    };
+  }
   if (/restock|inventory|reorder|stock/i.test(question)) {
     return {
       answer:
@@ -293,6 +340,17 @@ LIMIT 1000`,
       citations: [],
       caveats: [
         'Lead times use the supplier default where a SKU-specific value is missing.',
+      ],
+      // Demonstrates the bounded self-correction loop: the first governed
+      // selection was rejected, the engine narrowed it and recovered.
+      attempts: [
+        {
+          attempt: 1,
+          stage: 'grouped:product',
+          selection: { metric: 'units_on_hand', dimensions: ['product', 'supplier'] },
+          error: "Dimension 'supplier' is not available at the inventory grain.",
+          resolution: 'corrected',
+        },
       ],
     };
   }

@@ -48,8 +48,50 @@ function gradientId(key: string): string {
   return `fill-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 }
 
-const AXIS_TICK = { fill: 'hsl(var(--muted-foreground))', fontSize: 12 };
+const AXIS_TICK = { fill: 'hsl(var(--muted-foreground))', fontSize: 11 };
 const GRID_STROKE = 'hsl(var(--border))';
+
+/**
+ * Dash patterns paired with the series colours.
+ *
+ * A multi-series chart that distinguishes lines by hue alone is unreadable for
+ * a colour-blind viewer and in greyscale print. The first series stays solid so
+ * the common single-series case is unaffected (docs/07 §7).
+ */
+const SERIES_DASH = [undefined, '5 3', '2 2', '8 3 2 3', '1 3', '10 4'] as const;
+
+function seriesDash(index: number): string | undefined {
+  return SERIES_DASH[index % SERIES_DASH.length];
+}
+
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/**
+ * Shorten axis categories that are really dates.
+ *
+ * The warehouse returns `date_trunc` output as full ISO timestamps, so an
+ * un-formatted month axis reads "2026-02-01T00:00:00" — unreadable at tick
+ * size. Anything that is not a recognisable date is returned untouched.
+ */
+function formatAxisCategory(value: unknown): string {
+  if (typeof value !== 'string') return value == null ? '' : String(value);
+  const iso = /^(\d{4})-(\d{2})(?:-(\d{2}))?/.exec(value);
+  if (!iso) return value;
+  const year = iso[1];
+  const month = MONTHS[Number(iso[2]) - 1] ?? iso[2];
+  const day = iso[3];
+  // A day-grain axis repeats the month; a month-grain axis needs the year.
+  return day && day !== '01' ? `${month} ${Number(day)}` : `${month} ${year?.slice(2)}`;
+}
+
+/** Keep long product names from eating the plot area. */
+function truncateCategory(value: unknown): string {
+  const text = formatAxisCategory(value);
+  return text.length > 16 ? `${text.slice(0, 15)}…` : text;
+}
 
 function formatValue(value: unknown, dtype?: ColumnDtype): string {
   if (value == null) return '—';
@@ -78,22 +120,26 @@ function ChartTooltip({
 }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-soft">
+    <div className="min-w-[9rem] rounded-lg border bg-popover px-3 py-2 text-xs shadow-overlay">
       {label != null && (
-        <p className="mb-1 font-medium text-popover-foreground">{label}</p>
+        <p className="mb-1.5 border-b pb-1.5 font-medium text-popover-foreground">
+          {formatAxisCategory(label)}
+        </p>
       )}
-      {payload.map((entry) => (
-        <div key={entry.name} className="flex items-center gap-2">
-          <span
-            className="inline-block size-2 rounded-full"
-            style={{ backgroundColor: entry.color }}
-          />
-          <span className="text-muted-foreground">{entry.name}</span>
-          <span className="ml-auto font-medium text-popover-foreground">
-            {formatValue(entry.value, yFormat)}
-          </span>
-        </div>
-      ))}
+      <div className="space-y-1">
+        {payload.map((entry) => (
+          <div key={entry.name} className="flex items-center gap-2">
+            <span
+              className="inline-block size-2 shrink-0 rounded-full"
+              style={{ backgroundColor: entry.color }}
+            />
+            <span className="text-muted-foreground">{entry.name}</span>
+            <span className="ml-auto font-medium tabular-nums text-popover-foreground">
+              {formatValue(entry.value, yFormat)}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -197,7 +243,14 @@ function renderChart(
       return (
         <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
-          <XAxis dataKey={xKey} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID_STROKE }} />
+          <XAxis
+            dataKey={xKey}
+            tick={AXIS_TICK}
+            tickLine={false}
+            axisLine={{ stroke: GRID_STROKE }}
+            tickFormatter={truncateCategory}
+            minTickGap={12}
+          />
           <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
           {tooltip}
           {legend}
@@ -209,8 +262,10 @@ function renderChart(
               name={s.label ?? s.y}
               stroke={seriesColor(i)}
               strokeWidth={2}
-              dot={{ r: 2, fill: seriesColor(i) }}
-              activeDot={{ r: 4 }}
+              // Colour + pattern, so the series survive greyscale and CVD.
+              strokeDasharray={series.length > 1 ? seriesDash(i) : undefined}
+              dot={false}
+              activeDot={{ r: 4, strokeWidth: 0 }}
             />
           ))}
         </LineChart>
@@ -227,7 +282,14 @@ function renderChart(
             ))}
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
-          <XAxis dataKey={xKey} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID_STROKE }} />
+          <XAxis
+            dataKey={xKey}
+            tick={AXIS_TICK}
+            tickLine={false}
+            axisLine={{ stroke: GRID_STROKE }}
+            tickFormatter={truncateCategory}
+            minTickGap={12}
+          />
           <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
           {tooltip}
           {legend}
@@ -239,6 +301,7 @@ function renderChart(
               name={s.label ?? s.y}
               stroke={seriesColor(i)}
               strokeWidth={2}
+              strokeDasharray={series.length > 1 ? seriesDash(i) : undefined}
               fill={`url(#${gradientId(s.y)})`}
               stackId={spec.stacked ? 'stack' : undefined}
             />
@@ -249,7 +312,14 @@ function renderChart(
       return (
         <BarChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
-          <XAxis dataKey={xKey} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID_STROKE }} />
+          <XAxis
+            dataKey={xKey}
+            tick={AXIS_TICK}
+            tickLine={false}
+            axisLine={{ stroke: GRID_STROKE }}
+            tickFormatter={truncateCategory}
+            minTickGap={12}
+          />
           <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
           {tooltip}
           {legend}
@@ -293,7 +363,14 @@ function renderChart(
       return (
         <ScatterChart margin={{ top: 8, right: 12, bottom: 8, left: 4 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
-          <XAxis type="category" dataKey={xKey} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID_STROKE }} />
+          <XAxis
+            type="category"
+            dataKey={xKey}
+            tick={AXIS_TICK}
+            tickLine={false}
+            axisLine={{ stroke: GRID_STROKE }}
+            tickFormatter={truncateCategory}
+          />
           <YAxis type="number" dataKey={series[0]?.y} tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
           <ZAxis range={[60, 60]} />
           {tooltip}
@@ -341,7 +418,7 @@ function DataTableView({
         {data.map((row, i) => (
           <TableRow key={i}>
             <TableCell className="font-medium">
-              {String(row[categoryKey] ?? '—')}
+              {formatAxisCategory(row[categoryKey]) || '—'}
             </TableCell>
             {columns.map((c) => (
               <TableCell key={c} className="text-right tabular-nums">
