@@ -56,7 +56,7 @@ export function PromptChips({
   onSelect: (prompt: string) => void;
 }) {
   return (
-    <div className="mx-auto w-full max-w-3xl px-2 text-center">
+    <div className="mx-auto w-full max-w-3xl px-2 text-center lg:max-w-4xl xl:max-w-5xl">
       <div className="relative mx-auto mb-5 flex size-14 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-raised">
         <Sparkles className="size-6" aria-hidden />
         <span

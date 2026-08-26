@@ -211,7 +211,7 @@ export function ConversationView({
             <PromptChips onSelect={(p) => void ask(p)} />
           </div>
         ) : (
-          <div className="mx-auto max-w-3xl space-y-6">
+          <div className="mx-auto w-full max-w-3xl space-y-6 lg:max-w-4xl xl:max-w-5xl">
             {turns.map((turn) => (
               <InsightCard
                 key={turn.id}
@@ -233,7 +233,7 @@ export function ConversationView({
 
       {/* Composer */}
       <div className="border-t bg-background/85 px-4 py-3 backdrop-blur-md sm:px-6">
-        <form onSubmit={onSubmit} className="mx-auto max-w-3xl">
+        <form onSubmit={onSubmit} className="mx-auto w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl">
           <div className="flex items-end gap-2 rounded-xl border bg-card p-2 shadow-soft transition-shadow focus-within:border-primary/40 focus-within:shadow-raised focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background">
             <label htmlFor="ask-input" className="sr-only">
               Ask a question about your business data
