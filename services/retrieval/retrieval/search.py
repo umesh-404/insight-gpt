@@ -21,6 +21,7 @@ from qdrant_client import QdrantClient, models
 
 from .config import RetrievalConfig
 from .embedder import Embedder
+from .rewrite import QueryRewriter
 from .sparse import build_sparse_vector
 
 
@@ -82,6 +83,7 @@ class Searcher:
         self.collection = config.collection
         self.client = QdrantClient(url=config.qdrant_url, timeout=30)
         self.embedder = Embedder(config.embedding)
+        self.rewriter = QueryRewriter(config.query_rewrite, config.embedding)
         # Imported here (not at module top) to break the search <-> rerank cycle.
         from .rerank import Reranker
 
@@ -95,14 +97,28 @@ class Searcher:
         k: int = 5,
         rerank: bool = True,
     ) -> list[SearchHit]:
-        dense = self.embedder.embed_query(query)
-        indices, values = build_sparse_vector(query, self.cfg.sparse)
+        # Pre-retrieval rewrite: embed and lexically match on the improved query,
+        # but keep the ORIGINAL for reranking (answerhood is judged against what
+        # the user actually asked). Deterministic and offline-safe by default.
+        rewritten = self.rewriter.rewrite(query)
+        search_text = rewritten.search_query or query
+
+        dense = self.embedder.embed_query(search_text)
+        indices, values = build_sparse_vector(search_text, self.cfg.sparse)
         query_filter = build_filter(filters)
 
         mult = self.cfg.search.prefetch_multiplier
         prefetch = [
             models.Prefetch(query=dense, using="dense", filter=query_filter, limit=k * mult)
         ]
+        # HyDE: a hypothetical answer, embedded as a second dense branch. RRF
+        # fuses its candidates with the query's, so a passage the bare query
+        # missed but the imagined answer resembles still surfaces.
+        if rewritten.hyde:
+            hyde_vec = self.embedder.embed_query(rewritten.hyde)
+            prefetch.append(
+                models.Prefetch(query=hyde_vec, using="dense", filter=query_filter, limit=k * mult)
+            )
         if indices:
             prefetch.append(
                 models.Prefetch(

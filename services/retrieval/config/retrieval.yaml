@@ -61,6 +61,34 @@ chunking:
   # EMBEDDED and SPARSE text only — never to the stored content that is quoted
   # back to the user. Supplies vocabulary a bare chunk lacks.
   contextual_header: true
+  # Contextual chunk augmentation: also fold region + category into that header
+  # so a chunk that never names its own region ("the backlog delayed shipments")
+  # still carries that vocabulary. Deterministic (no LLM), pure function of the
+  # document's canonical fields, so it runs offline and — being embedded only,
+  # never stored — does NOT enter the content hash that drives changed-only
+  # re-indexing.
+  contextual_augmentation: true
+  # Optional LLM-written one-line situating context, prepended to the embedded
+  # text only. Needs live Ollama (RETRIEVAL_LIVE=1); off by default so indexing
+  # stays offline-safe and reproducible. Empty context_model reuses the rewrite
+  # model below.
+  contextual_llm: false
+  context_model: ""
+
+query_rewrite:
+  # Pre-retrieval query rewriting. `enabled` is safe on: with no Ollama it uses
+  # a deterministic rewrite (lowercase, drop filler/stopwords, keep entities
+  # like SKUs/order-ids/regions, expand abbreviations) and never touches the
+  # network. `use_llm` and `hyde` add live Ollama paths and default off; they
+  # also require RETRIEVAL_LIVE=1 so they never fire in offline tests or CI.
+  enabled: true
+  use_llm: false
+  hyde: false            # HyDE: embed a hypothetical answer as an extra dense branch
+  model: ""              # chat model for the LLM rewrite; empty disables the LLM path
+  timeout_seconds: 20
+  max_query_chars: 512
+  # abbreviation -> expansion, merged over the built-in retail/business defaults.
+  abbreviations: {}
 
 search:
   # Each branch (dense, sparse) fetches this many times the requested k before

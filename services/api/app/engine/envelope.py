@@ -30,6 +30,21 @@ class Citation(BaseModel):
     score: float | None = None
 
 
+class CorrectionAttempt(BaseModel):
+    """One iteration of the bounded self-correction loop, kept for observability.
+
+    The structured path retries a *governed selection* (never free SQL) when it
+    fails or comes back clearly wrong. Each attempt records what was tried, why
+    it was rejected, and whether the loop could correct it or gave up.
+    """
+
+    attempt: int
+    stage: str  # which selection failed, e.g. "scalar:revenue", "grouped:region"
+    selection: dict  # compact view of the governed selection that was tried
+    error: str  # the failure that triggered a correction
+    resolution: Literal["corrected", "gave_up"]
+
+
 class ChartSeries(BaseModel):
     name: str
     y: str
@@ -44,7 +59,7 @@ class Chart(BaseModel):
 
 class AnswerEnvelope(BaseModel):
     answer: str
-    route: Literal["structured", "unstructured", "hybrid", "clarify"] = "structured"
+    route: Literal["structured", "unstructured", "hybrid", "clarify", "abstain"] = "structured"
     sql: list[str] = Field(default_factory=list)
     tables: list[Table] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
@@ -53,3 +68,12 @@ class AnswerEnvelope(BaseModel):
     caveats: list[str] = Field(default_factory=list)
     # Present when the router needs the user to disambiguate before answering.
     clarifying_question: str | None = None
+    # --- self-correction + abstention (docs/05-insight-engine.md §9) ----------
+    # Bounded record of any governed-selection retries the structured path ran.
+    attempts: list[CorrectionAttempt] = Field(default_factory=list)
+    # Set when the engine refuses to answer rather than fabricate. ``route`` is
+    # then ``"abstain"``; no number is ever emitted. ``suggestions`` points the
+    # user at the closest governed metric or a clarifying next step.
+    abstained: bool = False
+    abstain_reason: str | None = None
+    suggestions: list[str] = Field(default_factory=list)

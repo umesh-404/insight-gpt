@@ -22,7 +22,7 @@
 COMPOSE := docker compose --env-file .env -f docker/compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help setup doctor repair env up down restart bootstrap logs ps seed reindex test lint clean
+.PHONY: help setup doctor repair env up down restart bootstrap logs ps seed reindex test lint eval ci-local clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -81,3 +81,15 @@ test: ## Run each service's offline tests
 
 lint: ## Ruff over every Python package (line-length 100; E,F,I,UP,B,SIM)
 	uv run --with ruff ruff check services data scripts tests
+
+# Offline evaluation harnesses. Both run on the deterministic fixture stack (fake
+# provider + DuckDB warehouse) via the api project's environment — no models, DB,
+# or network. The floored pytest fails on a regression; the scripts then print
+# the human-readable scoreboards.
+eval: ## Run the text-to-SQL + faithfulness eval harnesses (floors + scoreboards)
+	uv run --project services/api pytest -q tests/eval/text2sql.py tests/eval/faithfulness.py
+	@echo "== text-to-SQL scoreboard =="; uv run --project services/api python tests/eval/text2sql.py
+	@echo "== faithfulness scoreboard =="; uv run --project services/api python tests/eval/faithfulness.py
+
+ci-local: lint test eval ## Everything CI runs that needs no Docker: lint + tests + eval
+	@echo "ci-local complete: lint, all offline test suites, and eval harnesses passed."

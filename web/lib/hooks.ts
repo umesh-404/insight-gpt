@@ -12,6 +12,8 @@ import { ApiError } from './types';
 import type {
   Conversation,
   ConversationSummary,
+  Insight,
+  InsightPage,
   MetricQuery,
   MetricResult,
   MetricsCatalog,
@@ -37,6 +39,8 @@ export const qk = {
   sources: ['sources'] as const,
   reports: ['reports'] as const,
   report: (id: string) => ['report', id] as const,
+  insights: (limit: number, offset: number) => ['insights', limit, offset] as const,
+  insight: (id: string) => ['insight', id] as const,
   status: ['status'] as const,
 };
 
@@ -185,6 +189,39 @@ export function useReport(id: string): UseQueryResult<Report> {
     retry: retryUnlessClientError,
     refetchInterval: (query) =>
       query.state.data?.status === 'generating' ? 3000 : false,
+  });
+}
+
+export function useInsights(
+  limit = 20,
+  offset = 0,
+): UseQueryResult<InsightPage> {
+  return useQuery({
+    queryKey: qk.insights(limit, offset),
+    queryFn: () => api.listInsights(limit, offset),
+    staleTime: 60_000,
+    retry: retryUnlessClientError,
+  });
+}
+
+export function useInsight(id: string): UseQueryResult<Insight> {
+  return useQuery({
+    queryKey: qk.insight(id),
+    queryFn: () => api.getInsight(id),
+    enabled: Boolean(id),
+    retry: retryUnlessClientError,
+  });
+}
+
+/** Re-run detection now and refresh every cached insight list. */
+export function useRefreshInsights() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.refreshInsights(),
+    onSuccess: (page) => {
+      qc.setQueryData(qk.insights(20, 0), page);
+      void qc.invalidateQueries({ queryKey: ['insights'] });
+    },
   });
 }
 

@@ -176,9 +176,20 @@ async def ask(
             yield _sse("chart", {"chart_spec": env.chart.model_dump()})
         if env.caveats:
             yield _sse("caveats", {"items": env.caveats})
+        # Self-correction record (bounded) — observable for the eval harness.
+        if env.attempts:
+            yield _sse("corrections", {"items": [a.model_dump() for a in env.attempts]})
+        # Abstention: a valid, honest "I can't answer this reliably" outcome. No
+        # number is emitted; the client shows the reason + suggestions.
+        if env.abstained:
+            yield _sse("abstain", {
+                "reason": env.abstain_reason, "suggestions": env.suggestions,
+            })
         # Route + confidence complete the envelope for a client assembling it
         # from the stream alone.
-        yield _sse("route", {"route": env.route, "confidence": env.confidence})
+        yield _sse("route", {
+            "route": env.route, "confidence": env.confidence, "abstained": env.abstained,
+        })
 
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         _trace(request, engine, started, env)

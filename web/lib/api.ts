@@ -21,6 +21,8 @@ import {
   type Cell,
   type Conversation,
   type ConversationSummary,
+  type Insight,
+  type InsightPage,
   type LoginRequest,
   type MetricQuery,
   type MetricResult,
@@ -706,6 +708,30 @@ export const api = {
     triggerDownload(blob, match?.[1] ? decodeURIComponent(match[1]) : fallback);
   },
 
+  /* ---- Insights (proactive digest) -------------------------------------- */
+
+  async listInsights(limit = 20, offset = 0): Promise<InsightPage> {
+    if (USE_MOCK) return delay(mock.mockInsightPage(limit, offset));
+    const raw = await request<InsightPage>(
+      `/insights?limit=${limit}&offset=${offset}`,
+    );
+    return normalizeInsightPage(raw);
+  },
+
+  async getInsight(id: string): Promise<Insight> {
+    if (USE_MOCK) return delay(mock.mockInsight(id));
+    return normalizeInsight(await request<unknown>(`/insights/${encodeURIComponent(id)}`));
+  },
+
+  async refreshInsights(limit = 20, offset = 0): Promise<InsightPage> {
+    if (USE_MOCK) return delay(mock.mockInsightPage(limit, offset), 500);
+    const raw = await request<InsightPage>(
+      `/insights/refresh?limit=${limit}&offset=${offset}`,
+      { method: 'POST' },
+    );
+    return normalizeInsightPage(raw);
+  },
+
   /* ---- System ----------------------------------------------------------- */
 
   async status(): Promise<SystemStatus> {
@@ -743,6 +769,38 @@ function triggerDownload(blob: Blob, filename: string): void {
   anchor.remove();
   // Revoking immediately can cancel the download in some browsers.
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Insight normalization                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The backend serializes insights from typed pydantic models, so the shapes are
+ * already clean. These guards only keep a rollback or a partial record from
+ * white-screening the feed: arrays default to empty, `root_cause` to null.
+ */
+function normalizeInsight(raw: unknown): Insight {
+  const o = (raw ?? {}) as Partial<Insight>;
+  return {
+    ...(o as Insight),
+    contributions: Array.isArray(o.contributions) ? o.contributions : [],
+    trend: Array.isArray(o.trend) ? o.trend : [],
+    evidence: Array.isArray(o.evidence) ? o.evidence : [],
+    root_cause: o.root_cause ?? null,
+  };
+}
+
+function normalizeInsightPage(raw: unknown): InsightPage {
+  const o = (raw ?? {}) as Partial<InsightPage>;
+  const items = Array.isArray(o.items) ? o.items.map(normalizeInsight) : [];
+  return {
+    items,
+    total: typeof o.total === 'number' ? o.total : items.length,
+    limit: typeof o.limit === 'number' ? o.limit : items.length,
+    offset: typeof o.offset === 'number' ? o.offset : 0,
+    backend: typeof o.backend === 'string' ? o.backend : 'unknown',
+  };
 }
 
 /* -------------------------------------------------------------------------- */

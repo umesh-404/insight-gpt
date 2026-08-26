@@ -42,6 +42,10 @@ class WorkerSettings(BaseSettings):
     reindex_docs_offset_minutes: int = 15
     dbt_build_hour: int = 2
     dbt_build_minute: int = 0
+    # Proactive insight digest: anomaly detection over the governed metrics.
+    # Runs daily, offset from dbt_build so it reads a freshly rebuilt warehouse.
+    insight_digest_hour: int = 6
+    insight_digest_minute: int = 30
 
     # dbt invocation (shelled out). Defaults point at the sibling warehouse
     # project so ``dbt build`` runs with the committed profile.
@@ -63,6 +67,11 @@ class WorkerSettings(BaseSettings):
     # Re-embed only documents whose content hash changed. Embedding is the
     # expensive step, so the scheduled half-hourly reindex must not redo it all.
     reindex_changed_only: bool = True
+
+    # Insight digest persistence. Postgres (POSTGRES_DSN) is preferred; with no
+    # DSN the digest is written to this JSON file so it survives offline runs.
+    insights_schema: str = "insight"
+    insights_file_path: Path = _REPO_ROOT / "data" / "insights" / "insights.json"
 
 
 def get_settings() -> WorkerSettings:

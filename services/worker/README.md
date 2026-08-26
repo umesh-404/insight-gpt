@@ -22,6 +22,25 @@ and a job whose dependency is missing fails cleanly instead of crashing the loop
 | `incremental_sync` | `services.ingestion` content-hash sync + republish the document corpus | every 30 min |
 | `reindex_docs` | retrieval indexer: re-chunk / re-embed the **changed** documents from that corpus | every 30 min (offset +15) |
 | `dbt_build` | `dbt build` over the warehouse project (subprocess) | daily @ 02:00 |
+| `insight_digest` | anomaly detection + root cause over the governed metrics; persists the proactive insight digest | daily @ 06:30 |
+
+### The proactive insight digest
+
+`insight_digest` is the differentiating job: it detects anomalies **without being
+asked**. It reuses the API's insight engine (`services/api` `app.insights`) —
+catalog + warehouse + retriever — and its documented period-over-period detection
+(threshold + minimum-magnitude rule, with a robust median/MAD z-score when enough
+history exists; not ML, and it does not claim to be). For each flagged metric it
+runs the engine's existing contribution analysis to find the root-cause segment
+(region / category / product) and attaches supporting documents.
+
+Insights are written to the `insight.insights` table when `POSTGRES_DSN` is set
+(created defensively; the full record is kept as JSON alongside promoted columns);
+with no DSN they are written to `data/insights/insights.json` so the digest
+survives offline runs. Like `reindex_docs`, the job imports the API package
+lazily and fails cleanly (recorded, not crashed) if `services/api` and its
+dependencies are not installed. It runs offset after `dbt_build` so it reads a
+freshly rebuilt warehouse.
 
 The two 30-minute interval jobs are offset so they do not fire in the same tick
 and contend for the box. Each job runs with `max_instances=1` and
@@ -57,6 +76,7 @@ python -m worker run full_ingest
 python -m worker run incremental_sync
 python -m worker run dbt_build
 python -m worker run reindex_docs
+python -m worker run insight_digest
 ```
 
 `python -m worker` also starts a stdlib health endpoint on port 8090 for compose
@@ -84,6 +104,9 @@ curl http://localhost:8090/health      # -> {"status": "ok"}
 | `REINDEX_DOCS_MINUTES` | `30` | `reindex_docs` cadence |
 | `REINDEX_DOCS_OFFSET_MINUTES` | `15` | first-fire offset for `reindex_docs` |
 | `DBT_BUILD_HOUR` / `DBT_BUILD_MINUTE` | `2` / `0` | daily `dbt_build` clock |
+| `INSIGHT_DIGEST_HOUR` / `INSIGHT_DIGEST_MINUTE` | `6` / `30` | daily `insight_digest` clock |
+| `INSIGHTS_SCHEMA` | `insight` | schema holding the `insights` table |
+| `INSIGHTS_FILE_PATH` | `data/insights/insights.json` | offline digest fallback file |
 | `DBT_PROJECT_DIR` / `DBT_PROFILES_DIR` | `services/warehouse` | dbt invocation |
 | `RUNS_SCHEMA` | `insight` | schema holding `pipeline_runs` |
 

@@ -7,6 +7,8 @@ so each firing is a tracked ``pipeline_runs`` row:
     reindex_docs      — every N minutes (default 30), offset so it does not
                         collide with incremental_sync in the same tick
     dbt_build         — daily at a configured hour
+    insight_digest    — daily, offset after dbt_build, to detect anomalies over
+                        the freshly rebuilt warehouse
 
 Cadences are env-configurable via :class:`worker.config.WorkerSettings`. A single
 scheduler instance with ``max_instances=1`` per job gives the single-instance
@@ -37,7 +39,7 @@ def build_scheduler(
     *,
     blocking: bool = True,
 ):
-    """Create a scheduler with the three recurring jobs registered.
+    """Create a scheduler with the four recurring jobs registered.
 
     Returns an unstarted scheduler. ``blocking=True`` yields a
     ``BlockingScheduler`` (the ``python -m worker`` loop); ``blocking=False`` a
@@ -88,14 +90,28 @@ def build_scheduler(
         coalesce=True,
         replace_existing=True,
     )
+    scheduler.add_job(
+        _job,
+        trigger="cron",
+        hour=settings.insight_digest_hour,
+        minute=settings.insight_digest_minute,
+        args=["insight_digest"],
+        id="insight_digest",
+        name="insight_digest",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
     logger.info(
         "scheduler configured: incremental_sync/%dm, reindex_docs/%dm (+%dm), "
-        "dbt_build @ %02d:%02d — run store backend=%s",
+        "dbt_build @ %02d:%02d, insight_digest @ %02d:%02d — run store backend=%s",
         settings.incremental_sync_minutes,
         settings.reindex_docs_minutes,
         settings.reindex_docs_offset_minutes,
         settings.dbt_build_hour,
         settings.dbt_build_minute,
+        settings.insight_digest_hour,
+        settings.insight_digest_minute,
         store.backend,
     )
     return scheduler

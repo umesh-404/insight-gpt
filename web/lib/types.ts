@@ -458,6 +458,84 @@ export interface ReportSummary {
 }
 
 /* ----------------------------------------------------------------------------
+ * Proactive insight digest
+ * ------------------------------------------------------------------------- */
+
+export type InsightSeverity = 'high' | 'medium' | 'low';
+export type InsightDirection = 'up' | 'down';
+/** Display hint carried from the governed metric's `format`. */
+export type InsightMetricFormat = 'currency' | 'percent' | 'integer' | 'number';
+
+export interface InsightTrendPoint {
+  period: string;
+  value: number;
+}
+
+export interface InsightContribution {
+  dimension: string;
+  segment: string;
+  current: number;
+  prior: number;
+  delta: number;
+  /** Signed share of the total change, in percent. */
+  contribution_pct: number;
+}
+
+export interface InsightRootCause {
+  dimension: string;
+  segment: string;
+  current: number;
+  prior: number;
+  delta: number;
+  contribution_pct: number;
+}
+
+export interface InsightEvidence {
+  n: number;
+  doc_id: string;
+  source_type: string;
+  title: string;
+  date?: string | null;
+  score?: number | null;
+  snippet?: string | null;
+}
+
+/** One flagged anomaly with its deterministic root cause and evidence. */
+export interface Insight {
+  id: string;
+  metric: string;
+  metric_label: string;
+  metric_format: InsightMetricFormat;
+  grain: string;
+  period: string;
+  prior_period: string;
+  current: number;
+  prior: number;
+  change_abs: number;
+  /** Signed ratio, e.g. -0.114. */
+  change_pct: number;
+  direction: InsightDirection;
+  severity: InsightSeverity;
+  z_score?: number | null;
+  method: string;
+  headline: string;
+  root_cause?: InsightRootCause | null;
+  contributions: InsightContribution[];
+  trend: InsightTrendPoint[];
+  evidence: InsightEvidence[];
+  created_at: string;
+}
+
+export interface InsightPage {
+  items: Insight[];
+  total: number;
+  limit: number;
+  offset: number;
+  /** Which store answered: "postgres" | "file" | "memory (on-demand)". */
+  backend: string;
+}
+
+/* ----------------------------------------------------------------------------
  * System status
  * ------------------------------------------------------------------------- */
 

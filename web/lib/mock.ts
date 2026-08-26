@@ -15,6 +15,8 @@ import type {
   ColumnSpec,
   Conversation,
   ConversationSummary,
+  Insight,
+  InsightPage,
   MetricQuery,
   MetricResult,
   MetricsCatalog,
@@ -710,3 +712,127 @@ export const MOCK_STATUS: SystemStatus = {
   ],
   llm: { provider: 'ollama', model: 'llama3.1:8b', reachable: true },
 };
+
+/* -------------------------------------------------------------------------- */
+/* Proactive insight digest                                                   */
+/* -------------------------------------------------------------------------- */
+
+export const MOCK_INSIGHTS: Insight[] = [
+  {
+    id: 'ins_revenue_2026q2',
+    metric: 'revenue',
+    metric_label: 'Revenue',
+    metric_format: 'currency',
+    grain: 'quarter',
+    period: '2026Q2',
+    prior_period: '2026Q1',
+    current: 1_152_000,
+    prior: 1_300_000,
+    change_abs: -148_000,
+    change_pct: -0.114,
+    direction: 'down',
+    severity: 'high',
+    z_score: null,
+    method:
+      'Period-over-period change at quarter grain (threshold 5%, min magnitude 0); insufficient history for a z-score.',
+    headline:
+      'Revenue fell 11.4% in 2026Q2 vs 2026Q1, from $1.30M to $1.15M. North (region) drove most of the move (-$130.0K, 88% of the change).',
+    root_cause: {
+      dimension: 'region',
+      segment: 'North',
+      current: 270_000,
+      prior: 400_000,
+      delta: -130_000,
+      contribution_pct: 87.8,
+    },
+    contributions: [
+      { dimension: 'region', segment: 'North', current: 270_000, prior: 400_000, delta: -130_000, contribution_pct: 87.8 },
+      { dimension: 'region', segment: 'South', current: 313_600, prior: 320_000, delta: -6_400, contribution_pct: 4.3 },
+      { dimension: 'region', segment: 'West', current: 294_000, prior: 300_000, delta: -6_000, contribution_pct: 4.1 },
+      { dimension: 'region', segment: 'East', current: 274_400, prior: 280_000, delta: -5_600, contribution_pct: 3.8 },
+      { dimension: 'category', segment: 'Electronics', current: 501_600, prior: 620_000, delta: -118_400, contribution_pct: 80.0 },
+      { dimension: 'category', segment: 'Apparel', current: 387_300, prior: 405_000, delta: -17_700, contribution_pct: 12.0 },
+      { dimension: 'category', segment: 'Home', current: 263_100, prior: 275_000, delta: -11_900, contribution_pct: 8.0 },
+    ],
+    trend: [
+      { period: '2026Q1', value: 1_300_000 },
+      { period: '2026Q2', value: 1_152_000 },
+    ],
+    evidence: [
+      {
+        n: 1,
+        doc_id: 'TICKET-40122',
+        source_type: 'ticket',
+        title: 'Late delivery — North region electronics',
+        date: '2026-05-08',
+        score: 0.62,
+        snippet:
+          'Customer in the North region reports their electronics order arrived two weeks late due to a fulfilment centre backlog.',
+      },
+      {
+        n: 2,
+        doc_id: 'REPORT-Q2-OPS',
+        source_type: 'report',
+        title: 'Q2 operations review',
+        date: '2026-06-30',
+        score: 0.55,
+        snippet:
+          'The North fulfilment centre backlog was the dominant operational issue of the quarter, concentrated in electronics.',
+      },
+    ],
+    created_at: '2026-08-26T06:30:00Z',
+  },
+  {
+    id: 'ins_units_sold_2026q2',
+    metric: 'units_sold',
+    metric_label: 'Units sold',
+    metric_format: 'integer',
+    grain: 'quarter',
+    period: '2026Q2',
+    prior_period: '2026Q1',
+    current: 116,
+    prior: 141,
+    change_abs: -25,
+    change_pct: -0.177,
+    direction: 'down',
+    severity: 'high',
+    z_score: null,
+    method:
+      'Period-over-period change at quarter grain (threshold 5%, min magnitude 0); insufficient history for a z-score.',
+    headline:
+      'Units sold fell 17.7% in 2026Q2 vs 2026Q1. Electronics (category) drove most of the move.',
+    root_cause: {
+      dimension: 'category',
+      segment: 'Electronics',
+      current: 45,
+      prior: 66,
+      delta: -21,
+      contribution_pct: 84.0,
+    },
+    contributions: [
+      { dimension: 'category', segment: 'Electronics', current: 45, prior: 66, delta: -21, contribution_pct: 84.0 },
+      { dimension: 'category', segment: 'Apparel', current: 41, prior: 44, delta: -3, contribution_pct: 12.0 },
+      { dimension: 'category', segment: 'Home', current: 30, prior: 31, delta: -1, contribution_pct: 4.0 },
+    ],
+    trend: [
+      { period: '2026Q1', value: 141 },
+      { period: '2026Q2', value: 116 },
+    ],
+    evidence: [],
+    created_at: '2026-08-26T06:30:00Z',
+  },
+];
+
+export function mockInsightPage(limit = 20, offset = 0): InsightPage {
+  return {
+    items: MOCK_INSIGHTS.slice(offset, offset + limit),
+    total: MOCK_INSIGHTS.length,
+    limit,
+    offset,
+    backend: 'memory (on-demand)',
+  };
+}
+
+export function mockInsight(id: string): Insight {
+  return MOCK_INSIGHTS.find((i) => i.id === id) ?? MOCK_INSIGHTS[0]!;
+}

@@ -27,6 +27,7 @@ def route(question: str, catalog: SemanticCatalog, provider: Provider, today: st
 def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
     if obj.get("clarify"):
         return {"route": "clarify", "clarify": str(obj["clarify"]), "metric": None,
+                "requested_metric": None, "metric_unresolved": False,
                 "time_range": None, "prior_time_range": None, "group_dims": [],
                 "entities": {}, "is_change_question": False, "needs_docs": False}
 
@@ -34,14 +35,21 @@ def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
     if r not in _VALID_ROUTES:
         r = "structured"
 
-    # Resolve/validate the metric against the governed catalog.
-    metric = obj.get("metric")
-    if metric is not None:
+    # Resolve/validate the metric against the governed catalog. We keep the raw
+    # request and whether it resolved: a metric that was *named but not in the
+    # catalog* is an abstention trigger downstream, distinct from an *absent*
+    # metric (which safely defaults). This is what stops the engine from quietly
+    # answering the wrong metric for an unknown one.
+    requested_metric = obj.get("metric")
+    metric: str | None = None
+    if requested_metric is not None:
         try:
-            metric = catalog.resolve_metric(metric).name
+            metric = catalog.resolve_metric(requested_metric).name
         except Exception:
             metric = None
-    if r in ("structured", "hybrid") and metric is None:
+    metric_unresolved = requested_metric is not None and metric is None
+    # Default only for a genuinely absent metric, never to paper over a wrong one.
+    if r in ("structured", "hybrid") and metric is None and not metric_unresolved:
         metric = "revenue"  # safe governed default
 
     # Validate group dims against the catalog.
@@ -54,6 +62,8 @@ def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
     return {
         "route": r,
         "metric": metric,
+        "requested_metric": requested_metric,
+        "metric_unresolved": metric_unresolved,
         "time_range": tr,
         "prior_time_range": obj.get("prior_time_range"),
         "group_dims": group_dims,

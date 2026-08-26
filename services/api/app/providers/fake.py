@@ -26,6 +26,21 @@ _METRIC_KEYWORDS = [
 ]
 _CHANGE_WORDS = ("why", "decline", "declin", "drop", "fell", "fall", "down",
                  "decreas", "increas", "grew", "growth", "rose", "up ")
+# Words that name a real business metric InsightGPT does NOT govern. When the
+# question asks for one of these, the engine should abstain (and suggest the
+# closest governed metric) rather than quietly answer a different metric. A real
+# LLM router surfaces the requested metric name; this offline stand-in needs the
+# hint list to do the same.
+_UNKNOWN_METRIC_HINTS = ("churn", "retention", "attrition", "nps", "csat",
+                         "ltv", "lifetime value", "cac", "conversion", "bounce",
+                         "engagement", "sentiment score", "profit margin")
+
+# Any explicit time reference. Its ABSENCE (together with no metric and no
+# document intent) means the question is not an analytics question at all, so the
+# provider must not fabricate a period — the engine then abstains.
+_TIME_WORDS = ("quarter", "month", "year", "week", "today", "yesterday",
+               "q1", "q2", "q3", "q4", "2024", "2025", "2026", "2027")
+
 _DOC_WORDS = ("complain", "complaint", "review", "feedback", "summar", "theme",
               "saying", "sentiment", "issue")
 
@@ -49,6 +64,9 @@ class FakeProvider(Provider):
         metrics = p.get("metrics", [])
 
         metric = _detect_metric(q, metrics)
+        # A metric that is named but not governed -> reported so the engine can
+        # abstain with a suggestion instead of answering the wrong metric.
+        unknown_metric = _detect_unknown_metric(q) if metric is None else None
         wants_docs = any(w in q for w in _DOC_WORDS)
         is_change = any(w in q for w in _CHANGE_WORDS) and metric is not None
 
@@ -60,12 +78,25 @@ class FakeProvider(Provider):
         else:
             route = "structured"
 
-        time_range, prior = _resolve_time(q, today, need_prior=is_change)
+        # Only resolve a period when the question actually has analytics intent.
+        # A question with no governed metric, no unknown-metric name, no document
+        # ask, no change verb and no time word is not answerable from the
+        # warehouse at all — leave the range empty so the engine abstains rather
+        # than inventing "last quarter" and answering a default metric.
+        has_intent = (
+            metric is not None or unknown_metric is not None or is_change
+            or wants_docs or any(w in q for w in _TIME_WORDS)
+        )
+        if has_intent:
+            time_range, prior = _resolve_time(q, today, need_prior=is_change)
+        else:
+            time_range, prior = None, None
         group_dims = _detect_group_dims(q)
 
         return {
             "route": route,
-            "metric": metric,
+            # Surface the ungoverned metric name so the router marks it unresolved.
+            "metric": metric or unknown_metric,
             "time_range": time_range,
             "prior_time_range": prior,
             "group_dims": group_dims,
@@ -152,6 +183,18 @@ def _detect_metric(q: str, metrics: list[str]) -> str | None:
     for words, metric in _METRIC_KEYWORDS:
         if any(w in q for w in words) and (not metrics or metric in metrics):
             return metric
+    return None
+
+
+def _detect_unknown_metric(q: str) -> str | None:
+    """Name a requested-but-ungoverned metric, so the engine can abstain on it."""
+    for hint in _UNKNOWN_METRIC_HINTS:
+        if hint in q:
+            # Keep "rate"/"ratio" phrasing when present, so the suggestion reads
+            # naturally (e.g. "churn rate" -> suggest "return_rate").
+            if "rate" in q and not hint.endswith(("nps", "csat", "score")):
+                return f"{hint} rate"
+            return hint
     return None
 
 

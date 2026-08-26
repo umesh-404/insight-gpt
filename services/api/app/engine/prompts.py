@@ -27,6 +27,18 @@ Respond with a JSON object only, matching:
  "group_dims":[],"entities":{},"is_change_question":bool,"needs_docs":bool,"clarify":null|str}
 """
 
+CORRECTION_INSTRUCTIONS = """\
+TASK: correct_selection
+A previous governed metric selection failed to execute or returned a clearly
+wrong result. Produce a CORRECTED selection. You are choosing from a menu — use
+ONLY governed metric and dimension names from the catalog in the payload; you
+must NEVER author SQL. Fix the specific error: pick a metric that exists, drop or
+replace any dimension the metric does not allow (`allowed_dimensions`), and keep
+the original time filter. Respond with a JSON object only, matching:
+{"metric","dimensions":[],"time_grain":null|str,
+ "order_by_metric":null|"asc"|"desc","filters":null,"limit":null}
+"""
+
 SYNTH_INSTRUCTIONS = """\
 TASK: synthesize
 You are the synthesis step. Write a concise, explainable answer to the question
@@ -47,6 +59,25 @@ def route_prompt(question: str, today: str, metrics: list[str], dimensions: list
         "dimensions": dimensions,
     }
     return f"{ROUTE_INSTRUCTIONS}\nPAYLOAD: {json.dumps(payload)}\n"
+
+
+def correction_prompt(
+    question: str,
+    failed_selection: dict,
+    error: str,
+    metrics: list[str],
+    dimensions: list[str],
+    allowed_dimensions: list[str],
+) -> str:
+    payload = {
+        "question": question,
+        "failed_selection": failed_selection,
+        "error": error,
+        "metrics": metrics,
+        "dimensions": dimensions,
+        "allowed_dimensions": allowed_dimensions,
+    }
+    return f"{CORRECTION_INSTRUCTIONS}\nPAYLOAD: {json.dumps(payload)}\n"
 
 
 def synth_prompt(question: str, findings: dict, evidence: list[dict]) -> str:

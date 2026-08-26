@@ -1,0 +1,203 @@
+name: CI
+
+# Every push and pull request against main runs the full suite: lint + tests for
+# each Python package, the cross-file drift guards, a real dbt build on a
+# throwaway Postgres, the web build, and the offline eval harnesses.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref so the queue stays short.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.5.11"
+
+jobs:
+  # --- per-package lint + unit tests --------------------------------------- #
+  python:
+    name: python (${{ matrix.pkg.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg:
+          - name: api
+            dir: services/api
+            sync: uv sync --extra api --dev
+            lint: "."
+            test: uv run pytest -q
+            env: LLM_PROVIDER=fake
+          - name: retrieval
+            dir: services/retrieval
+            sync: uv sync --dev
+            lint: "."
+            test: uv run pytest -q
+            env: ""
+          - name: worker
+            dir: services/worker
+            sync: uv sync --dev
+            lint: "."
+            test: uv run pytest -q
+            env: ""
+          - name: ingestion
+            dir: services/ingestion
+            sync: uv sync --dev
+            lint: "."
+            test: uv run pytest -q
+            env: ""
+          - name: data-generator
+            dir: .
+            sync: ""
+            lint: data/generator
+            test: uv run --with pytest --with pydantic pytest -q data/generator/tests
+            env: ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Sync dependencies
+        if: ${{ matrix.pkg.sync != '' }}
+        working-directory: ${{ matrix.pkg.dir }}
+        run: ${{ matrix.pkg.sync }}
+      - name: Ruff
+        working-directory: ${{ matrix.pkg.dir }}
+        run: uvx ruff@0.8.6 check ${{ matrix.pkg.lint }}
+      - name: Pytest
+        working-directory: ${{ matrix.pkg.dir }}
+        run: ${{ matrix.pkg.env }} ${{ matrix.pkg.test }}
+
+  # --- cross-file drift guards (semantic layer + setup script) ------------- #
+  drift:
+    name: drift guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Semantic-layer drift + setup-script tests
+        run: >-
+          uv run --with pytest --with pyyaml
+          pytest -q tests/test_semantic_layer_drift.py tests/test_setup_script.py
+
+  # --- warehouse: real dbt build on a throwaway Postgres ------------------- #
+  dbt:
+    name: dbt build (throwaway postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: insight
+          POSTGRES_PASSWORD: insight
+          POSTGRES_DB: insight
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U insight"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # seed.py + services/ingestion read these; dbt resolves the same vars via
+      # services/warehouse/profiles.yml.
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: insight
+      POSTGRES_USER: insight
+      POSTGRES_PASSWORD: insight
+      POSTGRES_SCHEMA: marts
+      INSIGHT_REFERENCE_DATE: "2026-07-15"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Create schemas (mirror docker/initdb/01-schemas.sql)
+        run: |
+          psql "postgresql://insight:insight@localhost:5432/insight" <<'SQL'
+          CREATE SCHEMA IF NOT EXISTS raw;
+          CREATE SCHEMA IF NOT EXISTS marts;
+          CREATE SCHEMA IF NOT EXISTS insight;
+          SQL
+      - name: Seed warehouse (generate -> load raw -> dbt build + test)
+        # One environment: the ingestion project (pydantic + generator deps) with
+        # its postgres extra (psycopg for the raw loader) plus dbt-postgres, which
+        # puts the `dbt` CLI on PATH. seed.py passes --project-dir/--profiles-dir
+        # to dbt itself, so no DBT_PROFILES_DIR is needed.
+        run: >-
+          uv run --project services/ingestion --extra postgres
+          --with 'dbt-postgres>=1.8,<2.0'
+          python scripts/seed.py --require-postgres
+
+  # --- frontend: type-check, lint, build ----------------------------------- #
+  web:
+    name: web (build + lint + tsc)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Type-check
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+
+  # --- offline eval harnesses (deterministic fake-provider path) ----------- #
+  eval:
+    name: eval harnesses (text-to-SQL + faithfulness)
+    runs-on: ubuntu-latest
+    env:
+      LLM_PROVIDER: fake
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - name: Install Python
+        run: uv python install 3.12
+      - name: Sync API package (engine + fixtures)
+        working-directory: services/api
+        run: uv sync --dev
+      - name: Run eval harnesses (floored pytest)
+        # Files are named for the harness, not test_*.py, so pass them explicitly.
+        run: >-
+          uv run --project services/api
+          pytest -q tests/eval/text2sql.py tests/eval/faithfulness.py
+      - name: Print scoreboards
+        run: |
+          uv run --project services/api python tests/eval/text2sql.py
+          uv run --project services/api python tests/eval/faithfulness.py
