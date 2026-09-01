@@ -924,6 +924,7 @@ function normalizeInsightPage(raw: unknown): InsightPage {
 export interface AskOptions {
   conversationId?: string;
   signal?: AbortSignal;
+  files?: File[];
   onEvent: (event: AskStreamEvent) => void;
 }
 
@@ -952,11 +953,27 @@ export async function streamAsk(
     return;
   }
 
+  const hasFiles = (opts.files?.length ?? 0) > 0;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     Accept: 'text/event-stream',
   };
+  if (!hasFiles) headers['Content-Type'] = 'application/json';
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+
+  const body = hasFiles
+    ? (() => {
+        const form = new FormData();
+        form.append('question', question);
+        form.append('conversation_id', opts.conversationId ?? '');
+        form.append('stream', 'true');
+        for (const file of opts.files ?? []) form.append('files', file, file.name);
+        return form;
+      })()
+    : JSON.stringify({
+        question,
+        conversation_id: opts.conversationId ?? null,
+        stream: true,
+      });
 
   let res: Response;
   try {
@@ -965,11 +982,7 @@ export async function streamAsk(
       headers,
       credentials: 'include',
       signal: opts.signal,
-      body: JSON.stringify({
-        question,
-        conversation_id: opts.conversationId ?? null,
-        stream: true,
-      }),
+      body,
     });
   } catch (err) {
     if (opts.signal?.aborted) return;

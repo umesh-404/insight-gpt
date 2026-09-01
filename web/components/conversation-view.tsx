@@ -51,6 +51,7 @@ export function ConversationView({
     })),
   );
   const [input, setInput] = React.useState('');
+  const [attachments, setAttachments] = React.useState<File[]>([]);
   const [busy, setBusy] = React.useState(false);
   const abortRef = React.useRef<AbortController | null>(null);
   const bottomRef = React.useRef<HTMLDivElement | null>(null);
@@ -92,10 +93,11 @@ export function ConversationView({
   );
 
   const ask = React.useCallback(
-    async (question: string) => {
+    async (question: string, files: File[] = []) => {
       const trimmed = question.trim();
-      if (!trimmed || busy) return;
+      if ((!trimmed && files.length === 0) || busy) return;
       setInput('');
+      setAttachments([]);
       setBusy(true);
       const controller = new AbortController();
       abortRef.current = controller;
@@ -104,7 +106,7 @@ export function ConversationView({
         ...prev,
         {
           id: `pending-${Date.now()}`,
-          question: trimmed,
+          question: trimmed || files.map((file) => file.name).join(', '),
           envelope: emptyEnvelope(),
           streaming: true,
           feedback: null,
@@ -118,9 +120,10 @@ export function ConversationView({
       const acc = new EnvelopeAccumulator();
 
       try {
-        await streamAsk(trimmed, {
+        await streamAsk(trimmed || files.map((file) => file.name).join(', '), {
           conversationId,
           signal: controller.signal,
+          files,
           onEvent: (event) => {
             const envelope = acc.apply(event);
             patchLast((t) => ({
@@ -200,7 +203,7 @@ export function ConversationView({
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    void ask(input);
+    void ask(input, attachments);
   };
 
   return (
@@ -246,7 +249,7 @@ export function ConversationView({
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
-                  void ask(input);
+                  void ask(input, attachments);
                 }
               }}
               rows={1}
@@ -254,6 +257,35 @@ export function ConversationView({
               placeholder="Ask about revenue, inventory, customers…"
               className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
+            <div className="flex items-center gap-2">
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border bg-background px-2 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent">
+                Attach
+                <input
+                  type="file"
+                  multiple
+                  accept=".csv,.pdf,.txt,.md,.json,image/*"
+                  className="hidden"
+                  onChange={(e) => setAttachments(Array.from(e.target.files ?? []))}
+                />
+              </label>
+              {attachments.length > 0 && (
+                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                  {attachments.slice(0, 3).map((file) => (
+                    <span key={`${file.name}-${file.size}`} className="rounded border px-1.5 py-0.5">
+                      {file.name}
+                    </span>
+                  ))}
+                  {attachments.length > 3 && <span>+{attachments.length - 3}</span>}
+                  <button
+                    type="button"
+                    className="text-xs text-destructive"
+                    onClick={() => setAttachments([])}
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
             {busy ? (
               <Button
                 type="button"

@@ -18,12 +18,14 @@ and ``DELETE /conversations/{id}``.
 
 from __future__ import annotations
 
+import base64
+import inspect
 import json
 import logging
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, Path, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -79,7 +81,112 @@ def _chunk_text(text: str, size: int = 6) -> list[str]:
     return chunks or [text]
 
 
-async def _run(engine: InsightEngine, question: str) -> AnswerEnvelope:
+def _read_text_file(file_name: str, payload: bytes) -> str:
+    name = file_name.lower()
+    if name.endswith(".csv") or name.endswith(".txt") or name.endswith(".md"):
+        return payload.decode("utf-8-sig", errors="replace").strip()
+    if name.endswith(".json"):
+        return payload.decode("utf-8-sig", errors="replace").strip()
+    if name.endswith(".pdf"):
+        try:
+            import pypdf
+        except ImportError:
+            return "[PDF attachment could not be parsed in this environment; the file name is included for context.]"
+        reader = pypdf.PdfReader(__import__("io").BytesIO(payload))
+        pages = []
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            pages.append(text.strip())
+        return "\n\n".join(p for p in pages if p).strip() or "[PDF was empty.]"
+    if name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")):
+        return (
+            f"[Image attachment: {file_name}. "
+            "The model may inspect the image if the configured provider supports multimodal inputs; "
+            "otherwise the file is included as a document reference.]"
+        )
+    return payload.decode("utf-8-sig", errors="replace").strip()[:4000]
+
+
+def _attach_context(question: str, files: list[UploadFile]) -> str:
+    if not files:
+        return question
+    sections: list[str] = [question.strip()]
+    for file in files:
+        if file.filename is None:
+            continue
+        data = file.file.read() if hasattr(file, "file") else b""
+        text = _read_text_file(file.filename, data)
+        sections.append(
+            f"\n[Attached file: {file.filename}]\n"
+            f"{text[:8000] if text else '[No readable text found.]'}"
+        )
+        if hasattr(file, "file"):
+            try:
+                file.file.seek(0)
+            except Exception:
+                pass
+    return "\n".join(s for s in sections if s).strip()
+
+
+def _make_attachment_meta(files: list[UploadFile]) -> list[dict]:
+    attachments: list[dict] = []
+    for file in files:
+        if file.filename is None:
+            continue
+        payload = file.file.read() if hasattr(file, "file") else b""
+        name = file.filename.lower()
+        kind = "image" if name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")) else "document"
+        record = {"name": file.filename, "kind": kind}
+        if kind == "image":
+            record["data"] = base64.b64encode(payload).decode("ascii")
+        else:
+            record["data"] = _read_text_file(file.filename, payload)[:12000]
+        attachments.append(record)
+        if hasattr(file, "file"):
+            try:
+                file.file.seek(0)
+            except Exception:
+                pass
+    return attachments
+
+
+async def _read_ask_payload(request: Request) -> tuple[AskRequest, list[UploadFile], list[dict]]:
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        files = form.getlist("files")
+        payload = AskRequest(
+            question=str(form.get("question") or "").strip(),
+            conversation_id=str(form.get("conversation_id") or "") or None,
+            stream=str(form.get("stream") or "true").lower() not in {"false", "0", "no"},
+        )
+        return payload, files, _make_attachment_meta(files)
+    body = await request.json()
+    return AskRequest.model_validate(body), [], []
+
+
+def _call_engine(engine: InsightEngine, question: str, attachments: list[dict] | None) -> AnswerEnvelope:
+    """Support both legacy ``engine.ask(question)`` and attachment-aware ``engine.ask(question, attachments)`` signatures."""
+    try:
+        params = inspect.signature(engine.ask).parameters
+    except (TypeError, ValueError):
+        return engine.ask(question, attachments)  # pragma: no cover - fallback for C-extensions
+
+    accepts_attachments = (
+        "attachments" in params
+        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values())
+    )
+    if accepts_attachments:
+        return engine.ask(question, attachments)
+    return engine.ask(question)
+
+
+async def _run(
+    engine: InsightEngine,
+    question: str,
+    attachments: list[dict] | None = None,
+) -> AnswerEnvelope:
     """Run the engine, reducing any failure to a sanitized :class:`AskError`.
 
     A guardrail rejection is the caller's problem (400); anything else is ours
@@ -87,7 +194,7 @@ async def _run(engine: InsightEngine, question: str) -> AnswerEnvelope:
     request id in the envelope is the key into the full server-side log line.
     """
     try:
-        return await run_in_threadpool(engine.ask, question)
+        return await run_in_threadpool(_call_engine, engine, question, attachments)
     except GuardrailError:
         log.warning("ask rejected by guardrails", exc_info=True)
         raise AskError(
@@ -119,14 +226,15 @@ def _persist(
 
 @router.post("/ask", dependencies=[Depends(rate_limit("ask"))])
 async def ask(
-    body: AskRequest,
     request: Request,
     response: Response,
     claims: TokenClaims = Depends(current_claims),
     engine: InsightEngine = Depends(get_engine),
 ):
+    body, uploaded_files, attachments = await _read_ask_payload(request)
     conversation_id = body.conversation_id or store.new_id("c")
     message_id = store.new_id("m")
+    prompt_question = _attach_context(body.question, uploaded_files)
 
     accept = request.headers.get("accept", "")
     wants_json = not body.stream or "application/json" in accept.lower()
@@ -134,26 +242,23 @@ async def ask(
     if wants_json:
         started = time.perf_counter()
         try:
-            env = await _run(engine, body.question)
+            env = await _run(engine, prompt_question, attachments)
         except AskError as exc:
             if exc.status_code == 400:
                 raise BadRequestError(exc.message) from None
             raise APIError(exc.message) from None
         _trace(request, engine, started, env)
         _persist(claims, conversation_id, body.question, message_id, env)
-        # The SSE path carries these in its `meta` event; JSON clients get them
-        # as headers so they can continue the thread without polluting the
-        # typed envelope (which must stay equal to the assembled stream).
         response.headers["X-Conversation-Id"] = conversation_id
         response.headers["X-Message-Id"] = message_id
-        return env  # typed AnswerEnvelope — drives the OpenAPI schema
+        return env
 
     async def event_stream() -> AsyncIterator[str]:
         started = time.perf_counter()
         rid = getattr(request.state, "request_id", "-")
         yield _sse("meta", {"conversation_id": conversation_id, "message_id": message_id})
         try:
-            env = await _run(engine, body.question)
+            env = await _run(engine, prompt_question, attachments)
         except AskError as exc:
             yield _sse("error", {"code": exc.code, "message": exc.message, "request_id": rid})
             return

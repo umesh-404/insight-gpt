@@ -37,6 +37,8 @@ class OllamaProvider(Provider):
         }
         if opts.get("json"):
             body["format"] = "json"
+        if opts.get("images"):
+            body["images"] = opts["images"]
         with httpx.Client(timeout=self.timeout) as client:
             r = client.post(f"{self.host}/api/chat", json=body)
             r.raise_for_status()
@@ -49,6 +51,8 @@ class OllamaProvider(Provider):
             "stream": True,
             "options": {"temperature": opts.get("temperature", 0.0)},
         }
+        if opts.get("images"):
+            body["images"] = opts["images"]
         import json as _json
         with httpx.Client(timeout=self.timeout) as client, \
                 client.stream("POST", f"{self.host}/api/chat", json=body) as r:

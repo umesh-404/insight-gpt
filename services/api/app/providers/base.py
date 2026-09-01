@@ -20,6 +20,7 @@ from dataclasses import dataclass
 class Message:
     role: str  # "system" | "user" | "assistant"
     content: str
+    images: list[str] | None = None
 
 
 @dataclass

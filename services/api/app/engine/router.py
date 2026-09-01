@@ -17,11 +17,23 @@ from .prompts import route_prompt
 _VALID_ROUTES = {"structured", "unstructured", "hybrid"}
 
 
-def route(question: str, catalog: SemanticCatalog, provider: Provider, today: str) -> dict:
+def route(
+    question: str,
+    catalog: SemanticCatalog,
+    provider: Provider,
+    today: str,
+    attachments: list[dict] | None = None,
+) -> dict:
     prompt = route_prompt(question, today, catalog.metric_names(), catalog.dimension_names())
-    raw = provider.complete(prompt, json=True, temperature=0.0)
+    raw = provider.complete(prompt, json=True, temperature=0.0, images=_images_for(attachments))
     obj = extract_json(raw)
     return _normalize(obj, catalog)
+
+
+def _images_for(attachments: list[dict] | None) -> list[str]:
+    if not attachments:
+        return []
+    return [item["data"] for item in attachments if item.get("kind") == "image" and item.get("data")]
 
 
 def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
