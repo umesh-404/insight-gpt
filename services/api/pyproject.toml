@@ -22,6 +22,7 @@ api = [
     "uvicorn[standard]>=0.30",
     "pyjwt>=2.9",               # JWT access/refresh tokens (no crypto extras needed)
     "python-multipart>=0.0.9",  # form parsing for FastAPI request bodies
+    "pypdf>=5.0",               # parse uploaded PDFs for text extraction
     "psycopg[binary]>=3.2",     # real Postgres executor (production warehouse)
     "fpdf2>=2.7,<3",            # server-side PDF export for /reports (pure Python)
 ]

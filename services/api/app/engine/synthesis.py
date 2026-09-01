@@ -14,14 +14,14 @@ from .retrieval import RetrievedDoc
 
 
 def synthesize(question: str, findings: dict, docs: list[RetrievedDoc],
-               provider: Provider) -> dict:
+               provider: Provider, attachments: list[dict] | None = None) -> dict:
     evidence = [
         {"n": i + 1, "doc_id": d.doc_id, "source_type": d.source_type,
          "title": d.title, "body": d.body, "date": d.date, "score": d.score}
         for i, d in enumerate(docs)
     ]
     prompt = synth_prompt(question, findings, evidence)
-    raw = provider.complete(prompt, json=True, temperature=0.0)
+    raw = provider.complete(prompt, json=True, temperature=0.0, images=_images_for(attachments))
     try:
         obj = extract_json(raw)
     except ValueError:
@@ -31,3 +31,9 @@ def synthesize(question: str, findings: dict, docs: list[RetrievedDoc],
     obj.setdefault("confidence", "medium")
     obj.setdefault("caveats", [])
     return obj
+
+
+def _images_for(attachments: list[dict] | None) -> list[str]:
+    if not attachments:
+        return []
+    return [item["data"] for item in attachments if item.get("kind") == "image" and item.get("data")]

@@ -109,6 +109,20 @@ def test_ask_requires_auth(client: TestClient) -> None:
     assert resp.json()["error"]["code"] == "unauthorized"
 
 
+def test_ask_accepts_multipart_attachment(client: TestClient) -> None:
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask",
+        data={"question": "Review this CSV and tell me the strongest trend.", "stream": "false"},
+        files={"files": ("sales.csv", "region,revenue\nNorth,120\nSouth,90\n", "text/csv")},
+        headers={**_auth(token), "Accept": "application/json"},
+    )
+    assert resp.status_code == 200, resp.text
+    env = resp.json()
+    assert env["answer"]
+    assert env["route"] in {"structured", "hybrid", "unstructured"}
+
+
 def test_ask_sse_stream_has_ordered_events(client: TestClient) -> None:
     token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
     resp = client.post(

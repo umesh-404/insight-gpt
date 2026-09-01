@@ -41,8 +41,9 @@ class InsightEngine:
         )
 
     # ---- main entry point ----------------------------------------------------
-    def ask(self, question: str) -> AnswerEnvelope:
-        r = route(question, self.catalog, self.provider, self.today)
+    def ask(self, question: str, attachments: list[dict] | None = None) -> AnswerEnvelope:
+        images = _images_for(attachments)
+        r = route(question, self.catalog, self.provider, self.today, attachments=attachments)
 
         if r["route"] == "clarify":
             return AnswerEnvelope(
@@ -60,7 +61,7 @@ class InsightEngine:
             docs = self.retriever.search(query, filters=filters, k=5)
 
         findings = structured.findings if structured else {"kind": "docs"}
-        synth = synthesize(question, findings, docs, self.provider)
+        synth = synthesize(question, findings, docs, self.provider, attachments=attachments)
 
         return AnswerEnvelope(
             answer=synth["answer"],
@@ -72,6 +73,16 @@ class InsightEngine:
             confidence=synth.get("confidence", "medium"),
             caveats=synth.get("caveats", []),
         )
+
+
+def _images_for(attachments: list[dict] | None) -> list[str]:
+    if not attachments:
+        return []
+    images: list[str] = []
+    for item in attachments:
+        if item.get("kind") == "image" and item.get("data"):
+            images.append(item["data"])
+    return images
 
 
 def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:
