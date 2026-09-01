@@ -5,7 +5,7 @@ import { ConversationView } from '@/components/conversation-view';
 export const metadata: Metadata = {
   title: 'Ask',
   description:
-    'Ask questions in plain English and get cited answers with the governed SQL and source documents attached.',
+    'Ask questions in plain English and get grounded answers with source evidence and follow-up analysis.',
 };
 
 /**

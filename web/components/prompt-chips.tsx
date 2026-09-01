@@ -21,18 +21,18 @@ interface ExamplePrompt {
 export const EXAMPLE_PROMPTS: readonly ExamplePrompt[] = [
   {
     icon: TrendingDown,
-    label: 'Why did sales decline last quarter?',
-    hint: 'Root cause across SQL + documents',
+    label: 'Why did performance change this month?',
+    hint: 'Compare trends and spot root causes',
   },
   {
     icon: Boxes,
-    label: 'Which products should we restock?',
-    hint: 'Governed inventory metrics',
+    label: 'What should we focus on next?',
+    hint: 'Prioritize actions and opportunities',
   },
   {
     icon: MessagesSquare,
-    label: 'Summarize customer complaints this month.',
-    hint: 'Retrieval over tickets and reviews',
+    label: 'Summarize customer feedback and key issues.',
+    hint: 'Turn raw input into clear insights',
   },
 ] as const;
 
@@ -66,11 +66,11 @@ export function PromptChips({
       </div>
 
       <h2 className="text-2xl font-semibold text-foreground">
-        Ask anything about your business data
+        Ask me anything
       </h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        Plain-English questions become governed SQL and grounded retrieval —
-        answered with the evidence attached.
+        I can help with analysis, trends, root causes, and follow-up questions —
+        and I’ll ground the answer in the evidence.
       </p>
 
       <div className="stagger mt-8 grid gap-3 sm:grid-cols-3">

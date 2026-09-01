@@ -18,7 +18,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.main import create_app
+from app.api.main import _cors_origins, create_app
 from app.api.routers.auth import REFRESH_COOKIE, REFRESH_COOKIE_PATH, reset_revocations
 from app.auth import tokens
 
@@ -42,6 +42,20 @@ def _login(client: TestClient, creds: dict[str, str] = ANALYST):
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_default_cors_origins_include_dev_ports() -> None:
+    origins = _cors_origins()
+    assert "http://localhost:3002" in origins
+    assert "http://127.0.0.1:3002" in origins
+
+
+def test_create_app_loads_repo_env_for_cors_and_jwt() -> None:
+    os.environ.pop("CORS_ORIGINS", None)
+    os.environ.pop("JWT_SECRET", None)
+    create_app()
+    assert "http://localhost:3002" in (os.environ.get("CORS_ORIGINS") or "")
+    assert os.environ.get("JWT_SECRET")
 
 
 # --- login ------------------------------------------------------------------

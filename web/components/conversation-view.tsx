@@ -239,7 +239,7 @@ export function ConversationView({
         <form onSubmit={onSubmit} className="mx-auto w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl">
           <div className="flex items-end gap-2 rounded-xl border bg-card p-2 shadow-soft transition-shadow focus-within:border-primary/40 focus-within:shadow-raised focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background">
             <label htmlFor="ask-input" className="sr-only">
-              Ask a question about your business data
+              Ask a question
             </label>
             <textarea
               id="ask-input"
@@ -254,7 +254,7 @@ export function ConversationView({
               }}
               rows={1}
               disabled={busy}
-              placeholder="Ask about revenue, inventory, customers…"
+              placeholder="Ask me anything…"
               className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
             <div className="flex items-center gap-2">

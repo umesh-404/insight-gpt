@@ -345,7 +345,9 @@ export function InsightCard({
                       className="mt-0.5 size-4 shrink-0 text-primary"
                       aria-hidden
                     />
-                    <p className="text-foreground">{envelope.clarifying_question}</p>
+                    <p className="text-foreground">
+                      I can help with that — {envelope.clarifying_question.toLowerCase()}
+                    </p>
                   </div>
                 ) : null}
 
