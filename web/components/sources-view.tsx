@@ -245,32 +245,32 @@ export function SourcesView() {
   }
 
   return (
-    <div className="space-y-6 p-4 sm:p-6">
+    <div className="space-y-6 p-4 sm:p-6 min-w-0 max-w-full overflow-hidden">
       <PageHeader
         title="Data sources"
         description="Every connector this deployment reads from. Secrets are write-only — never returned in reads."
       />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-        <Card>
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px] grid-cols-1">
+        <Card className="min-w-0 max-w-full overflow-hidden">
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Registered sources</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="min-w-0 max-w-full p-3 sm:p-6">
             {sources.isLoading ? (
               <Skeleton className="h-64 w-full" />
             ) : sources.isError ? (
               <ErrorState error={sources.error} onRetry={() => void sources.refetch()} />
             ) : sources.data && sources.data.length ? (
-              <div className="scrollbar-thin overflow-x-auto rounded-lg border">
+              <div className="scrollbar-thin overflow-x-auto rounded-lg border w-full max-w-full">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead scope="col">Name</TableHead>
-                      <TableHead scope="col">Kind</TableHead>
-                      <TableHead scope="col">Status</TableHead>
-                      <TableHead scope="col">Last tested</TableHead>
-                      <TableHead scope="col" className="text-right">
+                      <TableHead scope="col" className="min-w-[180px]">Name</TableHead>
+                      <TableHead scope="col" className="w-[100px]">Kind</TableHead>
+                      <TableHead scope="col" className="min-w-[180px]">Status</TableHead>
+                      <TableHead scope="col" className="w-[130px]">Last tested</TableHead>
+                      <TableHead scope="col" className="w-[110px] text-right">
                         Actions
                       </TableHead>
                     </TableRow>
@@ -285,11 +285,11 @@ export function SourcesView() {
                       const confirming = confirmingId === source.id;
                       return (
                         <TableRow key={source.id}>
-                          <TableCell className="font-medium">
-                            {source.name}
+                          <TableCell className="font-medium min-w-0">
+                            <span className="truncate block font-semibold">{source.name}</span>
                             {source.location ? (
                               <span
-                                className="mt-0.5 block max-w-[28rem] truncate font-mono text-xs font-normal text-muted-foreground"
+                                className="mt-0.5 block max-w-xs sm:max-w-sm md:max-w-md xl:max-w-xs 2xl:max-w-sm truncate font-mono text-xs font-normal text-muted-foreground"
                                 title={source.location}
                               >
                                 {source.location}
@@ -302,18 +302,18 @@ export function SourcesView() {
                               {source.kind}
                             </Badge>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="min-w-0">
                             <StatusBadge status={source.status} />
                             {source.detail ? (
                               <span
-                                className="mt-1 block max-w-[22rem] truncate text-xs text-muted-foreground"
+                                className="mt-1 block max-w-xs sm:max-w-sm md:max-w-md xl:max-w-xs 2xl:max-w-sm truncate text-xs text-muted-foreground"
                                 title={source.detail}
                               >
                                 {source.detail}
                               </span>
                             ) : null}
                           </TableCell>
-                          <TableCell className="whitespace-nowrap text-muted-foreground">
+                          <TableCell className="whitespace-nowrap text-muted-foreground text-xs">
                             {source.last_tested_at ? formatDateTime(source.last_tested_at) : 'Never'}
                           </TableCell>
                           <TableCell>
@@ -387,7 +387,7 @@ export function SourcesView() {
           </CardContent>
         </Card>
 
-        <Card className="h-fit">
+        <Card className="min-w-0 max-w-full h-fit">
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Register a source</CardTitle>
           </CardHeader>

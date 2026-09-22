@@ -85,15 +85,15 @@ export function ReportsView() {
   };
 
   return (
-    <div className="space-y-6 p-4 sm:p-6">
+    <div className="space-y-6 p-4 sm:p-6 min-w-0 max-w-full overflow-hidden">
       <PageHeader
         title="Reports"
         description="Generate cited, exportable executive narratives over a chosen period."
       />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px] grid-cols-1">
         {/* Report list */}
-        <div className="space-y-3">
+        <div className="space-y-3 min-w-0 max-w-full">
           <h2 className="text-lg font-semibold tracking-tight">Your reports</h2>
           {reports.isLoading ? (
             <div className="space-y-3">
@@ -137,7 +137,7 @@ export function ReportsView() {
         </div>
 
         {/* Generate panel */}
-        <Card className="h-fit">
+        <Card className="min-w-0 max-w-full h-fit">
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="size-4 text-primary" /> Generate report

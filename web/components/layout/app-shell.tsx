@@ -130,7 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [mobileOpen]);
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-screen bg-background max-w-full overflow-x-hidden">
       {/* Desktop sidebar */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r bg-card lg:flex">
         <div className="flex h-16 items-center border-b px-5">
@@ -183,7 +183,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       ) : null}
 
       {/* Main column */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 max-w-full flex-1 flex-col overflow-x-hidden">
         <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur sm:px-6">
           <Button
             variant="ghost"
@@ -223,7 +223,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <ThemeToggle />
           </div>
         </header>
-        <main id="main-content" className="min-h-0 min-w-0 flex-1">
+        <main id="main-content" className="min-h-0 min-w-0 max-w-full flex-1 overflow-x-hidden">
           {children}
         </main>
       </div>
