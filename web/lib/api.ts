@@ -12,6 +12,8 @@
  * (`credentials: 'include'`). This module never persists the access token.
  */
 import {
+  type ForecastResult,
+  type ForecastCapabilityReport,
   ApiError,
   emptyEnvelope,
   type AccessToken,
@@ -21,6 +23,8 @@ import {
   type Cell,
   type Conversation,
   type ConversationSummary,
+  type Insight,
+  type InsightPage,
   type LoginRequest,
   type MetricQuery,
   type MetricResult,
@@ -345,6 +349,47 @@ function applyOrdering(result: MetricResult, query: MetricQuery): MetricResult {
   return { ...result, rows };
 }
 
+/**
+ * Bounded concurrency for `POST /metrics/query`.
+ *
+ * This began as a strict serializing gate, working around a server defect: the
+ * fixture warehouse shared one DuckDB connection across a threadpool, so
+ * concurrent queries returned each other's columns and rows — wrong numbers,
+ * stated confidently, with a 200. That is fixed at the source (each query now
+ * gets its own cursor; see `DuckDBWarehouse.run` and
+ * `tests/test_warehouse_concurrency.py`), so full serialization is no longer
+ * needed.
+ *
+ * A small cap is kept deliberately: a dashboard fans out ~14 governed queries
+ * on one render, and firing all of them at once buys little over a few in
+ * flight while making the API's rate limiter far easier to trip.
+ */
+const METRIC_QUERY_CONCURRENCY = 4;
+
+let metricQueryActive = 0;
+const metricQueryWaiting: Array<() => void> = [];
+
+function enqueueMetricQuery<T>(run: () => Promise<T>): Promise<T> {
+  const start = async (): Promise<T> => {
+    metricQueryActive += 1;
+    try {
+      return await run();
+    } finally {
+      metricQueryActive -= 1;
+      // Hand the slot to the next waiter, if any. A rejection above still
+      // releases the slot, so one failure cannot stall the queue.
+      metricQueryWaiting.shift()?.();
+    }
+  };
+
+  if (metricQueryActive < METRIC_QUERY_CONCURRENCY) return start();
+  return new Promise<T>((resolve, reject) => {
+    metricQueryWaiting.push(() => {
+      start().then(resolve, reject);
+    });
+  });
+}
+
 async function postMetricQuery(query: MetricQuery): Promise<MetricResult> {
   const send = (body: Record<string, unknown>) =>
     request<unknown>('/metrics/query', {
@@ -483,10 +528,13 @@ export const api = {
       });
     }
     try {
-      const raw = await request<Paginated<ConversationSummary>>(
+      const raw = await request<{ items?: unknown[]; total?: number }>(
         '/conversations?limit=20&offset=0',
       );
-      return { items: raw?.items ?? [], total: raw?.total ?? 0 };
+      const items = (raw?.items ?? []).map((item) =>
+        wire.fromConversationSummary(item),
+      );
+      return { items, total: raw?.total ?? items.length };
     } catch (err) {
       // Persistence is optional in some deployments; an absent endpoint means
       // "no history", not "the Ask screen is broken".
@@ -503,6 +551,46 @@ export const api = {
       await request<unknown>(`/conversations/${encodeURIComponent(id)}`),
       id,
     );
+  },
+
+  /**
+   * `PATCH /conversations/{id}` — rename a thread. Returns the updated summary.
+   *
+   * The title is trimmed and whitespace-collapsed here as well as server-side,
+   * so an all-whitespace title never costs a round trip. The backend caps it at
+   * 120 characters and answers 404 (never 403) for an id the caller does not
+   * own, so a rejected rename is never a hint that the id exists.
+   */
+  async renameConversation(
+    id: string,
+    title: string,
+  ): Promise<ConversationSummary> {
+    const clean = title.replace(/\s+/g, ' ').trim();
+    if (!clean) {
+      throw new ApiError(400, {
+        code: 'bad_request',
+        message: 'Title cannot be empty.',
+      });
+    }
+    if (USE_MOCK) return delay(mock.mockRenameConversation(id, clean));
+    return wire.fromConversationSummary(
+      await request<unknown>(`/conversations/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: clean }),
+      }),
+      id,
+    );
+  },
+
+  /** `DELETE /conversations/{id}` — 200 on success, 404 when already gone. */
+  async deleteConversation(id: string): Promise<void> {
+    if (USE_MOCK) {
+      mock.mockDeleteConversation(id);
+      return delay(undefined, 200);
+    }
+    await request<void>(`/conversations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
   },
 
   async sendFeedback(
@@ -541,7 +629,37 @@ export const api = {
 
   async queryMetric(query: MetricQuery): Promise<MetricResult> {
     if (USE_MOCK) return delay(mock.mockMetricResult(query));
-    return postMetricQuery(query);
+    // Capped fan-out: see `enqueueMetricQuery`.
+    return enqueueMetricQuery(() => postMetricQuery(query));
+  },
+
+  /* ---- Forecasting ------------------------------------------------------ */
+
+  async forecastMetrics(grain = 'quarter'): Promise<ForecastCapabilityReport> {
+    if (USE_MOCK) return delay(mock.mockForecastCapabilities(grain));
+    return wire.fromForecastCapabilityReport(
+      await request<unknown>(`/forecast/metrics?grain=${encodeURIComponent(grain)}`),
+    );
+  },
+
+  async forecast(body: {
+    metric: string;
+    grain?: string;
+    horizon?: number;
+    interval_level?: number;
+  }): Promise<ForecastResult> {
+    if (USE_MOCK) return delay(mock.mockForecast(body.metric, body.grain ?? 'quarter'));
+    return wire.fromForecast(
+      await request<unknown>('/forecast', {
+        method: 'POST',
+        body: JSON.stringify({
+          metric: body.metric,
+          grain: body.grain ?? 'quarter',
+          horizon: body.horizon ?? 4,
+          ...(body.interval_level ? { interval_level: body.interval_level } : {}),
+        }),
+      }),
+    );
   },
 
   /* ---- Pipelines -------------------------------------------------------- */
@@ -585,13 +703,14 @@ export const api = {
 
   async listSources(): Promise<Source[]> {
     if (USE_MOCK) return delay(mock.listMockSources());
-    const raw = await request<Source[]>('/sources');
-    return Array.isArray(raw) ? raw : [];
+    return wire.fromSources(await request<unknown>('/sources'));
   },
 
   async createSource(config: SourceConfig): Promise<Source> {
     if (USE_MOCK) return delay(mock.addMockSource(config), 500);
-    return request<Source>('/sources', {
+    // `dsn` is write-only: it goes out on this one request and is never read
+    // back, so it is deliberately not kept anywhere on the client.
+    const raw = await request<unknown>('/sources', {
       method: 'POST',
       body: JSON.stringify({
         name: config.name,
@@ -600,6 +719,7 @@ export const api = {
         ...(config.options ? { options: config.options } : {}),
       }),
     });
+    return wire.fromSource(raw);
   },
 
   async deleteSource(id: string): Promise<void> {
@@ -611,15 +731,11 @@ export const api = {
   },
 
   async testSource(id: string): Promise<SourceTestResult> {
-    if (USE_MOCK) {
-      return delay(
-        { ok: true, latency_ms: 42, tables_seen: 14, message: 'Connection OK' },
-        800,
-      );
-    }
-    return request<SourceTestResult>(`/sources/${encodeURIComponent(id)}/test`, {
+    if (USE_MOCK) return delay(mock.testMockSource(id), 800);
+    const raw = await request<unknown>(`/sources/${encodeURIComponent(id)}/test`, {
       method: 'POST',
     });
+    return wire.fromSourceTestResult(raw);
   },
 
   /* ---- Reports ---------------------------------------------------------- */
@@ -706,6 +822,30 @@ export const api = {
     triggerDownload(blob, match?.[1] ? decodeURIComponent(match[1]) : fallback);
   },
 
+  /* ---- Insights (proactive digest) -------------------------------------- */
+
+  async listInsights(limit = 20, offset = 0): Promise<InsightPage> {
+    if (USE_MOCK) return delay(mock.mockInsightPage(limit, offset));
+    const raw = await request<InsightPage>(
+      `/insights?limit=${limit}&offset=${offset}`,
+    );
+    return normalizeInsightPage(raw);
+  },
+
+  async getInsight(id: string): Promise<Insight> {
+    if (USE_MOCK) return delay(mock.mockInsight(id));
+    return normalizeInsight(await request<unknown>(`/insights/${encodeURIComponent(id)}`));
+  },
+
+  async refreshInsights(limit = 20, offset = 0): Promise<InsightPage> {
+    if (USE_MOCK) return delay(mock.mockInsightPage(limit, offset), 500);
+    const raw = await request<InsightPage>(
+      `/insights/refresh?limit=${limit}&offset=${offset}`,
+      { method: 'POST' },
+    );
+    return normalizeInsightPage(raw);
+  },
+
   /* ---- System ----------------------------------------------------------- */
 
   async status(): Promise<SystemStatus> {
@@ -743,6 +883,38 @@ function triggerDownload(blob: Blob, filename: string): void {
   anchor.remove();
   // Revoking immediately can cancel the download in some browsers.
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Insight normalization                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The backend serializes insights from typed pydantic models, so the shapes are
+ * already clean. These guards only keep a rollback or a partial record from
+ * white-screening the feed: arrays default to empty, `root_cause` to null.
+ */
+function normalizeInsight(raw: unknown): Insight {
+  const o = (raw ?? {}) as Partial<Insight>;
+  return {
+    ...(o as Insight),
+    contributions: Array.isArray(o.contributions) ? o.contributions : [],
+    trend: Array.isArray(o.trend) ? o.trend : [],
+    evidence: Array.isArray(o.evidence) ? o.evidence : [],
+    root_cause: o.root_cause ?? null,
+  };
+}
+
+function normalizeInsightPage(raw: unknown): InsightPage {
+  const o = (raw ?? {}) as Partial<InsightPage>;
+  const items = Array.isArray(o.items) ? o.items.map(normalizeInsight) : [];
+  return {
+    items,
+    total: typeof o.total === 'number' ? o.total : items.length,
+    limit: typeof o.limit === 'number' ? o.limit : items.length,
+    offset: typeof o.offset === 'number' ? o.offset : 0,
+    backend: typeof o.backend === 'string' ? o.backend : 'unknown',
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -934,9 +1106,31 @@ export function coerceEvent(name: string, data: unknown): AskStreamEvent | null 
       if (!route) return null;
       return {
         type: 'route',
-        data: { route, confidence: wire.toConfidence(payload.confidence) },
+        data: {
+          route,
+          confidence: wire.toConfidence(payload.confidence),
+          abstained: payload.abstained === true || route === 'abstain',
+        },
       };
     }
+    case 'abstain':
+      return {
+        type: 'abstain',
+        data: {
+          reason: String(payload.reason ?? ''),
+          suggestions: (Array.isArray(payload.suggestions)
+            ? payload.suggestions
+            : []
+          )
+            .map((s) => String(s))
+            .filter(Boolean),
+        },
+      };
+    case 'corrections':
+      return {
+        type: 'corrections',
+        data: { items: wire.fromCorrectionAttempts(payload.items) },
+      };
     case 'clarify':
       return {
         type: 'clarify',
@@ -1043,9 +1237,22 @@ export class EnvelopeAccumulator {
       case 'route':
         next.route = event.data.route;
         if (event.data.confidence) next.confidence = event.data.confidence;
+        // The `route` frame is the last word on abstention: it arrives after
+        // the `abstain` frame and is present even on a rollback that drops it.
+        if (event.data.abstained !== undefined) {
+          next.abstained = event.data.abstained;
+        }
         break;
       case 'clarify':
         next.clarifying_question = event.data.question;
+        break;
+      case 'abstain':
+        next.abstained = true;
+        next.abstain_reason = event.data.reason;
+        next.suggestions = event.data.suggestions;
+        break;
+      case 'corrections':
+        next.attempts = event.data.items;
         break;
       case 'done':
         this.done = true;

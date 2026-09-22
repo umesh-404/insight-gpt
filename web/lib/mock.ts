@@ -13,8 +13,13 @@ import type {
   AskStreamEvent,
   Cell,
   ColumnSpec,
+  ForecastCapabilityReport,
+  ForecastPoint,
+  ForecastResult,
   Conversation,
   ConversationSummary,
+  Insight,
+  InsightPage,
   MetricQuery,
   MetricResult,
   MetricsCatalog,
@@ -25,6 +30,7 @@ import type {
   ReportSummary,
   Source,
   SourceConfig,
+  SourceTestResult,
   SystemStatus,
   TokenPair,
   User,
@@ -204,7 +210,11 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   if (envelope.route) {
     events.push({
       type: 'route',
-      data: { route: envelope.route, confidence: envelope.confidence },
+      data: {
+        route: envelope.route,
+        confidence: envelope.confidence,
+        abstained: envelope.abstained ?? false,
+      },
     });
   }
   const words = envelope.answer.split(' ');
@@ -241,6 +251,18 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   if (envelope.caveats.length) {
     events.push({ type: 'caveats', data: { items: envelope.caveats } });
   }
+  if (envelope.attempts?.length) {
+    events.push({ type: 'corrections', data: { items: envelope.attempts } });
+  }
+  if (envelope.abstained) {
+    events.push({
+      type: 'abstain',
+      data: {
+        reason: envelope.abstain_reason ?? '',
+        suggestions: envelope.suggestions ?? [],
+      },
+    });
+  }
   events.push({
     type: 'done',
     data: {
@@ -251,8 +273,39 @@ export function mockStreamEvents(envelope: AnswerEnvelope): AskStreamEvent[] {
   return events;
 }
 
+/**
+ * Metric names a real business asks about that InsightGPT does **not** govern.
+ * The live engine abstains on these; demo mode must show the same behaviour,
+ * because "we refuse rather than guess" is a headline property of the product.
+ */
+const UNGOVERNED_METRICS =
+  /\b(churn|retention|attrition|nps|csat|ltv|lifetime value|cac|conversion rate|bounce rate)\b/i;
+
 /** A topic-matched fallback envelope for questions other than the flagship one. */
 export function mockEnvelopeFor(question: string): AnswerEnvelope {
+  if (UNGOVERNED_METRICS.test(question)) {
+    const requested = UNGOVERNED_METRICS.exec(question)?.[1] ?? 'that metric';
+    const reason =
+      `'${requested}' is not a governed metric, so I cannot compute it reliably.`;
+    return {
+      answer: `I can't answer that reliably, so I won't guess. ${reason}`,
+      route: 'abstain',
+      confidence: 'low',
+      sql: [],
+      tables: [],
+      citations: [],
+      chart_spec: null,
+      caveats: [],
+      abstained: true,
+      abstain_reason: reason,
+      suggestions: [
+        "Try the governed metric 'return_rate'.",
+        "Try the governed metric 'orders'.",
+        "Try the governed metric 'avg_order_value'.",
+      ],
+      attempts: [],
+    };
+  }
   if (/restock|inventory|reorder|stock/i.test(question)) {
     return {
       answer:
@@ -291,6 +344,17 @@ LIMIT 1000`,
       citations: [],
       caveats: [
         'Lead times use the supplier default where a SKU-specific value is missing.',
+      ],
+      // Demonstrates the bounded self-correction loop: the first governed
+      // selection was rejected, the engine narrowed it and recovered.
+      attempts: [
+        {
+          attempt: 1,
+          stage: 'grouped:product',
+          selection: { metric: 'units_on_hand', dimensions: ['product', 'supplier'] },
+          error: "Dimension 'supplier' is not available at the inventory grain.",
+          resolution: 'corrected',
+        },
       ],
     };
   }
@@ -359,9 +423,44 @@ export const MOCK_CONVERSATIONS: ConversationSummary[] = [
   },
 ];
 
+/**
+ * Rename in place so mock mode behaves like the real backend: the sidebar
+ * refetch after a rename must show the new title, not the seeded one.
+ */
+export function mockRenameConversation(
+  id: string,
+  title: string,
+): ConversationSummary {
+  const found = MOCK_CONVERSATIONS.find((c) => c.id === id);
+  const updated: ConversationSummary = {
+    ...(found ?? MOCK_CONVERSATIONS[0]!),
+    id,
+    title,
+  };
+  if (found) Object.assign(found, updated);
+  else MOCK_CONVERSATIONS.unshift(updated);
+  return { ...updated };
+}
+
+/** Drop a mock conversation; a no-op when the id is unknown. */
+export function mockDeleteConversation(id: string): void {
+  const index = MOCK_CONVERSATIONS.findIndex((c) => c.id === id);
+  if (index >= 0) MOCK_CONVERSATIONS.splice(index, 1);
+}
+
 export function mockConversation(id: string): Conversation {
-  const summary =
-    MOCK_CONVERSATIONS.find((c) => c.id === id) ?? MOCK_CONVERSATIONS[0]!;
+  // The list is mutable in mock mode (rename/delete), so it can legitimately be
+  // empty — synthesize a summary rather than reading off the end of the array.
+  const summary: ConversationSummary = MOCK_CONVERSATIONS.find(
+    (c) => c.id === id,
+  ) ??
+    MOCK_CONVERSATIONS[0] ?? {
+      id,
+      title: 'Untitled conversation',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      message_count: 0,
+    };
   return {
     id: summary.id,
     title: summary.title,
@@ -583,15 +682,25 @@ export function mockRun(id: string): PipelineRun {
 /* -------------------------------------------------------------------------- */
 
 let mockSources: Source[] = [
-  { id: 's_1', name: 'orders_pg', kind: 'postgres', status: 'ok', last_tested_at: '2026-08-24T06:00:00Z' },
-  { id: 's_2', name: 'catalog_csv', kind: 'csv', status: 'ok', last_tested_at: '2026-08-23T18:00:00Z' },
-  { id: 's_3', name: 'support_tickets', kind: 'documents', status: 'ok', last_tested_at: '2026-08-24T00:00:00Z' },
-  { id: 's_4', name: 'legacy_mysql', kind: 'mysql', status: 'error', last_tested_at: '2026-08-20T12:00:00Z' },
-  { id: 's_5', name: 'reviews_export', kind: 'excel', status: 'untested', last_tested_at: null },
+  { id: 's_1', name: 'warehouse (postgres)', kind: 'postgres', status: 'ok', last_tested_at: '2026-08-24T06:00:00Z', location: 'db.internal:5432', detail: 'Connected and introspected 18 table(s).' },
+  { id: 's_2', name: 'orders.csv', kind: 'csv', status: 'ok', last_tested_at: '2026-08-23T18:00:00Z', location: 'data/generated/orders.csv', detail: 'File is readable (482911 bytes).' },
+  { id: 's_3', name: 'document corpus', kind: 'documents', status: 'ok', last_tested_at: '2026-08-24T00:00:00Z', location: 'data/ingested/documents.json', detail: 'File is readable (1204873 bytes).' },
+  { id: 's_4', name: 'legacy_mysql', kind: 'mysql', status: 'error', last_tested_at: '2026-08-20T12:00:00Z', location: 'legacy.internal:3306', detail: 'TimeoutError: timed out' },
+  { id: 's_5', name: 'reviews_export', kind: 'excel', status: 'untested', last_tested_at: null, location: 'data/generated/reviews.xlsx', detail: null },
 ];
 
 export function listMockSources(): Source[] {
   return [...mockSources];
+}
+
+/** Mirrors the API's non-secret `location`: a path, or `host:port` for a DSN. */
+function mockLocation(config: SourceConfig): string | null {
+  if (config.dsn) {
+    const match = /@([^/?#]+)/.exec(config.dsn);
+    return match?.[1] ?? null;
+  }
+  const path = config.options?.path;
+  return typeof path === 'string' && path.trim() ? path.trim() : null;
 }
 
 export function addMockSource(config: SourceConfig): Source {
@@ -602,9 +711,38 @@ export function addMockSource(config: SourceConfig): Source {
     status: 'untested',
     last_tested_at: null,
     active: true,
+    location: mockLocation(config),
+    detail: 'Registered. Run a test to verify connectivity.',
   };
   mockSources = [...mockSources, source];
   return source;
+}
+
+/** Runs a plausible probe and, like the API, records its outcome on the row. */
+export function testMockSource(id: string): SourceTestResult {
+  const source = mockSources.find((s) => s.id === id);
+  const ok = source?.kind !== 'mysql';
+  const result: SourceTestResult = {
+    ok,
+    latency_ms: ok ? 42 : 5008,
+    tables_seen: ok ? 14 : 0,
+    message: ok
+      ? 'Connected and introspected 14 table(s).'
+      : 'TimeoutError: timed out',
+    checked: ok ? 'connect+introspect' : 'tcp',
+    error_code: ok ? null : 'connect_failed',
+  };
+  mockSources = mockSources.map((s) =>
+    s.id === id
+      ? {
+          ...s,
+          status: ok ? 'ok' : 'error',
+          last_tested_at: new Date().toISOString(),
+          detail: result.message,
+        }
+      : s,
+  );
+  return result;
 }
 
 export function removeMockSource(id: string): void {
@@ -710,3 +848,215 @@ export const MOCK_STATUS: SystemStatus = {
   ],
   llm: { provider: 'ollama', model: 'llama3.1:8b', reachable: true },
 };
+
+/* -------------------------------------------------------------------------- */
+/* Proactive insight digest                                                   */
+/* -------------------------------------------------------------------------- */
+
+export const MOCK_INSIGHTS: Insight[] = [
+  {
+    id: 'ins_revenue_2026q2',
+    metric: 'revenue',
+    metric_label: 'Revenue',
+    metric_format: 'currency',
+    grain: 'quarter',
+    period: '2026Q2',
+    prior_period: '2026Q1',
+    current: 1_152_000,
+    prior: 1_300_000,
+    change_abs: -148_000,
+    change_pct: -0.114,
+    direction: 'down',
+    severity: 'high',
+    z_score: null,
+    method:
+      'Period-over-period change at quarter grain (threshold 5%, min magnitude 0); insufficient history for a z-score.',
+    headline:
+      'Revenue fell 11.4% in 2026Q2 vs 2026Q1, from $1.30M to $1.15M. North (region) drove most of the move (-$130.0K, 88% of the change).',
+    root_cause: {
+      dimension: 'region',
+      segment: 'North',
+      current: 270_000,
+      prior: 400_000,
+      delta: -130_000,
+      contribution_pct: 87.8,
+    },
+    contributions: [
+      { dimension: 'region', segment: 'North', current: 270_000, prior: 400_000, delta: -130_000, contribution_pct: 87.8 },
+      { dimension: 'region', segment: 'South', current: 313_600, prior: 320_000, delta: -6_400, contribution_pct: 4.3 },
+      { dimension: 'region', segment: 'West', current: 294_000, prior: 300_000, delta: -6_000, contribution_pct: 4.1 },
+      { dimension: 'region', segment: 'East', current: 274_400, prior: 280_000, delta: -5_600, contribution_pct: 3.8 },
+      { dimension: 'category', segment: 'Electronics', current: 501_600, prior: 620_000, delta: -118_400, contribution_pct: 80.0 },
+      { dimension: 'category', segment: 'Apparel', current: 387_300, prior: 405_000, delta: -17_700, contribution_pct: 12.0 },
+      { dimension: 'category', segment: 'Home', current: 263_100, prior: 275_000, delta: -11_900, contribution_pct: 8.0 },
+    ],
+    trend: [
+      { period: '2026Q1', value: 1_300_000 },
+      { period: '2026Q2', value: 1_152_000 },
+    ],
+    evidence: [
+      {
+        n: 1,
+        doc_id: 'TICKET-40122',
+        source_type: 'ticket',
+        title: 'Late delivery — North region electronics',
+        date: '2026-05-08',
+        score: 0.62,
+        snippet:
+          'Customer in the North region reports their electronics order arrived two weeks late due to a fulfilment centre backlog.',
+      },
+      {
+        n: 2,
+        doc_id: 'REPORT-Q2-OPS',
+        source_type: 'report',
+        title: 'Q2 operations review',
+        date: '2026-06-30',
+        score: 0.55,
+        snippet:
+          'The North fulfilment centre backlog was the dominant operational issue of the quarter, concentrated in electronics.',
+      },
+    ],
+    created_at: '2026-08-26T06:30:00Z',
+  },
+  {
+    id: 'ins_units_sold_2026q2',
+    metric: 'units_sold',
+    metric_label: 'Units sold',
+    metric_format: 'integer',
+    grain: 'quarter',
+    period: '2026Q2',
+    prior_period: '2026Q1',
+    current: 116,
+    prior: 141,
+    change_abs: -25,
+    change_pct: -0.177,
+    direction: 'down',
+    severity: 'high',
+    z_score: null,
+    method:
+      'Period-over-period change at quarter grain (threshold 5%, min magnitude 0); insufficient history for a z-score.',
+    headline:
+      'Units sold fell 17.7% in 2026Q2 vs 2026Q1. Electronics (category) drove most of the move.',
+    root_cause: {
+      dimension: 'category',
+      segment: 'Electronics',
+      current: 45,
+      prior: 66,
+      delta: -21,
+      contribution_pct: 84.0,
+    },
+    contributions: [
+      { dimension: 'category', segment: 'Electronics', current: 45, prior: 66, delta: -21, contribution_pct: 84.0 },
+      { dimension: 'category', segment: 'Apparel', current: 41, prior: 44, delta: -3, contribution_pct: 12.0 },
+      { dimension: 'category', segment: 'Home', current: 30, prior: 31, delta: -1, contribution_pct: 4.0 },
+    ],
+    trend: [
+      { period: '2026Q1', value: 141 },
+      { period: '2026Q2', value: 116 },
+    ],
+    evidence: [],
+    created_at: '2026-08-26T06:30:00Z',
+  },
+];
+
+export function mockInsightPage(limit = 20, offset = 0): InsightPage {
+  return {
+    items: MOCK_INSIGHTS.slice(offset, offset + limit),
+    total: MOCK_INSIGHTS.length,
+    limit,
+    offset,
+    backend: 'memory (on-demand)',
+  };
+}
+
+export function mockInsight(id: string): Insight {
+  return MOCK_INSIGHTS.find((i) => i.id === id) ?? MOCK_INSIGHTS[0]!;
+}
+
+/* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Mock mode carries enough history to actually project, so the happy path is
+ * reachable without a backend. The live fixture warehouse holds only two
+ * quarters and therefore refuses — `mockForecastRefusal` reproduces that state
+ * so the refusal UI can be exercised too.
+ */
+const MOCK_FORECAST_HISTORY: ForecastPoint[] = [
+  { period: '2025Q1', value: 1_010_000 },
+  { period: '2025Q2', value: 1_075_000 },
+  { period: '2025Q3', value: 1_140_000 },
+  { period: '2025Q4', value: 1_265_000 },
+  { period: '2026Q1', value: 1_300_000 },
+  { period: '2026Q2', value: 1_152_000 },
+];
+
+export function mockForecast(metric: string, grain = 'quarter'): ForecastResult {
+  const def = MOCK_CATALOG.metrics.find((m) => m.key === metric);
+  const last =
+    MOCK_FORECAST_HISTORY[MOCK_FORECAST_HISTORY.length - 1]?.value ?? 1_000_000;
+  const forecast: ForecastPoint[] = [
+    { period: '2026Q3', value: last * 0.99, lower: last * 0.9, upper: last * 1.08 },
+    { period: '2026Q4', value: last * 1.01, lower: last * 0.86, upper: last * 1.16 },
+  ];
+  return {
+    metric,
+    metric_label: def?.label ?? metric,
+    format: def?.format ?? 'currency',
+    additive: def?.additive ?? true,
+    grain,
+    horizon: forecast.length,
+    history: MOCK_FORECAST_HISTORY,
+    forecast,
+    method: 'damped Holt trend (pure-Python)',
+    method_family: 'fallback',
+    n_history: MOCK_FORECAST_HISTORY.length,
+    interval_level: 0.8,
+    confidence: 'low',
+    low_confidence: true,
+    caveats: [
+      'Only 6 period(s) of history exist at quarter grain; the interval is wide.',
+    ],
+    headline: `${def?.label ?? metric} is projected to stay roughly flat next quarter.`,
+  };
+}
+
+/** The state the live demo data actually produces: not enough history. */
+export function mockForecastRefusal(metric: string, grain = 'quarter'): ForecastResult {
+  const base = mockForecast(metric, grain);
+  return {
+    ...base,
+    history: MOCK_FORECAST_HISTORY.slice(-2),
+    forecast: [],
+    method: 'none - insufficient history',
+    method_family: 'none',
+    n_history: 2,
+    confidence: 'none',
+    low_confidence: true,
+    caveats: [
+      `Refused to forecast: 2 ${grain}(s) of history, 4 required. A projection `
+      + 'from this little data would be a guess dressed as an estimate.',
+    ],
+    headline: `Not enough history to forecast ${base.metric_label} at ${grain} grain.`,
+  };
+}
+
+export function mockForecastCapabilities(grain = 'quarter'): ForecastCapabilityReport {
+  return {
+    grain,
+    min_history: 4,
+    method_family: 'fallback',
+    method: 'damped Holt trend (pure-Python)',
+    metrics: MOCK_CATALOG.metrics.map((m) => ({
+      metric: m.key,
+      label: m.label,
+      format: m.format ?? 'decimal',
+      additive: m.additive ?? true,
+      grain,
+      n_history: MOCK_FORECAST_HISTORY.length,
+      forecastable: true,
+      reason: null,
+    })),
+  };
+}

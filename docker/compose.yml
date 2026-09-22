@@ -102,7 +102,10 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       WAREHOUSE: ${WAREHOUSE:-postgres}
-      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://insight:insight@postgres:5432/insight}
+      # The API queries as the SELECT-only role (created in initdb), so a
+      # failure of the SQL guardrails still cannot mutate the warehouse.
+      # The worker below keeps the owner DSN because dbt must create tables.
+      POSTGRES_DSN: ${APP_POSTGRES_DSN:-postgresql://insight_app:insight@postgres:5432/insight}
       RETRIEVER: ${RETRIEVER:-qdrant}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}

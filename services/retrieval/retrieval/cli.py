@@ -120,9 +120,12 @@ def _cmd_search(args) -> int:
 
 
 def _cmd_eval(args) -> int:
-    from .eval import run
+    from .eval import run, run_offline_proxy
 
-    return run(load_config(args.config), samples=args.samples)
+    cfg = load_config(args.config)
+    if args.offline:
+        return run_offline_proxy(cfg)
+    return run(cfg, samples=args.samples)
 
 
 def _cmd_status(args) -> int:
@@ -172,6 +175,12 @@ def main(argv: list[str] | None = None) -> int:
         "--samples",
         action="store_true",
         help="score the built-in demo golden set instead of the generated-corpus one",
+    )
+    p_eval.add_argument(
+        "--offline",
+        action="store_true",
+        help="deterministic lexical-proxy scoreboard (no Qdrant/Ollama); reports "
+        "the query-rewrite and augmentation deltas",
     )
     p_eval.set_defaults(func=_cmd_eval)
     sub.add_parser("status", help="collection point count").set_defaults(func=_cmd_status)

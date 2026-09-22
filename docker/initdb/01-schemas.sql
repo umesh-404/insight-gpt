@@ -30,3 +30,44 @@ CREATE TABLE IF NOT EXISTS insight.pipeline_runs (
 -- Helpful for "most recent run per pipeline" lookups.
 CREATE INDEX IF NOT EXISTS pipeline_runs_pipeline_started_idx
     ON insight.pipeline_runs (pipeline, started_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Read-only analytics role.
+--
+-- Defence in depth for the text-to-SQL path: the API queries the warehouse as
+-- a role that has no privilege to write anything, so even a total failure of
+-- the SELECT-only parser, the table allow-list and the query builder cannot
+-- mutate data. The ingestion/dbt path keeps the owner role, because it must
+-- create and replace tables.
+--
+-- The password is intentionally the same as the owner's in this local demo
+-- stack (both come from POSTGRES_PASSWORD); a real deployment gives this role
+-- its own secret. What matters here is the PRIVILEGE separation, not secrecy.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'insight_app') THEN
+        EXECUTE format(
+            'CREATE ROLE insight_app LOGIN PASSWORD %L',
+            coalesce(current_setting('custom.app_password', true), 'insight')
+        );
+    END IF;
+END
+$$;
+
+-- Connect + read the modeled marts and the operational ledger. Deliberately NO
+-- access to `raw`: the API has no business reading unmodeled, pre-redaction
+-- landing tables, and the allow-list already forbids naming them.
+GRANT CONNECT ON DATABASE insight TO insight_app;
+GRANT USAGE ON SCHEMA marts, insight TO insight_app;
+GRANT SELECT ON ALL TABLES IN SCHEMA marts, insight TO insight_app;
+
+-- The marts do not exist yet at first boot (dbt builds them later), so the
+-- grant above cannot cover them. This makes every future table readable by the
+-- app role automatically, whoever creates it.
+ALTER DEFAULT PRIVILEGES IN SCHEMA marts GRANT SELECT ON TABLES TO insight_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA insight GRANT SELECT ON TABLES TO insight_app;
+
+-- The one write the app role legitimately needs: triggering a pipeline from the
+-- UI enqueues a `queued` row that the worker then picks up and advances. Scoped
+-- to this single ledger table -- the warehouse itself stays read-only.
+GRANT INSERT, UPDATE ON insight.pipeline_runs TO insight_app;

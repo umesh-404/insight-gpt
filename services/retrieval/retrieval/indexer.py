@@ -47,6 +47,32 @@ class Indexer:
         self.cfg = cfg
         self.store = store
         self.embedder = embedder
+        self._chat = None  # lazy OllamaChat for optional contextual augmentation
+
+    def _llm_context(self, doc: Document) -> str | None:
+        """One-line situating context for a document, if ``contextual_llm`` is on.
+
+        Best-effort and offline-safe: returns ``None`` when the flag is off or
+        Ollama is unavailable. The result is embedded only (never stored, never
+        hashed), so a non-deterministic sentence cannot churn changed-only
+        indexing — an unchanged document is skipped before this is ever called.
+        """
+        if not self.cfg.chunking.contextual_llm:
+            return None
+        if self._chat is None:
+            from .chat import OllamaChat
+
+            model = self.cfg.chunking.context_model or self.cfg.query_rewrite.model
+            self._chat = OllamaChat(self.cfg.embedding.base_url, model)
+        if not self._chat.usable:
+            return None
+        prompt = (
+            f"Document title: {doc.title}\n"
+            f"Type: {doc.source_type}; region: {doc.region or '-'}; "
+            f"category: {doc.category or '-'}\n\n{doc.body[:1500]}\n\n"
+            "In one short sentence, situate this document for search."
+        )
+        return self._chat.complete(prompt, num_predict=64)
 
     def index_documents(self, docs: list[Document]) -> IndexStats:
         stats = IndexStats()
@@ -72,7 +98,11 @@ class Indexer:
         if not chunks:
             return 0
 
-        texts = [embed_text(doc, c, self.cfg.chunking) for c in chunks]
+        # Optional LLM situating context, computed ONCE per document (not per
+        # chunk). Best-effort: None when disabled or Ollama is unavailable, in
+        # which case the deterministic breadcrumb augmentation still applies.
+        doc_context = self._llm_context(doc)
+        texts = [embed_text(doc, c, self.cfg.chunking, doc_context=doc_context) for c in chunks]
         dense = self.embedder.embed_documents(texts)
 
         sparse = None

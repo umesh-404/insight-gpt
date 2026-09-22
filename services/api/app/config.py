@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     llm_model: str | None = None
     ollama_host: str = "http://127.0.0.1:11434"
+    typesafe_api_key: str | None = None
+    typesafe_model: str = "jev-latest"
 
     # Warehouse: "duckdb" fixture (default, offline) or "postgres" (needs a DSN).
     warehouse: str = "duckdb"

@@ -48,6 +48,36 @@ class ChunkingConfig(BaseModel):
     min_chunk_chars: int = 200
     overlap_lines: int = 2
     contextual_header: bool = True
+    # Deterministic contextual augmentation: fold region/category into the
+    # breadcrumb so a chunk that never names its own region still carries that
+    # vocabulary in its embedded/sparse text (never in the stored body). Pure
+    # function of the document's canonical fields, so it runs fully offline and
+    # does not affect the content hash.
+    contextual_augmentation: bool = True
+    # Optional LLM-written one-line situating context, prepended to the embedded
+    # text only. Needs live Ollama; degrades to the deterministic breadcrumb when
+    # unavailable. Off by default so indexing stays offline-safe.
+    contextual_llm: bool = False
+    context_model: str = ""  # chat model for contextual_llm; empty -> reuse rewrite model
+
+
+class QueryRewriteConfig(BaseModel):
+    """Pre-retrieval query rewriting (see :mod:`retrieval.rewrite`).
+
+    ``enabled`` is safe to default on: with no Ollama it uses a deterministic
+    rewrite (lowercase, drop filler/stopwords, keep entities, expand
+    abbreviations) and never touches the network. ``use_llm`` and ``hyde`` add
+    live Ollama paths and default off so retrieval degrades gracefully offline.
+    """
+
+    enabled: bool = True
+    use_llm: bool = False
+    hyde: bool = False
+    model: str = ""  # chat model for the LLM rewrite; empty disables the LLM path
+    timeout_seconds: float = 20.0
+    max_query_chars: int = 512
+    # abbreviation -> expansion, merged over the built-in defaults.
+    abbreviations: dict[str, str] = Field(default_factory=dict)
 
 
 class SearchConfig(BaseModel):
@@ -75,6 +105,7 @@ class RetrievalConfig(BaseModel):
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     reranker: RerankerConfig = Field(default_factory=RerankerConfig)
+    query_rewrite: QueryRewriteConfig = Field(default_factory=QueryRewriteConfig)
 
     def _apply_env(self) -> RetrievalConfig:
         """Environment overrides for the network endpoints and embedding model.
@@ -103,7 +134,28 @@ class RetrievalConfig(BaseModel):
             self.reranker.model = rerank_model.strip()
             if not self.reranker.model:
                 self.reranker.enabled = False
+        # Query rewriting: an ops switch that mirrors the config flags so a
+        # deployment can toggle the pre-retrieval step without editing the file.
+        # The LLM/HyDE paths also require ``RETRIEVAL_LIVE=1`` so they never fire
+        # in an offline test or CI run even if the config leaves them on.
+        if (flag := _env_bool("QUERY_REWRITE")) is not None:
+            self.query_rewrite.enabled = flag
+        if chat_model := os.environ.get("REWRITE_MODEL"):
+            self.query_rewrite.model = chat_model.strip()
+        if os.environ.get("RETRIEVAL_LIVE") != "1":
+            # Offline/CI: force the deterministic path, never call Ollama chat.
+            self.query_rewrite.use_llm = False
+            self.query_rewrite.hyde = False
+            self.chunking.contextual_llm = False
         return self
+
+
+def _env_bool(name: str) -> bool | None:
+    """Parse a boolean env flag; ``None`` when unset so callers keep the default."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_config(path: str | Path | None = None) -> RetrievalConfig:

@@ -261,3 +261,102 @@ A feature is **done** when:
    cross-link — so the docs stay the source of truth.
 7. It runs under `docker compose up` with no manual steps beyond documented
    configuration.
+
+## 7. Running the evals
+
+The two offline eval harnesses live in `tests/eval/` and run against the
+deterministic **fixture stack** — `InsightEngine.fixture()`, which pairs the
+`fake` provider (a rules-based, offline stand-in) with the in-process DuckDB
+retail warehouse. No model, database, or network is involved, so the harnesses
+measure real engine behaviour reproducibly and are safe to gate CI on. Each file
+runs two ways: as a **script** that prints a scoreboard, and as a **floored
+pytest** that fails when a score drops below its floor.
+
+```bash
+make eval                               # both harnesses: floors first, then boards
+uv run --project services/api python tests/eval/text2sql.py       # one board
+uv run --project services/api python tests/eval/faithfulness.py
+uv run --project services/api pytest -q \
+    tests/eval/text2sql.py tests/eval/faithfulness.py             # the gate
+```
+
+`make ci-local` runs everything CI runs that needs no Docker: `lint`, every
+package's offline `test` suite, and `eval`.
+
+### 7.1 Text-to-SQL execution accuracy — `tests/eval/text2sql.py`
+
+A 15-case golden set answerable on the fixture warehouse. It scores the engine's
+**executed output**, never its prose — the numbers must come from SQL. Cases pair
+a question with an expected route, an expected governed metric, and either an
+expected aggregate (compared within tolerance) or an assertion over the result
+(e.g. `0 < gross_margin < revenue`, `0 ≤ return_rate ≤ 1`). The metric the engine
+selected is read back from the executed table's final column, so the check does
+not depend on any engine internal. Two cases (an unknown metric — "churn rate" —
+and a non-analytics question) are **abstention probes**: the harness detects
+abstention *defensively* (route `clarify`, a clarifying question, an abstention
+flag, or a decline phrase) so it keeps working as the engine's abstention path is
+built out.
+
+Metrics, and the **measured** baseline on the fixture stack (fake provider):
+
+| Metric | Cases | Score | Floor |
+|---|---|---|---|
+| Execution accuracy | 12 | **1.00** | 0.90 |
+| Routing accuracy | 13 | **1.00** | 0.90 |
+| Metric-selection accuracy | 12 | **1.00** | 0.90 |
+| Abstention rate (probe, not gated) | 2 | **0.00** | — |
+
+The abstention rate is **reported, not gated**: on today's engine both probe
+questions are answered (defaulting to `revenue`) rather than declined, so the
+honest baseline is `0/2`. It becomes a meaningful gate the day the engine grows
+an abstention envelope — no harness change required.
+
+### 7.2 RAG faithfulness — `tests/eval/faithfulness.py`
+
+Five unstructured/hybrid questions. For each answer the harness rebuilds the
+evidence the engine saw (executed tables + cited document bodies, keyed by
+`doc_id`, since citation objects carry no body) and scores three things with a
+deterministic offline scorer:
+
+- **groundedness rate** — share of answer sentences supported by that evidence
+  (lexical overlap or a resolved `[n]` citation marker);
+- **citation coverage** — every `[n]` marker resolves to a real citation, and
+  every documents-based answer carries at least one;
+- **no-fabricated-number** — every *absolute* number in the answer appears in a
+  returned table cell. Percentages are exempted (they are ratios derived from
+  grounded values, not verbatim table entries) — a documented limit of the
+  offline check.
+
+An optional **LLM-judge** second opinion is gated behind `FAITHFULNESS_LLM_JUDGE=1`
+and a real (non-`fake`) provider; it is skipped in CI, which has no model access.
+
+Measured baseline on the fixture stack (fake provider):
+
+| Metric | Detail | Score | Floor |
+|---|---|---|---|
+| Groundedness rate | 12/12 sentences | **1.00** | 0.80 |
+| Citation coverage | 16/16 markers, 5/5 answers cite | **1.00** | 0.90 |
+| No-fabricated-number | 8/8 numbers in tables, 5/5 clean | **1.00** | 0.90 |
+
+Floors sit below the measured scores so the harness gates against *regression*,
+not against the current exact value. Both harnesses also print a one-line
+`RESULTS_JSON:` record so a CI log can be scraped to track the numbers over time
+without committing a build artifact.
+
+## 8. CI pipeline (implemented)
+
+`.github/workflows/ci.yml` runs on every push and pull request to `main`. It
+pins its actions (`actions/checkout@v4`, `actions/setup-node@v4`,
+`astral-sh/setup-uv@v3`) and caches uv and npm. Five jobs run in parallel:
+
+| Job | What it does | What it proves |
+|---|---|---|
+| **python** (matrix: api, retrieval, worker, ingestion, data-generator) | per package: `ruff check` + `pytest` (api runs with `LLM_PROVIDER=fake`) | every package lints and its offline unit suite passes |
+| **drift** | `tests/test_semantic_layer_drift.py` + `tests/test_setup_script.py` | the engine catalog and the dbt metrics have not diverged; the setup script's file/port logic holds |
+| **dbt** | a `postgres:16` service container; create the `raw`/`marts`/`insight` schemas (mirroring `docker/initdb/01-schemas.sql`); `scripts/seed.py --require-postgres` runs generate → load raw → `dbt seed`/`run`/`test` | the star schema and its data-quality tests actually build on a clean database |
+| **web** | node 20, `npm ci`, `tsc --noEmit`, `npm run lint`, `npm run build` | the frontend type-checks, lints, and builds |
+| **eval** | the two harnesses above as floored pytest, then the scoreboards | text-to-SQL and RAG quality have not regressed below their floors |
+
+The mandatory jobs need no external model or credentials — the engine runs on the
+`fake` provider and the fixture/throwaway stores — so CI is self-contained. No
+job references any external hosted-model vendor.

@@ -29,6 +29,10 @@ MAX_CONVERSATIONS = 200
 #: Longest title kept when deriving one from the first question.
 TITLE_MAX_CHARS = 60
 
+#: Longest title a user may set by hand. Longer input is rejected by the router
+#: rather than silently truncated, so the client can say why.
+TITLE_INPUT_MAX_CHARS = 120
+
 Role = Literal["user", "assistant"]
 
 
@@ -84,6 +88,9 @@ class _Entry(BaseModel):
     user_id: str
     id: str
     title: str
+    #: True once the owner renamed the thread. A user-chosen title outranks
+    #: anything derivable from a question, so later turns must never clobber it.
+    title_is_custom: bool = False
     created_at: datetime
     updated_at: datetime
     messages: list[Message] = Field(default_factory=list)
@@ -113,6 +120,15 @@ def derive_title(question: str) -> str:
     if len(text) <= TITLE_MAX_CHARS:
         return text
     return text[: TITLE_MAX_CHARS - 1].rstrip() + "…"
+
+
+def normalize_title(raw: str) -> str:
+    """Collapse a user-supplied title's whitespace.
+
+    Returns ``""`` when nothing usable remains — the caller turns that into a
+    400 rather than storing a blank row the sidebar cannot label.
+    """
+    return " ".join(raw.split()).strip()
 
 
 def _turns(messages: list[Message]) -> list[Turn]:
@@ -195,6 +211,10 @@ def append_turn(
             )
             _CONVERSATIONS[key] = entry
             _evict_locked()
+        elif not entry.title_is_custom and not entry.title.strip():
+            # Only ever re-derive a title the user has not chosen. A renamed
+            # thread keeps its name for every subsequent turn.
+            entry.title = derive_title(question)
         entry.messages.append(
             Message(
                 id=new_id("m"),
@@ -243,6 +263,34 @@ def get_conversation(user_id: str, conversation_id: str) -> Conversation | None:
     with _LOCK:
         entry = _CONVERSATIONS.get((user_id, conversation_id))
         return _view(entry) if entry is not None else None
+
+
+def rename_conversation(
+    user_id: str, conversation_id: str, title: str
+) -> ConversationSummary | None:
+    """Set a user-chosen title, or ``None`` when missing or owned by someone else.
+
+    ``title`` must already be normalized (see :func:`normalize_title`). The
+    lookup is keyed by ``(user_id, id)`` exactly like the read path, so another
+    user's id is indistinguishable from one that does not exist.
+
+    ``updated_at`` is deliberately untouched: it records the last *turn*, which
+    is what the sidebar orders by, and renaming a thread should not jump it to
+    the top of the list.
+    """
+    with _LOCK:
+        entry = _CONVERSATIONS.get((user_id, conversation_id))
+        if entry is None:
+            return None
+        entry.title = title
+        entry.title_is_custom = True
+        return _summary(entry)
+
+
+def delete_conversation(user_id: str, conversation_id: str) -> bool:
+    """Drop a conversation and its turns. ``False`` when there was none to drop."""
+    with _LOCK:
+        return _CONVERSATIONS.pop((user_id, conversation_id), None) is not None
 
 
 def reset() -> None:

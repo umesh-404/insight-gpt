@@ -5,6 +5,7 @@ import {
   GitBranch,
   MessageSquareText,
   Settings,
+  Sparkles,
   type LucideIcon,
 } from 'lucide-react';
 import type { Role } from '@/lib/types';
@@ -36,6 +37,13 @@ export const NAV_ITEMS: NavItem[] = [
     icon: BarChart3,
     minRole: 'viewer',
     description: 'Governed metrics & trends',
+  },
+  {
+    href: '/insights',
+    label: 'Insights',
+    icon: Sparkles,
+    minRole: 'analyst',
+    description: 'Proactive anomaly digest',
   },
   {
     href: '/pipelines',

@@ -32,12 +32,12 @@ from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 
-from .config import WorkerSettings, get_settings
+from .config import _REPO_ROOT, WorkerSettings, get_settings
 from .runs import PipelineRunStore
 
 logger = logging.getLogger(__name__)
 
-JOB_NAMES = ("full_ingest", "incremental_sync", "dbt_build", "reindex_docs")
+JOB_NAMES = ("full_ingest", "incremental_sync", "dbt_build", "reindex_docs", "insight_digest")
 
 _ERROR_MAX = 4000  # truncate captured errors so one run can't bloat the table
 
@@ -204,12 +204,61 @@ def reindex_docs(settings: WorkerSettings) -> int:
     return int(stats.chunks)
 
 
+def _import_insight_deps():
+    """Locate the insight-digest building blocks from the sibling ``api`` service.
+
+    The detection logic lives in the API's ``app.insights`` package (shared by
+    the API router and this job). It is imported lazily, and the sibling
+    ``services/api`` directory is added to ``sys.path`` so ``app`` resolves even
+    when the worker is run from its own tree. A missing package (or its heavy
+    deps) raises :class:`JobDependencyError`, recorded like any other failure.
+    """
+    import sys
+
+    api_dir = _REPO_ROOT / "services" / "api"
+    if api_dir.exists() and str(api_dir) not in sys.path:
+        sys.path.insert(0, str(api_dir))
+    try:
+        build = import_module("app.engine.build")
+        detector = import_module("app.insights.detector")
+        store_mod = import_module("app.insights.store")
+    except ImportError as exc:
+        raise JobDependencyError(
+            "insight engine not importable — is services/api installed with its "
+            f"dependencies? ({exc})"
+        ) from exc
+    return build.build_engine, detector.detect_insights, store_mod.store_from_env
+
+
+def insight_digest(settings: WorkerSettings) -> int:
+    """Detect anomalies over the governed metrics and persist the digest.
+
+    Reuses the API's insight engine (catalog + warehouse + retriever) and its
+    documented period-over-period detection. Insights are written to the
+    ``insight.insights`` table when ``POSTGRES_DSN`` is set, else to a JSON file
+    so the digest survives offline runs. Returns the number of insights written.
+    """
+    build_engine, detect_insights, store_from_env = _import_insight_deps()
+
+    engine = build_engine()
+    insights = detect_insights(engine)
+    store = store_from_env(
+        settings.postgres_dsn,
+        schema=settings.insights_schema,
+        file_path=None if settings.postgres_dsn else settings.insights_file_path,
+    )
+    written = store.replace_all(insights)
+    logger.info("insight_digest: %d insight(s) written to %s backend", written, store.backend)
+    return written
+
+
 # job name -> callable(settings) -> int rows
 _JOBS: dict[str, Callable[[WorkerSettings], int]] = {
     "full_ingest": full_ingest,
     "incremental_sync": incremental_sync,
     "dbt_build": dbt_build,
     "reindex_docs": reindex_docs,
+    "insight_digest": insight_digest,
 }
 
 

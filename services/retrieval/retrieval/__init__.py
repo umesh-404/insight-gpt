@@ -15,6 +15,7 @@ from .config import RetrievalConfig, get_config, load_config
 from .corpus import IndexState, default_corpus_path, load_corpus, state_path_for
 from .models import Chunk, Document, RetrievedDoc
 from .retriever import QdrantRetriever
+from .rewrite import QueryRewriter, RewrittenQuery
 from .schema import AUTHOR_ROLES, SOURCE_TYPES, content_hash, normalize_document
 
 __all__ = [
@@ -24,8 +25,10 @@ __all__ = [
     "Document",
     "IndexState",
     "QdrantRetriever",
+    "QueryRewriter",
     "RetrievalConfig",
     "RetrievedDoc",
+    "RewrittenQuery",
     "content_hash",
     "default_corpus_path",
     "get_config",

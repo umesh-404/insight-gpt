@@ -91,6 +91,55 @@ export function grainFor(range: TimeRange): TimeGrain {
   return (range.grain as TimeGrain | null) ?? 'month';
 }
 
+/**
+ * Which direction of movement is an improvement for a metric.
+ *
+ * The API tells us *what* moved and by how much, never whether that is good
+ * news — so this is a display convention, applied only to metric keys whose
+ * meaning is unambiguous. Anything unrecognised returns `'neutral'`, and the UI
+ * then shows the direction without claiming a verdict. Guessing here would
+ * paint a falling return rate red, which is exactly backwards.
+ */
+export type GoodDirection = 'up' | 'down' | 'neutral';
+
+/** Metrics where a *rise* is bad: rates of things going wrong. */
+const LOWER_IS_BETTER = /(^|_)(return|refund|cancel|churn|defect|complaint|stockout|backorder)/;
+
+/** Metrics where a rise is plainly good: volume and value. */
+const HIGHER_IS_BETTER =
+  /^(revenue|orders|units_sold|gross_margin|avg_order_value|profit|margin|units_on_hand)$/;
+
+export function goodDirectionFor(metric: string): GoodDirection {
+  const key = metric.toLowerCase();
+  if (LOWER_IS_BETTER.test(key)) return 'down';
+  if (HIGHER_IS_BETTER.test(key)) return 'up';
+  return 'neutral';
+}
+
+/**
+ * How the delta baseline reads on a KPI tile.
+ *
+ * `previousRange` always returns the equal-length window *immediately before*
+ * the selection, so the wording has to match that exactly. A quarter-to-date or
+ * year-to-date selection is therefore compared against the equal span that
+ * preceded it — not against the whole prior quarter or the same span last year,
+ * which is what a reader would otherwise assume.
+ */
+export function comparisonLabelFor(key: RangeKey): string {
+  switch (key) {
+    case '7d':
+      return 'vs. prior 7 days';
+    case '30d':
+      return 'vs. prior 30 days';
+    case '12m':
+      return 'vs. prior 12 months';
+    case 'quarter':
+    case 'ytd':
+    default:
+      return 'vs. prior equal span';
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Result readers                                                             */
 /* -------------------------------------------------------------------------- */
@@ -179,6 +228,27 @@ export function summarize(
     summary.delta_pct = (value - prior) / Math.abs(prior);
   }
   return summary;
+}
+
+/**
+ * The metric's values in row order — the shape a sparkline needs.
+ *
+ * Deliberately values-only: a sparkline shows the *contour* of the window and
+ * must never be read as a source of figures. Rows whose value cannot be parsed
+ * are dropped rather than coerced to zero, which would draw a false dip.
+ */
+export function seriesValues(
+  result: MetricResult | undefined,
+  metric: string,
+): number[] {
+  if (!result?.rows.length) return [];
+  const index = valueIndex(result, metric);
+  const out: number[] = [];
+  for (const row of result.rows) {
+    const value = toNumber(row[index] ?? null);
+    if (value != null) out.push(value);
+  }
+  return out;
 }
 
 /** Convert a two-column [dimension, metric] result into chart rows. */

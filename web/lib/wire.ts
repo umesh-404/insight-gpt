@@ -16,6 +16,11 @@
  * screening a page.
  */
 import {
+  type ForecastResult,
+  type ForecastPoint,
+  type ForecastConfidence,
+  type ForecastCapabilityReport,
+  type ForecastCapability,
   emptyEnvelope,
   isRole,
   type AnswerEnvelope,
@@ -27,6 +32,8 @@ import {
   type ColumnSpec,
   type Confidence,
   type Conversation,
+  type ConversationSummary,
+  type CorrectionAttempt,
   type ConversationTurn,
   type MetricFormat,
   type MetricResult,
@@ -38,6 +45,8 @@ import {
   type Route,
   type ServiceHealth,
   type ServiceStatus,
+  type Source,
+  type SourceTestResult,
   type StatusFact,
   type SystemStatus,
   type TableBlock,
@@ -133,7 +142,13 @@ export function toDtype(value: unknown): ColumnDtype {
   return DTYPE_ALIASES[str(value).toLowerCase()] ?? 'string';
 }
 
-const ROUTES: Route[] = ['structured', 'unstructured', 'hybrid', 'clarify'];
+const ROUTES: Route[] = [
+  'structured',
+  'unstructured',
+  'hybrid',
+  'clarify',
+  'abstain',
+];
 
 export function toRoute(value: unknown): Route | undefined {
   const raw = str(value).toLowerCase();
@@ -331,9 +346,36 @@ export function fromCitations(raw: unknown): Citation[] {
 /* Answer envelope                                                            */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * Self-correction record. `resolution` is the load-bearing field — it decides
+ * whether the UI says "recovered" or "gave up" — so anything unrecognised is
+ * treated as `gave_up` rather than silently claiming a successful correction.
+ */
+export function fromCorrectionAttempt(
+  raw: unknown,
+  index: number,
+): CorrectionAttempt {
+  const o = obj(raw);
+  return {
+    attempt: num(o.attempt) ?? index + 1,
+    stage: str(o.stage) || 'selection',
+    selection:
+      o.selection && typeof o.selection === 'object' && !Array.isArray(o.selection)
+        ? (o.selection as Record<string, unknown>)
+        : null,
+    error: str(o.error) || 'The governed selection was rejected.',
+    resolution: str(o.resolution) === 'corrected' ? 'corrected' : 'gave_up',
+  };
+}
+
+export function fromCorrectionAttempts(raw: unknown): CorrectionAttempt[] {
+  return arr(raw).map(fromCorrectionAttempt);
+}
+
 export function fromEnvelope(raw: unknown): AnswerEnvelope {
   const o = obj(raw);
   const tables = arr(o.tables).map(fromTable);
+  const route = toRoute(o.route);
   return {
     answer: str(o.answer),
     sql: sqlList(o.sql),
@@ -342,16 +384,45 @@ export function fromEnvelope(raw: unknown): AnswerEnvelope {
     citations: fromCitations(o.citations),
     chart_spec: fromChart(o.chart ?? o.chart_spec, tables),
     caveats: arr(o.caveats).map((c) => str(c)).filter(Boolean),
-    route: toRoute(o.route),
+    route,
     confidence: toConfidence(o.confidence),
     clarifying_question:
       typeof o.clarifying_question === 'string' ? o.clarifying_question : null,
+    attempts: fromCorrectionAttempts(o.attempts),
+    // Trust the explicit flag, but a rollback that only sets `route` must still
+    // render as an abstention rather than as a normal (empty) answer.
+    abstained: o.abstained === true || route === 'abstain',
+    abstain_reason:
+      typeof o.abstain_reason === 'string' ? o.abstain_reason : null,
+    suggestions: arr(o.suggestions).map((s) => str(s)).filter(Boolean),
   };
 }
 
 /* -------------------------------------------------------------------------- */
 /* Conversations                                                              */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * One sidebar row, from `GET /conversations` or the `PATCH` rename response.
+ *
+ * Total like every other `from*`: a summary missing its timestamps or count
+ * still renders, so a partial payload never blanks the history list.
+ */
+export function fromConversationSummary(
+  raw: unknown,
+  fallbackId = '',
+): ConversationSummary {
+  const o = obj(raw);
+  const created = str(o.created_at);
+  const updated = str(o.updated_at);
+  return {
+    id: str(o.id, fallbackId),
+    title: str(o.title) || 'Untitled conversation',
+    created_at: created || updated,
+    updated_at: updated || created,
+    message_count: num(o.message_count) ?? 0,
+  };
+}
 
 /**
  * `GET /conversations/{id}` returns a flat message log. Fold it into
@@ -659,5 +730,155 @@ export function fromStatus(raw: unknown): SystemStatus {
       model: typeof llm.model === 'string' ? llm.model : null,
       reachable: llm.reachable === true,
     },
+  };
+}
+
+
+/* ----------------------------------------------------------------------------
+ * Data sources
+ * ------------------------------------------------------------------------- */
+
+function sourceStatus(value: unknown): Source['status'] {
+  const raw = str(value).toLowerCase();
+  return raw === 'ok' || raw === 'error' ? raw : 'untested';
+}
+
+/**
+ * Normalize one `/sources` record.
+ *
+ * `location` and `detail` are recent additions; an older API omits them, and
+ * neither may ever carry a credential, so both stay optional and are only
+ * surfaced when the backend actually sent a string.
+ */
+export function fromSource(raw: unknown): Source {
+  const o = obj(raw);
+  return {
+    id: str(o.id),
+    name: str(o.name) || str(o.id) || 'Unnamed source',
+    kind: str(o.kind) || 'unknown',
+    status: sourceStatus(o.status),
+    last_tested_at: typeof o.last_tested_at === 'string' ? o.last_tested_at : null,
+    active: o.active !== false,
+    location: typeof o.location === 'string' ? o.location : null,
+    detail: typeof o.detail === 'string' ? o.detail : null,
+  };
+}
+
+export function fromSources(raw: unknown): Source[] {
+  return arr(raw)
+    .map(fromSource)
+    .filter((s) => s.id && s.active !== false);
+}
+
+export function fromSourceTestResult(raw: unknown): SourceTestResult {
+  const o = obj(raw);
+  return {
+    ok: o.ok === true,
+    latency_ms: num(o.latency_ms) ?? 0,
+    tables_seen: num(o.tables_seen) ?? 0,
+    message: str(o.message) || (o.ok === true ? 'Connection OK.' : 'Connection failed.'),
+    checked: str(o.checked) || undefined,
+    error_code: typeof o.error_code === 'string' ? o.error_code : null,
+  };
+}
+
+/* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+const FORECAST_CONFIDENCE: readonly ForecastConfidence[] = [
+  'none',
+  'low',
+  'medium',
+  'high',
+];
+
+function forecastConfidence(value: unknown): ForecastConfidence {
+  const text = str(value, 'none').toLowerCase();
+  return (FORECAST_CONFIDENCE as readonly string[]).includes(text)
+    ? (text as ForecastConfidence)
+    : 'none';
+}
+
+function forecastFormat(value: unknown): MetricFormat {
+  const text = str(value, 'decimal').toLowerCase();
+  return (['currency', 'percent', 'integer', 'decimal'] as string[]).includes(text)
+    ? (text as MetricFormat)
+    : 'decimal';
+}
+
+/** One point. A history point has no interval; a forecast point should. */
+export function fromForecastPoint(raw: unknown): ForecastPoint | null {
+  const row = obj(raw);
+  const value = num(row.value);
+  const period = str(row.period);
+  // A point without a finite value or a label cannot be plotted or explained,
+  // so it is dropped rather than rendered as a gap at zero.
+  if (value === null || !period) return null;
+  return {
+    period,
+    value,
+    lower: num(row.lower),
+    upper: num(row.upper),
+  };
+}
+
+function forecastPoints(raw: unknown): ForecastPoint[] {
+  return arr(raw)
+    .map(fromForecastPoint)
+    .filter((point): point is ForecastPoint => point !== null);
+}
+
+export function fromForecast(raw: unknown): ForecastResult {
+  const row = obj(raw);
+  const metric = str(row.metric, 'metric');
+  const forecast = forecastPoints(row.forecast);
+  const confidence = forecastConfidence(row.confidence);
+  return {
+    metric,
+    metric_label: str(row.metric_label, metric),
+    format: forecastFormat(row.format),
+    additive: row.additive !== false,
+    grain: str(row.grain, 'quarter'),
+    horizon: num(row.horizon) ?? forecast.length,
+    history: forecastPoints(row.history),
+    forecast,
+    method: str(row.method, 'unknown'),
+    method_family: str(row.method_family, 'none'),
+    n_history: num(row.n_history) ?? 0,
+    interval_level: num(row.interval_level) ?? 0.8,
+    confidence,
+    // An empty projection is a refusal however the flag arrived, so the two
+    // never disagree in the UI.
+    low_confidence: row.low_confidence === true || confidence === 'none'
+      || forecast.length === 0,
+    caveats: arr(row.caveats).map((c) => str(c)).filter(Boolean),
+    headline: str(row.headline),
+  };
+}
+
+export function fromForecastCapability(raw: unknown): ForecastCapability {
+  const row = obj(raw);
+  const metric = str(row.metric, 'metric');
+  return {
+    metric,
+    label: str(row.label, metric),
+    format: forecastFormat(row.format),
+    additive: row.additive !== false,
+    grain: str(row.grain, 'quarter'),
+    n_history: num(row.n_history) ?? 0,
+    forecastable: row.forecastable === true,
+    reason: typeof row.reason === 'string' ? row.reason : null,
+  };
+}
+
+export function fromForecastCapabilityReport(raw: unknown): ForecastCapabilityReport {
+  const row = obj(raw);
+  return {
+    grain: str(row.grain, 'quarter'),
+    min_history: num(row.min_history) ?? 0,
+    method_family: str(row.method_family, 'none'),
+    method: str(row.method, 'unknown'),
+    metrics: arr(row.metrics).map(fromForecastCapability),
   };
 }

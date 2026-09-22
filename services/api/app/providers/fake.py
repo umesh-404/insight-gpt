@@ -11,23 +11,50 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 from datetime import date
 
+from ..formatting import format_value
 from .base import Provider
 
 _METRIC_KEYWORDS = [
     (("restock", "inventory", "stock", "on hand", "on-hand"), "units_on_hand"),
     (("margin",), "gross_margin"),
     (("return",), "return_rate"),
-    (("average order", "aov", "basket"), "avg_order_value"),
+    (("average order", "aov", "basket", "average sale", "avg sale"), "avg_order_value"),
     (("units", "quantity", "sold"), "units_sold"),
     (("orders", "order count"), "orders"),
     (("revenue", "sales", "turnover"), "revenue"),
 ]
 _CHANGE_WORDS = ("why", "decline", "declin", "drop", "fell", "fall", "down",
                  "decreas", "increas", "grew", "growth", "rose", "up ")
+# Words that name a real business metric InsightGPT does NOT govern. When the
+# question asks for one of these, the engine should abstain (and suggest the
+# closest governed metric) rather than quietly answer a different metric. A real
+# LLM router surfaces the requested metric name; this offline stand-in needs the
+# hint list to do the same.
+_UNKNOWN_METRIC_HINTS = ("churn", "retention", "attrition", "nps", "csat",
+                         "ltv", "lifetime value", "cac", "conversion", "bounce",
+                         "engagement", "sentiment score", "profit margin")
+
+# Any explicit time reference. Its ABSENCE (together with no metric and no
+# document intent) means the question is not an analytics question at all, so the
+# provider must not fabricate a period — the engine then abstains.
+_TIME_WORDS = ("quarter", "month", "year", "week", "today", "yesterday",
+               "q1", "q2", "q3", "q4", "2024", "2025", "2026", "2027")
+
 _DOC_WORDS = ("complain", "complaint", "review", "feedback", "summar", "theme",
               "saying", "sentiment", "issue")
+
+_CONVERSATIONAL_WORDS = (
+    "what else can you answer", "what can you do", "what can i ask",
+    "what do you do", "who are you", "what are your capabilities",
+    "how does this work", "how do you work", "joke", "humor", "funny", "laugh",
+    "current insight", "current insights", "what are the insights", "show insight",
+    "show insights", "any insight", "anomal", "digest", "summary of business",
+    "business overview",
+)
+_CONVERSATIONAL_EXACT = {"help", "hello", "hi", "hey"}
 
 
 class FakeProvider(Provider):
@@ -45,10 +72,27 @@ class FakeProvider(Provider):
     # ---- routing -------------------------------------------------------------
     def _route(self, p: dict) -> dict:
         q = str(p.get("question", "")).lower()
+        q_words = set(re.findall(r"\b\w+\b", q))
+        if any(w in q for w in _CONVERSATIONAL_WORDS) or bool(q_words & _CONVERSATIONAL_EXACT):
+            return {
+                "route": "conversational",
+                "metric": None,
+                "time_range": None,
+                "prior_time_range": None,
+                "group_dims": [],
+                "entities": {},
+                "is_change_question": False,
+                "needs_docs": False,
+                "clarify": None,
+            }
+
         today = _parse_date(p.get("today", "2026-07-15"))
         metrics = p.get("metrics", [])
 
         metric = _detect_metric(q, metrics)
+        # A metric that is named but not governed -> reported so the engine can
+        # abstain with a suggestion instead of answering the wrong metric.
+        unknown_metric = _detect_unknown_metric(q) if metric is None else None
         wants_docs = any(w in q for w in _DOC_WORDS)
         is_change = any(w in q for w in _CHANGE_WORDS) and metric is not None
 
@@ -60,12 +104,25 @@ class FakeProvider(Provider):
         else:
             route = "structured"
 
-        time_range, prior = _resolve_time(q, today, need_prior=is_change)
+        # Only resolve a period when the question actually has analytics intent.
+        # A question with no governed metric, no unknown-metric name, no document
+        # ask, no change verb and no time word is not answerable from the
+        # warehouse at all — leave the range empty so the engine abstains rather
+        # than inventing "last quarter" and answering a default metric.
+        has_intent = (
+            metric is not None or unknown_metric is not None or is_change
+            or wants_docs or any(w in q for w in _TIME_WORDS)
+        )
+        if has_intent:
+            time_range, prior = _resolve_time(q, today, need_prior=is_change)
+        else:
+            time_range, prior = None, None
         group_dims = _detect_group_dims(q)
 
         return {
             "route": route,
-            "metric": metric,
+            # Surface the ungoverned metric name so the router marks it unresolved.
+            "metric": metric or unknown_metric,
             "time_range": time_range,
             "prior_time_range": prior,
             "group_dims": group_dims,
@@ -83,21 +140,22 @@ class FakeProvider(Provider):
         cites = "".join(f"[{e['n']}]" for e in evidence)
 
         if kind == "change":
+            fmt = f.get("format", "number")
             cur, prior = f["current"], f["prior"]
             pct = f["change_pct"]
             direction = "fell" if pct < 0 else "rose"
             parts = [
                 f"{_label(f['metric'])} {direction} {abs(pct):.1f}% "
-                f"({_num(prior['value'])} → {_num(cur['value'])}) from "
+                f"({_num(prior['value'], fmt)} → {_num(cur['value'], fmt)}) from "
                 f"{prior['label']} to {cur['label']}."
             ]
             drivers = []
             if f.get("top_region"):
                 tr = f["top_region"]
-                drivers.append(f"the {tr['region']} region ({_signed(tr['delta'])})")
+                drivers.append(f"the {tr['region']} region ({_signed(tr['delta'], fmt)})")
             if f.get("top_category"):
                 tc = f["top_category"]
-                drivers.append(f"the {tc['category']} category ({_signed(tc['delta'])})")
+                drivers.append(f"the {tc['category']} category ({_signed(tc['delta'], fmt)})")
             if drivers:
                 parts.append("The change was driven mainly by " + " and ".join(drivers) + ".")
             if evidence:
@@ -108,18 +166,60 @@ class FakeProvider(Provider):
             conf = "high" if evidence else "medium"
             return {"answer": " ".join(parts), "confidence": conf, "caveats": f.get("caveats", [])}
 
+        if kind == "restock":
+            fmt = f.get("format", "number")
+            total = f.get("total_units", 0)
+            rows = f.get("rows", [])
+            top_restock = rows[:4]
+            listing = ", ".join(
+                f"{r['label']} ({_num(r['value'], fmt)} units)" for r in top_restock
+            )
+            base_msg = f"Units on hand for {f.get('period', 'the period')} was {_num(total, fmt)}."
+            if top_restock:
+                answer = f"{base_msg} Priority products to restock first: {listing}."
+            else:
+                answer = base_msg
+            return {"answer": answer, "confidence": "high", "caveats": []}
+
         if kind == "scalar":
             return {
-                "answer": f"{_label(f['metric'])} for {f['period']} was {_num(f['value'])}.",
+                "answer": f"{_label(f['metric'])} for {f['period']} was "
+                          f"{_num(f['value'], f.get('format', 'number'))}.",
                 "confidence": "high", "caveats": f.get("caveats", []),
             }
 
         if kind == "grouped":
+            q_text = str(f.get("question", "")).lower()
             top = f.get("rows", [])[:3]
-            listing = "; ".join(f"{r['label']}: {_num(r['value'])}" for r in top)
+            gfmt = f.get("format", "number")
+            listing = "; ".join(f"{r['label']}: {_num(r['value'], gfmt)}" for r in top)
+            m_lbl = _label(f["metric"]).lower()
+            if (
+                top
+                and any(w in q_text for w in ("highest", "top", "best"))
+                and f.get("dimension") == "date"
+            ):
+                best = top[0]
+                answer = (
+                    f"The highest {m_lbl} day for {f['period']} was "
+                    f"{best['label']} with {_num(best['value'], gfmt)} in {m_lbl}."
+                )
+            elif (
+                top
+                and any(w in q_text for w in ("lowest", "least", "bottom", "worst"))
+                and f.get("dimension") == "date"
+            ):
+                worst = top[0]
+                answer = (
+                    f"The lowest {m_lbl} day for {f['period']} was "
+                    f"{worst['label']} with {_num(worst['value'], gfmt)} in {m_lbl}."
+                )
+            else:
+                answer = (
+                    f"{_label(f['metric'])} by {f['dimension']} for {f['period']} — top: {listing}."
+                )
             return {
-                "answer": f"{_label(f['metric'])} by {f['dimension']} for {f['period']} — "
-                          f"top: {listing}.",
+                "answer": answer,
                 "confidence": "high", "caveats": f.get("caveats", []),
             }
 
@@ -155,11 +255,29 @@ def _detect_metric(q: str, metrics: list[str]) -> str | None:
     return None
 
 
+def _detect_unknown_metric(q: str) -> str | None:
+    """Name a requested-but-ungoverned metric, so the engine can abstain on it."""
+    for hint in _UNKNOWN_METRIC_HINTS:
+        if hint in q:
+            # Keep "rate"/"ratio" phrasing when present, so the suggestion reads
+            # naturally (e.g. "churn rate" -> suggest "return_rate").
+            if "rate" in q and not hint.endswith(("nps", "csat", "score")):
+                return f"{hint} rate"
+            return hint
+    return None
+
+
 def _detect_group_dims(q: str) -> list[str]:
     dims = []
     for token, dim in (("by region", "region"), ("by category", "category"),
                        ("by product", "product"), ("by channel", "channel"),
-                       ("per region", "region"), ("per category", "category")):
+                       ("per region", "region"), ("per category", "category"),
+                       ("per product", "product"), ("per channel", "channel"),
+                       ("which category", "category"), ("which region", "region"),
+                       ("what product", "product"), ("what products", "product"),
+                       ("by date", "date"), ("by day", "date"), ("per day", "date"),
+                       ("sales day", "date"), ("highest day", "date"),
+                       ("highest sales day", "date")):
         if token in q:
             dims.append(dim)
     return dims
@@ -227,11 +345,12 @@ def _label(metric: str | None) -> str:
             }.get(metric or "", (metric or "Value").replace("_", " ").capitalize())
 
 
-def _num(v) -> str:
-    if isinstance(v, float) and not v.is_integer():
-        return f"{v:,.2f}"
-    return f"{int(v):,}"
+def _num(v, fmt: str = "number") -> str:
+    """Render a figure the way the UI will, so prose and tiles agree."""
+    return format_value(float(v), fmt)
 
 
-def _signed(v) -> str:
-    return f"+{_num(v)}" if v >= 0 else f"-{_num(abs(v))}"
+def _signed(v, fmt: str = "number") -> str:
+    """A delta always carries its sign, so a fall reads as one."""
+    body = _num(abs(v), fmt)
+    return f"+{body}" if v >= 0 else f"-{body}"

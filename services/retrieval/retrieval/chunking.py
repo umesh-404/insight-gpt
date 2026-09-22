@@ -46,25 +46,44 @@ def chunk_document(doc: Document, cfg: ChunkingConfig) -> list[Chunk]:
     return chunks
 
 
-def embed_text(doc: Document, chunk: Chunk, cfg: ChunkingConfig) -> str:
+def embed_text(
+    doc: Document, chunk: Chunk, cfg: ChunkingConfig, *, doc_context: str | None = None
+) -> str:
     """The text actually embedded / sparse-tokenized for a chunk.
 
-    Prefixed with a breadcrumb built from the document's provenance. Two lines,
-    mirroring docs/04-retrieval-rag.md §2.3::
+    Prefixed with a breadcrumb built from the document's provenance, plus — when
+    ``contextual_augmentation`` is on — the region and category so a chunk that
+    never names its own region ("the backlog delayed shipments") still carries
+    that vocabulary. Mirroring docs/04-retrieval-rag.md §2.3::
 
         Q2 Operations Review :: Fulfilment > Root cause
-        2026-05-14 · report · manager
+        2026-05-14 · report · manager · North · Electronics
+        [context: North fulfilment backlog concentrated in electronics.]
         <chunk text…>
 
-    The header is deliberately NOT stored, so the user reads back real text.
+    This "situate the chunk within its document" prefix is the contextual-
+    retrieval technique that cuts retrieval failures. It is a pure function of
+    the document's canonical fields (``doc_context`` aside), so it runs fully
+    offline and does NOT enter the content hash — the hash is computed in
+    :mod:`retrieval.schema` over the original fields, so augmenting the embedded
+    text never churns changed-only re-indexing.
+
+    ``doc_context`` is an optional one-line situating sentence (LLM-written at
+    index time); the header is deliberately NOT stored, so the user reads back
+    real text either way.
     """
     if not cfg.contextual_header:
         return chunk.content
     crumb = doc.title or doc.doc_id
     if chunk.heading_path:
         crumb = f"{crumb} :: {chunk.heading_path}"
-    meta_bits = [b for b in (doc.date, doc.source_type, doc.author_role) if b]
-    header = crumb if not meta_bits else f"{crumb}\n{' · '.join(meta_bits)}"
+    meta_bits = [doc.date, doc.source_type, doc.author_role]
+    if cfg.contextual_augmentation:
+        meta_bits += [doc.region, doc.category]
+    present = [b for b in meta_bits if b]
+    header = crumb if not present else f"{crumb}\n{' · '.join(present)}"
+    if doc_context:
+        header = f"{header}\n[context: {doc_context.strip()}]"
     return f"{header}\n{chunk.content}"
 
 

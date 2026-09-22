@@ -157,6 +157,35 @@ Returns the ordered turns, each with its stored `AnswerEnvelope` so the SQL,
 citations, and chart can be re-rendered without re-running the query. 404 if
 the conversation is not owned by the caller.
 
+#### `PATCH /conversations/{id}` — rename a conversation
+
+```python
+class RenameConversationRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+# -> 200 ConversationSummary
+```
+
+The server collapses whitespace and trims. A whitespace-only title is a `400`
+(it would leave an unclickable blank row in the sidebar); over 120 characters is
+a `422` naming `body.title`, rejected rather than truncated so the client is
+told why.
+
+A renamed conversation is marked as user-titled, so a later turn on that thread
+never overwrites the chosen name with one derived from the first question.
+`updated_at` is deliberately **not** bumped: it records the last *turn*, which
+is what the sidebar orders by, and renaming a thread should not jump it to the
+top.
+
+#### `DELETE /conversations/{id}` — remove a conversation
+
+Deletes the conversation and its turns. Returns `200 {"status": "deleted",
+"id": ...}`, matching `DELETE /sources/{id}`. Not idempotent: a second delete is
+a `404`.
+
+Both mutations are keyed by `(user_id, conversation_id)` exactly like the read
+path, so a conversation belonging to another user is **404, not 403** — a `403`
+would confirm the id exists and make ids probeable.
+
 #### `POST /feedback` — thumbs / correction on an answer
 
 ```python
@@ -250,12 +279,34 @@ class Source(BaseModel):
     kind: str
     status: Literal["ok", "untested", "error"]
     last_tested_at: datetime | None
+    location: str | None    # configured path, or host:port for a DSN kind
+    detail: str | None      # last probe message, or why a seed is in error
     # dsn/secrets are redacted from all read responses
 ```
 
-`POST /sources/{id}/test` performs a live connectivity + schema-introspection
-check and returns `{ ok, latency_ms, tables_seen, message }` without persisting
-data. `DELETE` is soft-delete (marks inactive, retains run history for audit).
+`location` is deliberately **not** the DSN: for `postgres`/`mysql` it is only
+`host:port`, never the user, password or database name, so a row can say what it
+points at without becoming a place a credential leaks.
+
+A source needs either a `path` option (`csv`, `excel`, `documents`) or a `dsn`
+(`postgres`, `mysql`). Registering without the one its kind requires is a `400`
+carrying `details.expected_option` / `details.expected_field`, so the client can
+highlight the field rather than only showing a message.
+
+**The registry seeds itself from the deployment.** On first read it registers the
+extracts the generator writes (`GENERATED_DIR`, default `data/generated`), the
+redacted document corpus (`DOCUMENT_CORPUS_PATH`), and the warehouse — but only
+when `POSTGRES_DSN` is actually set. Nothing is invented: a seed whose file is
+missing is registered `status="error"` with the reason in `detail`, rather than
+listed as if it were fine. Seeding is one-shot, so a deleted seed stays deleted.
+
+`POST /sources/{id}/test` performs a live connectivity check for the kind of
+source it claims to be, under a bounded timeout, and records the outcome on the
+row (`status`, `last_tested_at`, `detail`). It returns `{ ok, latency_ms,
+tables_seen, message, checked, error_code }`; `checked` names what was actually
+verified, so `ok` is never ambiguous. Every message is scrubbed of the source's
+secrets before it leaves the process. `DELETE` is soft-delete (marks inactive,
+retains run history for audit).
 
 ### 3.4 Pipelines (analyst reads, admin triggers)
 

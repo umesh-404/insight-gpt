@@ -11,10 +11,21 @@ def _settings() -> WorkerSettings:
     return WorkerSettings(postgres_dsn=None)
 
 
-def test_registers_the_three_recurring_jobs():
+def test_registers_the_recurring_jobs():
     scheduler = build_scheduler(PipelineRunStore(dsn=None), _settings(), blocking=False)
     job_ids = {job.id for job in scheduler.get_jobs()}
-    assert job_ids == {"incremental_sync", "reindex_docs", "dbt_build"}
+    assert job_ids == {"incremental_sync", "reindex_docs", "dbt_build", "insight_digest"}
+
+
+def test_insight_digest_is_a_daily_cron():
+    settings = WorkerSettings(
+        postgres_dsn=None, insight_digest_hour=6, insight_digest_minute=30
+    )
+    scheduler = build_scheduler(PipelineRunStore(dsn=None), settings, blocking=False)
+    job = next(j for j in scheduler.get_jobs() if j.id == "insight_digest")
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "6"
+    assert fields["minute"] == "30"
 
 
 def test_interval_jobs_use_configured_minutes():

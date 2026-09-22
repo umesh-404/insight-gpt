@@ -4,6 +4,13 @@ CRUD over an in-process registry. Secrets (``dsn``) are accepted on write, held
 as a ``SecretStr``, and never returned on read or written to a log or an error
 message. ``DELETE`` is a soft-delete that retains the record for audit.
 
+The registry is **seeded from what this deployment actually has** the first time
+it is read (see :func:`_ensure_seeded`): the generator's CSV extracts, the
+redacted document corpus, and the Postgres warehouse when ``POSTGRES_DSN`` is
+set. Nothing is invented — a seed whose path is missing is registered with
+``status="error"`` and a ``detail`` saying so, and every seed is deletable like
+any hand-registered source.
+
 ``POST /sources/{id}/test`` performs a **real** connectivity check for the kind
 of source it claims to be, under a bounded timeout:
 
@@ -23,6 +30,7 @@ than an exception, and every message is scrubbed of the source's secrets.
 
 from __future__ import annotations
 
+import os
 import socket
 import time
 import uuid
@@ -38,6 +46,7 @@ from starlette.concurrency import run_in_threadpool
 from ...auth.roles import Role, require_role
 from ..deps import rate_limit
 from ..errors import BadRequestError, NotFoundError
+from ..sources_store import SourceRecord, sanitize_options, store_from_env
 
 router = APIRouter(tags=["sources"])
 
@@ -72,6 +81,12 @@ class Source(BaseModel):
     status: Literal["ok", "untested", "error"]
     last_tested_at: datetime | None = None
     active: bool = True
+    # Non-secret "where does this point" summary: the configured path for file
+    # kinds, ``host:port`` for DSN kinds. Credentials never reach this field.
+    location: str | None = None
+    # Why the source is in its current status — the last probe message, or the
+    # reason a seeded source could not be found on disk.
+    detail: str | None = None
 
 
 class _StoredSource(Source):
@@ -90,17 +105,90 @@ class TestResult(BaseModel):
 
 
 _SOURCES: dict[str, _StoredSource] = {}
+_SEEDED = False
+_STORE = None
+
+
+def _store():
+    """The durable registry, built lazily so tests can point it elsewhere."""
+    global _STORE
+    if _STORE is None:
+        _STORE = store_from_env()
+    return _STORE
+
+
+def _set_store(store) -> None:
+    """Swap the backing store (tests, and a restart simulation)."""
+    global _STORE, _SEEDED
+    _STORE = store
+    _SEEDED = False
+    _SOURCES.clear()
+
+
+def _to_record(stored: _StoredSource) -> SourceRecord:
+    """The persistable projection of a source. Never carries the secret."""
+    return SourceRecord(
+        id=stored.id, name=stored.name, kind=stored.kind, status=stored.status,
+        last_tested_at=stored.last_tested_at, active=stored.active,
+        location=stored.location, detail=stored.detail,
+        options=sanitize_options(stored.options),
+        dsn_env=stored.options.get("dsn_env"),
+        had_dsn=stored.dsn is not None,
+    )
+
+
+def _from_record(record: SourceRecord) -> _StoredSource:
+    """Rebuild a source from storage, re-resolving a DSN held in the environment.
+
+    A source registered with ``options.dsn_env`` comes back whole, because only
+    the variable's *name* was written down. One registered with a literal DSN
+    comes back without it: the row, its status and its history survive, but the
+    credential does not, and the detail says so rather than letting a later test
+    fail mysteriously.
+    """
+    dsn: SecretStr | None = None
+    detail = record.detail
+    if record.dsn_env:
+        value = (os.environ.get(record.dsn_env) or "").strip()
+        if value:
+            dsn = SecretStr(value)
+        else:
+            detail = (
+                f"Environment variable {record.dsn_env} is not set in this "
+                "process, so there is no connection string to test with."
+            )
+    elif record.had_dsn:
+        detail = (
+            "Connection string was not persisted (secrets are never written to "
+            "the registry). Re-register the source, or point it at an "
+            "environment variable with the 'dsn_env' option, to test it again."
+        )
+    return _StoredSource(
+        id=record.id, name=record.name, kind=record.kind, status=record.status,
+        last_tested_at=record.last_tested_at, active=record.active,
+        location=record.location, detail=detail,
+        dsn=dsn, options=dict(record.options),
+    )
+
+
+def _persist(stored: _StoredSource) -> None:
+    _store().upsert(_to_record(stored))
 
 
 def reset_state() -> None:
-    """Clear the registry (tests)."""
+    """Clear the registry, seeds included (tests)."""
+    global _SEEDED
     _SOURCES.clear()
+    _SEEDED = False
+    if _STORE is not None:
+        _STORE.clear()
 
 
 def _public(s: _StoredSource) -> Source:
     return Source(
         id=s.id, name=s.name, kind=s.kind, status=s.status,
         last_tested_at=s.last_tested_at, active=s.active,
+        location=s.location, detail=s.detail,
     )
 
 
@@ -179,6 +267,21 @@ def _host_port(dsn: str, kind: str) -> tuple[str, int] | None:
         return host, int(port) if port else _DEFAULT_PORTS.get(kind, 0)
     except ValueError:
         return host, _DEFAULT_PORTS.get(kind, 0)
+
+
+def _location(kind: str, dsn: str | None, options: dict[str, Any]) -> str | None:
+    """A non-secret, displayable summary of where a source points.
+
+    File kinds show their configured path. DSN kinds show only ``host:port`` —
+    never the user, the password or the database name — so the value is safe to
+    return from a read and to render in the UI.
+    """
+    if kind in _DSN_KINDS:
+        if not dsn:
+            return None
+        target = _host_port(dsn, kind)
+        return f"{target[0]}:{target[1]}" if target else None
+    return _resolve_path(options)
 
 
 # --- the actual probes (synchronous; always called via run_in_threadpool) -----
@@ -318,7 +421,10 @@ def _run_probe(stored: _StoredSource) -> TestResult:
 
 def _validate(body: SourceConfig) -> None:
     if body.kind in _DSN_KINDS and not (body.dsn and body.dsn.get_secret_value().strip()):
-        raise BadRequestError(f"A {body.kind} source requires a 'dsn'.")
+        raise BadRequestError(
+            f"A {body.kind} source requires a 'dsn'.",
+            details={"expected_field": "dsn"},
+        )
     if body.kind in _PATH_KINDS and not _resolve_path(body.options):
         raise BadRequestError(
             f"A {body.kind} source requires a 'path' option.",
@@ -326,7 +432,142 @@ def _validate(body: SourceConfig) -> None:
         )
 
 
+# --- seeding the registry from what this deployment actually has --------------
+
+# services/api/app/api/routers/sources.py -> repo root is five levels up.
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+
+# The tables `data/generator` writes as CSV extracts, in load order.
+_GENERATED_TABLES = ("customers", "products", "stores", "orders", "order_items", "inventory")
+
+
+def _generated_dir() -> Path:
+    """Where the generator wrote its CSV extracts (``GENERATED_DIR`` overrides)."""
+    if override := os.environ.get("GENERATED_DIR"):
+        return Path(override)
+    return _REPO_ROOT / "data" / "generated"
+
+
+def _corpus_path() -> Path:
+    """The redacted document corpus (``DOCUMENT_CORPUS_PATH`` overrides).
+
+    Same variable the ingestion and worker services read, so relocating the
+    hand-off relocates this listing too.
+    """
+    if override := os.environ.get("DOCUMENT_CORPUS_PATH"):
+        return Path(override)
+    return _REPO_ROOT / "data" / "ingested" / "documents.json"
+
+
+def _seed_path_source(sid: str, name: str, kind: SourceKind, path: Path) -> _StoredSource:
+    """Register a real path without pretending it is healthy.
+
+    Existence is the only thing checked here — cheap, and honest: a path that is
+    present is ``untested`` until someone runs the probe, and a path that is
+    absent is an ``error`` that says which path is missing.
+    """
+    exists = path.exists()
+    return _StoredSource(
+        id=sid,
+        name=name,
+        kind=kind,
+        status="untested" if exists else "error",
+        options={"path": str(path)},
+        location=str(path),
+        detail=(
+            "Registered from this deployment's layout. Run a test to verify it is readable."
+            if exists
+            else f"Not found on disk: {path}"
+        ),
+    )
+
+
+def _seeds() -> list[_StoredSource]:
+    """The sources this deployment genuinely has, derived from paths and env."""
+    seeded: list[_StoredSource] = []
+
+    generated = _generated_dir()
+    for table in _GENERATED_TABLES:
+        csv_path = generated / f"{table}.csv"
+        seeded.append(
+            _seed_path_source(f"src_seed_csv_{table}", f"{table}.csv", "csv", csv_path)
+        )
+
+    seeded.append(
+        _seed_path_source(
+            "src_seed_documents", "document corpus", "documents", _corpus_path()
+        )
+    )
+
+    dsn = (os.environ.get("POSTGRES_DSN") or "").strip()
+    if dsn:
+        seeded.append(
+            _StoredSource(
+                id="src_seed_warehouse",
+                name="warehouse (postgres)",
+                kind="postgres",
+                status="untested",
+                dsn=SecretStr(dsn),
+                options={},
+                location=_location("postgres", dsn, {}),
+                detail="Configured via POSTGRES_DSN. Run a test to verify connectivity.",
+            )
+        )
+    return seeded
+
+
+def _ensure_seeded() -> None:
+    """Load the registry once per process, seeding it only if it is brand new.
+
+    Order matters. A persisted registry is authoritative: it is loaded as-is, so
+    an admin's edits *and their deletions* survive a restart. Seeding happens
+    only when nothing has ever been stored, which makes it a genuine first-run
+    step rather than something that fights the operator every boot.
+
+    Seeds are refreshed on the way through: their paths are derived from this
+    deployment's layout, so a file that has since appeared (or vanished) is
+    reported accurately instead of replaying a stale status.
+    """
+    global _SEEDED
+    if _SEEDED:
+        return
+    _SEEDED = True
+
+    store = _store()
+    records = store.all()
+    if records:
+        for record in records:
+            _SOURCES[record.id] = _from_record(record)
+        _refresh_seed_status()
+        return
+
+    seeded = _seeds()
+    for source in seeded:
+        _SOURCES.setdefault(source.id, source)
+    store.upsert_many([_to_record(s) for s in seeded])
+
+
+def _refresh_seed_status() -> None:
+    """Re-derive a seeded path source from disk, so a stale row cannot mislead.
+
+    A seed describes a file this deployment owns. If it has been generated since
+    the last run (or deleted), the registry must say what is true now — but only
+    for a seed that has never been tested, so a real probe result is never
+    overwritten by a filesystem guess.
+    """
+    for seed in _seeds():
+        current = _SOURCES.get(seed.id)
+        if current is None or current.last_tested_at is not None:
+            continue
+        if current.location != seed.location or current.detail != seed.detail:
+            current.location = seed.location
+            current.detail = seed.detail
+            current.status = seed.status
+            _persist(current)
+
+
 def _require(source_id: str) -> _StoredSource:
+    _ensure_seeded()
     stored = _SOURCES.get(source_id)
     if stored is None or not stored.active:
         raise NotFoundError(f"No source with id {source_id!r}.")
@@ -336,6 +577,7 @@ def _require(source_id: str) -> _StoredSource:
 # --- endpoints ----------------------------------------------------------------
 @router.get("/sources", response_model=list[Source])
 async def list_sources(_: object = Depends(require_role(Role.admin))) -> list[Source]:
+    _ensure_seeded()
     return [_public(s) for s in _SOURCES.values() if s.active]
 
 
@@ -343,13 +585,20 @@ async def list_sources(_: object = Depends(require_role(Role.admin))) -> list[So
 async def create_source(
     body: SourceConfig, _: object = Depends(require_role(Role.admin))
 ) -> Source:
+    _ensure_seeded()
     _validate(body)
     sid = f"src_{uuid.uuid4().hex[:12]}"
+    options = dict(body.options)
     stored = _StoredSource(
         id=sid, name=body.name, kind=body.kind, status="untested",
-        dsn=body.dsn, options=dict(body.options),
+        dsn=body.dsn, options=options,
+        location=_location(
+            body.kind, body.dsn.get_secret_value() if body.dsn else None, options
+        ),
+        detail="Registered. Run a test to verify connectivity.",
     )
     _SOURCES[sid] = stored
+    _persist(stored)
     return _public(stored)
 
 
@@ -373,6 +622,9 @@ async def test_source(
     result = await run_in_threadpool(_run_probe, stored)
     stored.status = "ok" if result.ok else "error"
     stored.last_tested_at = datetime.now(UTC)
+    # ``result.message`` has already been scrubbed of every secret substring.
+    stored.detail = result.message
+    _persist(stored)
     return result
 
 
@@ -382,4 +634,6 @@ async def delete_source(
 ) -> dict[str, str]:
     stored = _require(source_id)
     stored.active = False  # soft-delete, retains history for audit
+    # Persisted, so a deleted source does not reappear after a restart.
+    _persist(stored)
     return {"status": "deleted", "id": source_id}

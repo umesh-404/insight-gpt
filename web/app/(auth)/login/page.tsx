@@ -58,42 +58,59 @@ export default function LoginPage() {
 
   return (
     <div className="grid min-h-screen lg:grid-cols-2">
-      {/* Brand panel */}
-      <div className="relative hidden flex-col justify-between overflow-hidden bg-primary p-12 text-primary-foreground lg:flex">
+      {/* Brand panel. Deep, near-black blue rather than flat primary: the
+          wordmark and the accent hue stay readable on top of it, and it reads
+          as an enterprise console instead of a marketing splash. */}
+      <div className="relative hidden flex-col justify-between overflow-hidden bg-[hsl(224_45%_10%)] p-12 text-white lg:flex">
         <div
-          className="absolute inset-0 opacity-20"
+          className="absolute inset-0 opacity-[0.12]"
           style={{
             backgroundImage:
-              'radial-gradient(circle at 20% 20%, white 1px, transparent 1px)',
-            backgroundSize: '28px 28px',
+              'linear-gradient(to right, white 1px, transparent 1px), linear-gradient(to bottom, white 1px, transparent 1px)',
+            backgroundSize: '48px 48px',
           }}
           aria-hidden
         />
+        <div
+          className="absolute -left-24 -top-24 size-[28rem] rounded-full bg-[hsl(224_76%_48%)] opacity-30 blur-3xl"
+          aria-hidden
+        />
+        <div
+          className="absolute -bottom-32 -right-20 size-[24rem] rounded-full bg-[hsl(199_82%_40%)] opacity-25 blur-3xl"
+          aria-hidden
+        />
+
         <div className="relative">
-          <Logo className="[&_span]:text-primary-foreground [&_span_span]:text-primary-foreground/80" />
+          <Logo className="[&_span]:text-white [&_span_span]:text-[hsl(214_95%_72%)]" />
         </div>
+
         <div className="relative max-w-md">
-          <h2 className="text-3xl font-semibold leading-tight tracking-tight">
+          <h2 className="text-4xl font-semibold leading-[1.15]">
             Explainable answers over all your business data.
           </h2>
-          <p className="mt-4 text-primary-foreground/80">
+          <p className="mt-4 leading-relaxed text-white/70">
             Ask in plain English. Every answer shows the SQL that produced the
             numbers and the documents behind each claim — never a black box.
           </p>
-          <ul className="mt-8 space-y-3 text-sm text-primary-foreground/90">
+          <ul className="mt-8 space-y-3.5 text-sm text-white/85">
             {[
               'Conversational analytics with streamed, cited answers',
               'Governed dashboards over a semantic metric layer',
+              'Anomaly detection with deterministic root causes',
               'Executive reports, exportable to PDF',
             ].map((line) => (
-              <li key={line} className="flex items-start gap-2">
-                <ShieldCheck className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <li key={line} className="flex items-start gap-2.5">
+                <ShieldCheck
+                  className="mt-0.5 size-4 shrink-0 text-[hsl(214_95%_72%)]"
+                  aria-hidden
+                />
                 {line}
               </li>
             ))}
           </ul>
         </div>
-        <div className="relative text-xs text-primary-foreground/70">
+
+        <div className="relative text-xs text-white/50">
           Read-only analytics · Role-based access · Private by default
         </div>
       </div>
@@ -104,8 +121,8 @@ export default function LoginPage() {
           <div className="mb-8 lg:hidden">
             <Logo />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight">Welcome back</h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">
+          <h1 className="text-3xl font-semibold">Welcome back</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
             Sign in to your InsightGPT workspace.
           </p>
 

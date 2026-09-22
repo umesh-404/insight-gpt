@@ -12,6 +12,10 @@ import { ApiError } from './types';
 import type {
   Conversation,
   ConversationSummary,
+  ForecastCapabilityReport,
+  ForecastResult,
+  Insight,
+  InsightPage,
   MetricQuery,
   MetricResult,
   MetricsCatalog,
@@ -37,6 +41,11 @@ export const qk = {
   sources: ['sources'] as const,
   reports: ['reports'] as const,
   report: (id: string) => ['report', id] as const,
+  insights: (limit: number, offset: number) => ['insights', limit, offset] as const,
+  insight: (id: string) => ['insight', id] as const,
+  forecastMetrics: (grain: string) => ['forecast-metrics', grain] as const,
+  forecast: (metric: string, grain: string, horizon: number) =>
+    ['forecast', metric, grain, horizon] as const,
   status: ['status'] as const,
 };
 
@@ -62,6 +71,92 @@ export function useConversation(id: string): UseQueryResult<Conversation> {
     queryFn: () => api.getConversation(id),
     enabled: Boolean(id),
     retry: retryUnlessClientError,
+  });
+}
+
+/* ----------------------------------------------------------------------------
+ * Conversation mutations
+ *
+ * Both are optimistic: the sidebar is a navigation surface, so it must react on
+ * the click, not a round trip later. `onMutate` snapshots the cache and
+ * `onError` restores it, so a rejected rename or delete leaves the list exactly
+ * as it was rather than in a half-applied state.
+ * ------------------------------------------------------------------------- */
+
+type ConversationsPage = Paginated<ConversationSummary>;
+
+export function useRenameConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) =>
+      api.renameConversation(id, title),
+    onMutate: async ({ id, title }) => {
+      // Cancel in-flight refetches first, or one could land after the optimistic
+      // write and revert the new title on screen.
+      await qc.cancelQueries({ queryKey: qk.conversations });
+      const previous = qc.getQueryData<ConversationsPage>(qk.conversations);
+      const clean = title.replace(/\s+/g, ' ').trim();
+      qc.setQueryData<ConversationsPage>(qk.conversations, (page) =>
+        page
+          ? {
+              ...page,
+              items: page.items.map((c) =>
+                c.id === id ? { ...c, title: clean } : c,
+              ),
+            }
+          : page,
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(qk.conversations, context.previous);
+      }
+    },
+    onSuccess: (summary, { id }) => {
+      // Reconcile with the server's normalized title (it collapses whitespace).
+      qc.setQueryData<ConversationsPage>(qk.conversations, (page) =>
+        page
+          ? { ...page, items: page.items.map((c) => (c.id === id ? summary : c)) }
+          : page,
+      );
+      void qc.invalidateQueries({ queryKey: qk.conversation(id) });
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: qk.conversations });
+    },
+  });
+}
+
+/**
+ * Delete is deliberately *not* optimistic.
+ *
+ * Dropping the row in `onMutate` unmounts the component that owns the
+ * mutation, and TanStack Query does not run per-call `mutate(…, {onSuccess})`
+ * callbacks for an observer with no listeners — the "navigate away from the
+ * conversation you just deleted" step would silently never fire. Removing on
+ * success keeps the row mounted long enough to show its pending state, report
+ * a failure in place, and redirect.
+ */
+export function useDeleteConversation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.deleteConversation(id),
+    onSuccess: (_data, id) => {
+      qc.setQueryData<ConversationsPage>(qk.conversations, (page) =>
+        page
+          ? {
+              ...page,
+              items: page.items.filter((c) => c.id !== id),
+              total: Math.max(0, (page.total ?? page.items.length) - 1),
+            }
+          : page,
+      );
+      // The transcript is gone server-side; drop it so a stale back-navigation
+      // cannot render a conversation that no longer exists.
+      qc.removeQueries({ queryKey: qk.conversation(id) });
+      void qc.invalidateQueries({ queryKey: qk.conversations });
+    },
   });
 }
 
@@ -188,6 +283,39 @@ export function useReport(id: string): UseQueryResult<Report> {
   });
 }
 
+export function useInsights(
+  limit = 20,
+  offset = 0,
+): UseQueryResult<InsightPage> {
+  return useQuery({
+    queryKey: qk.insights(limit, offset),
+    queryFn: () => api.listInsights(limit, offset),
+    staleTime: 60_000,
+    retry: retryUnlessClientError,
+  });
+}
+
+export function useInsight(id: string): UseQueryResult<Insight> {
+  return useQuery({
+    queryKey: qk.insight(id),
+    queryFn: () => api.getInsight(id),
+    enabled: Boolean(id),
+    retry: retryUnlessClientError,
+  });
+}
+
+/** Re-run detection now and refresh every cached insight list. */
+export function useRefreshInsights() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.refreshInsights(),
+    onSuccess: (page) => {
+      qc.setQueryData(qk.insights(20, 0), page);
+      void qc.invalidateQueries({ queryKey: ['insights'] });
+    },
+  });
+}
+
 export function useStatus(): UseQueryResult<SystemStatus> {
   return useQuery({
     queryKey: qk.status,
@@ -231,8 +359,45 @@ export function useDeleteSource() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api.deleteSource(id),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      // Drop the row immediately so the table never shows a source the server
+      // has already removed, then reconcile with a refetch.
+      qc.setQueryData<Source[]>(qk.sources, (prev) =>
+        prev ? prev.filter((s) => s.id !== id) : prev,
+      );
       void qc.invalidateQueries({ queryKey: qk.sources });
     },
+  });
+}
+
+
+/* ----------------------------------------------------------------------------
+ * Forecasting
+ * ------------------------------------------------------------------------- */
+
+/** Which governed metrics can be projected at this grain, and why not. */
+export function useForecastMetrics(
+  grain = 'quarter',
+): UseQueryResult<ForecastCapabilityReport> {
+  return useQuery({
+    queryKey: qk.forecastMetrics(grain),
+    queryFn: () => api.forecastMetrics(grain),
+    staleTime: 5 * 60_000,
+    retry: retryUnlessClientError,
+  });
+}
+
+export function useForecast(
+  metric: string,
+  grain = 'quarter',
+  horizon = 4,
+  enabled = true,
+): UseQueryResult<ForecastResult> {
+  return useQuery({
+    queryKey: qk.forecast(metric, grain, horizon),
+    queryFn: () => api.forecast({ metric, grain, horizon }),
+    enabled: enabled && Boolean(metric),
+    staleTime: 60_000,
+    retry: retryUnlessClientError,
   });
 }

@@ -43,9 +43,15 @@ def get_provider(name: str | None = None, model: str | None = None) -> Provider:
             name=name, model=model or os.getenv("LLM_MODEL", default_model),
             api_key=key, base_url=base_url,
         )
+    if name in ("typesafe", "jev"):
+        from .typesafe_provider import TypeSafeProvider
+        return TypeSafeProvider(
+            api_key=os.getenv("TYPESAFE_API_KEY"),
+            model=model or os.getenv("TYPESAFE_MODEL", "jev-latest"),
+        )
     if name == "gemini":
         raise NotImplementedError(
             "gemini provider is declared in config but not yet implemented; "
-            "use 'ollama' (default) or 'openai'/'groq'"
+            "use 'ollama' (default) or 'openai'/'groq'/'typesafe'"
         )
     raise ValueError(f"unknown LLM_PROVIDER {name!r}")
