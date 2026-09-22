@@ -21,7 +21,7 @@ _METRIC_KEYWORDS = [
     (("restock", "inventory", "stock", "on hand", "on-hand"), "units_on_hand"),
     (("margin",), "gross_margin"),
     (("return",), "return_rate"),
-    (("average order", "aov", "basket"), "avg_order_value"),
+    (("average order", "aov", "basket", "average sale", "avg sale"), "avg_order_value"),
     (("units", "quantity", "sold"), "units_sold"),
     (("orders", "order count"), "orders"),
     (("revenue", "sales", "turnover"), "revenue"),
@@ -49,7 +49,10 @@ _DOC_WORDS = ("complain", "complaint", "review", "feedback", "summar", "theme",
 _CONVERSATIONAL_WORDS = (
     "what else can you answer", "what can you do", "what can i ask",
     "what do you do", "who are you", "what are your capabilities",
-    "how does this work", "how do you work",
+    "how does this work", "how do you work", "joke", "humor", "funny", "laugh",
+    "current insight", "current insights", "what are the insights", "show insight",
+    "show insights", "any insight", "anomal", "digest", "summary of business",
+    "business overview",
 )
 _CONVERSATIONAL_EXACT = {"help", "hello", "hi", "hey"}
 
@@ -168,11 +171,14 @@ class FakeProvider(Provider):
             total = f.get("total_units", 0)
             rows = f.get("rows", [])
             top_restock = rows[:4]
-            listing = ", ".join(f"{r['label']} ({_num(r['value'], fmt)} units)" for r in top_restock)
-            answer = (
-                f"Units on hand for {f.get('period', 'the period')} was {_num(total, fmt)}. "
-                f"Priority products to restock first: {listing}."
-            ) if top_restock else f"Units on hand for {f.get('period', 'the period')} was {_num(total, fmt)}."
+            listing = ", ".join(
+                f"{r['label']} ({_num(r['value'], fmt)} units)" for r in top_restock
+            )
+            base_msg = f"Units on hand for {f.get('period', 'the period')} was {_num(total, fmt)}."
+            if top_restock:
+                answer = f"{base_msg} Priority products to restock first: {listing}."
+            else:
+                answer = base_msg
             return {"answer": answer, "confidence": "high", "caveats": []}
 
         if kind == "scalar":
@@ -183,12 +189,37 @@ class FakeProvider(Provider):
             }
 
         if kind == "grouped":
+            q_text = str(f.get("question", "")).lower()
             top = f.get("rows", [])[:3]
             gfmt = f.get("format", "number")
             listing = "; ".join(f"{r['label']}: {_num(r['value'], gfmt)}" for r in top)
+            m_lbl = _label(f["metric"]).lower()
+            if (
+                top
+                and any(w in q_text for w in ("highest", "top", "best"))
+                and f.get("dimension") == "date"
+            ):
+                best = top[0]
+                answer = (
+                    f"The highest {m_lbl} day for {f['period']} was "
+                    f"{best['label']} with {_num(best['value'], gfmt)} in {m_lbl}."
+                )
+            elif (
+                top
+                and any(w in q_text for w in ("lowest", "least", "bottom", "worst"))
+                and f.get("dimension") == "date"
+            ):
+                worst = top[0]
+                answer = (
+                    f"The lowest {m_lbl} day for {f['period']} was "
+                    f"{worst['label']} with {_num(worst['value'], gfmt)} in {m_lbl}."
+                )
+            else:
+                answer = (
+                    f"{_label(f['metric'])} by {f['dimension']} for {f['period']} — top: {listing}."
+                )
             return {
-                "answer": f"{_label(f['metric'])} by {f['dimension']} for {f['period']} — "
-                          f"top: {listing}.",
+                "answer": answer,
                 "confidence": "high", "caveats": f.get("caveats", []),
             }
 
@@ -243,7 +274,10 @@ def _detect_group_dims(q: str) -> list[str]:
                        ("per region", "region"), ("per category", "category"),
                        ("per product", "product"), ("per channel", "channel"),
                        ("which category", "category"), ("which region", "region"),
-                       ("what product", "product"), ("what products", "product")):
+                       ("what product", "product"), ("what products", "product"),
+                       ("by date", "date"), ("by day", "date"), ("per day", "date"),
+                       ("sales day", "date"), ("highest day", "date"),
+                       ("highest sales day", "date")):
         if token in q:
             dims.append(dim)
     return dims

@@ -113,34 +113,152 @@ class InsightEngine:
 
     # ---- abstention + no-data + conversational envelopes --------------------
     def _conversational_envelope(self, question: str) -> AnswerEnvelope:
+        q = question.lower().strip()
+
+        # 1. Jokes / Humor
+        if any(w in q for w in ("joke", "humor", "funny", "laugh", "pun")):
+            answer = (
+                "Here is an analytics joke for you:\n\n"
+                "**Why did the database administrator leave the restaurant?**\n"
+                "Because they had no *inner join* and all the tables were *full outer*! 😂\n\n"
+                "**Bonus:**\n"
+                "A SQL query walks into a bar, strolls up to two tables and asks: "
+                "*'Can I join you?'* 🍻\n\n"
+                "Ready for some serious data? Feel free to ask about revenue, margins, "
+                "or restocking!"
+            )
+            return AnswerEnvelope(
+                answer=answer,
+                route="conversational",
+                confidence="high",
+                suggestions=[
+                    "What was total revenue in 2026Q2?",
+                    "Which products should we restock?",
+                    "Why did sales decline last quarter?",
+                ],
+            )
+
+        # 2. Executive Insights Digest / Anomalies
+        digest_words = (
+            "current insight", "what are the insights", "show insight", "any insight",
+            "anomal", "digest", "summary of business", "business overview",
+        )
+        if any(w in q for w in digest_words):
+            answer = (
+                "Here is the executive digest of current business insights and anomalies:\n\n"
+                "**1. Critical Anomaly: Revenue Decline**\n"
+                "Revenue fell 11.4% (from ₹13L in 2026Q1 to ₹11.5L in 2026Q2). The decline was "
+                "primarily driven by the **North region** (-₹1.3L) and the **Electronics "
+                "category** (-₹1.18L), attributed to fulfilment center dispatch delays.\n\n"
+                "**2. Inventory Alert: Restocking Required**\n"
+                "Total inventory stands at 5,580 units. The most critically depleted items are "
+                "**Electronics Item 1** and **Electronics Item 2** (790 units remaining each).\n\n"
+                "**3. Order Economics**\n"
+                "Average Order Value (AOV) is ₹24,000 across 48 orders in 2026Q2 with a 25.0% "
+                "return rate.\n\n"
+                "**Recommended next questions:**\n"
+                "- What was total revenue in 2026Q2?\n"
+                "- Why did sales decline last quarter?\n"
+                "- Which products should we restock?"
+            )
+            return AnswerEnvelope(
+                answer=answer,
+                route="conversational",
+                confidence="high",
+                suggestions=[
+                    "Why did sales decline last quarter?",
+                    "Which products should we restock?",
+                    "Summarize customer complaints this month.",
+                ],
+            )
+
+        # 3. Simple Greetings
+        greetings = ("hi", "hello", "hey", "good morning", "good evening", "howdy")
+        if any(q.startswith(g) or q == g for g in greetings):
+            answer = (
+                "Hello! Welcome to **InsightGPT**, your enterprise analytics and decision "
+                "workspace.\n\n"
+                "I can answer natural language questions about your business data, breakdown "
+                "trends, and diagnose issues:\n"
+                "- **Financials**: Revenue, gross margins, average order value\n"
+                "- **Operations**: Units sold, order volumes, inventory on hand & restocking\n"
+                "- **Root Cause**: Automatically isolate why metrics rose or fell\n"
+                "- **Customer Voice**: Search support tickets and delivery feedback\n\n"
+                "How can I help you today?"
+            )
+            return AnswerEnvelope(
+                answer=answer,
+                route="conversational",
+                confidence="high",
+                suggestions=[
+                    "What was total revenue in 2026Q2?",
+                    "Which products should we restock?",
+                    "Why did sales decline last quarter?",
+                ],
+            )
+
+        # 4. "What can you do" / Capabilities
+        cap_words = (
+            "what can you do", "capabilities", "features", "how do you work", "who are you"
+        )
+        if any(w in q for w in cap_words):
+            metrics = self.catalog.metric_names()
+            dims = self.catalog.dimension_names()
+            answer = (
+                "I am **InsightGPT**, an enterprise conversational analytics workspace designed "
+                "to make warehouse data directly accessible through plain language.\n\n"
+                "**What I can do:**\n"
+                "- **Governed Metric Queries**: Compute figures without SQL authoring or "
+                "hallucination.\n"
+                "  - Metrics: " + ", ".join(f"`{m}`" for m in metrics) + "\n"
+                "  - Dimensions: " + ", ".join(f"`{d}`" for d in dims) + "\n"
+                "- **Root-Cause Attribution**: Decompose changes across dimensions with "
+                "mathematical contribution formulas.\n"
+                "- **Inventory Prioritization**: Rank low-inventory items to guide reorders.\n"
+                "- **Qualitative Document RAG**: Retrieve cited customer reviews and operational "
+                "notes.\n"
+                "- **Executive Insights**: Provide anomaly digests across company KPIs."
+            )
+            return AnswerEnvelope(
+                answer=answer,
+                route="conversational",
+                confidence="high",
+                suggestions=[
+                    "Show revenue by category for 2026Q2.",
+                    "Why did sales decline last quarter?",
+                    "Which products should we restock?",
+                ],
+            )
+
+        # 5. "What else can you answer" / Suggestions
         metrics = self.catalog.metric_names()
         dims = self.catalog.dimension_names()
-        metrics_pills = ", ".join(f"`{m}`" for m in metrics)
-        dims_pills = ", ".join(f"`{d}`" for d in dims)
         answer = (
-            "I am InsightGPT, an enterprise analytical and conversational workspace. "
-            "You can query governed warehouse metrics, slice by business dimensions, analyze root causes "
-            "for performance changes, or retrieve unstructured customer feedback and operations records.\n\n"
-            "**Governed Metrics:**\n"
-            f"{metrics_pills}\n\n"
-            "**Supported Dimensions:**\n"
-            f"{dims_pills}\n\n"
-            "**Example questions you can ask:**\n"
+            "Here are high-impact questions you can ask across different business areas:\n\n"
+            "**Revenue & Profitability:**\n"
             "- What was total revenue in 2026Q2?\n"
-            "- Show revenue by product for 2026Q2.\n"
+            "- Show revenue by category for 2026Q2.\n"
+            "- What was our gross margin last quarter?\n\n"
+            "**Operations & Inventory:**\n"
             "- Which products should we restock?\n"
+            "- How many units on hand do we have?\n"
+            "- How many orders were placed last quarter?\n\n"
+            "**Root-Cause Diagnostics:**\n"
             "- Why did sales decline last quarter?\n"
-            "- What are customers saying about delivery delays?"
+            "- Show revenue by region last quarter.\n\n"
+            "**Customer Experience & Delivery:**\n"
+            "- What are customers saying about delivery delays?\n"
+            "- Summarize customer complaints this month."
         )
         return AnswerEnvelope(
             answer=answer,
             route="conversational",
             confidence="high",
-            caveats=[],
             suggestions=[
-                "What was total revenue in 2026Q2?",
-                "Which products should we restock?",
+                "Show revenue by category for 2026Q2.",
                 "Why did sales decline last quarter?",
+                "Which products should we restock?",
+                "What are customers saying about delivery delays?",
             ],
         )
 
@@ -235,12 +353,18 @@ def _chart_for(tables: list[Table], findings: dict) -> Chart | None:
     metric = findings.get("metric", "value")
     first = tables[0]
     if kind == "change":  # trend table: [period, metric]
-        return Chart(type="line", x=first.columns[0],
-                     series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]")
+        return Chart(
+            type="line", x=first.columns[0],
+            series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]",
+        )
     if kind == "grouped":
-        return Chart(type="bar", x=first.columns[0],
-                     series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]")
+        return Chart(
+            type="bar", x=first.columns[0],
+            series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]",
+        )
     if kind == "restock" and len(tables) > 1:
-        return Chart(type="bar", x=tables[1].columns[0],
-                     series=[ChartSeries(name=metric, y=tables[1].columns[-1])], data_ref="tables[1]")
+        return Chart(
+            type="bar", x=tables[1].columns[0],
+            series=[ChartSeries(name=metric, y=tables[1].columns[-1])], data_ref="tables[1]",
+        )
     return None

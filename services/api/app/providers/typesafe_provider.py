@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any
 
 from .base import Provider
 from .fake import (
@@ -30,7 +29,9 @@ logger = logging.getLogger(__name__)
 class TypeSafeProvider(Provider):
     name = "typesafe"
 
-    def __init__(self, api_key: str | None = None, model: str = "jev-latest", timeout: float = 30.0):
+    def __init__(
+        self, api_key: str | None = None, model: str = "jev-latest", timeout: float = 30.0
+    ):
         self.api_key = api_key or os.getenv("TYPESAFE_API_KEY")
         self.model = model or os.getenv("TYPESAFE_MODEL", "jev-latest")
         self.timeout = timeout
@@ -42,7 +43,9 @@ class TypeSafeProvider(Provider):
                 from typesafe_sdk import TypeSafeClient
                 self._client = TypeSafeClient(api_key=self.api_key, timeout=self.timeout)
             except Exception as e:
-                logger.warning("Failed to initialize TypeSafeClient (%s); falling back to offline", e)
+                logger.warning(
+                    "Failed to initialize TypeSafeClient (%s); falling back to offline", e
+                )
 
     def complete(self, prompt: str, **opts) -> str:
         task = _task_of(prompt)
@@ -64,19 +67,47 @@ class TypeSafeProvider(Provider):
             return self.fallback.complete(prompt, **opts)
 
     def _route_with_jev(self, p: dict) -> dict:
+        import re
+
         from typesafe_sdk import Choice, Noul
 
         q = str(p.get("question", "")).strip()
+        q_lower = q.lower()
+        q_words = set(re.findall(r"\b\w+\b", q_lower))
         today_str = p.get("today", "2026-07-15")
         metrics = list(p.get("metrics", []))
         dimensions = list(p.get("dimensions", []))
+
+        # Fast-path for conversational intents (jokes, greetings, help, executive digest)
+        conversational_patterns = (
+            "what else can you answer", "what can you do", "what can i ask",
+            "what do you do", "who are you", "what are your capabilities",
+            "how does this work", "how do you work", "joke", "humor", "funny", "laugh",
+            "current insight", "current insights", "what are the insights", "show insight",
+            "show insights", "any insight", "anomal", "digest", "summary of business",
+            "business overview",
+        )
+        if any(w in q_lower for w in conversational_patterns) or bool(
+            q_words & {"help", "hello", "hi", "hey"}
+        ):
+            return {
+                "route": "conversational",
+                "metric": None,
+                "time_range": None,
+                "prior_time_range": None,
+                "group_dims": [],
+                "entities": {},
+                "is_change_question": False,
+                "needs_docs": False,
+                "clarify": None,
+            }
 
         metric_criteria = {
             "revenue": "Total sales, revenue, top-line income, or turnover",
             "gross_margin": "Gross profit or margin (revenue minus COGS)",
             "orders": "Number of orders, transactions, or order volume",
             "units_sold": "Units sold, volume of items sold, quantity sold",
-            "avg_order_value": "Average order value (AOV), basket size",
+            "avg_order_value": "Average order value (AOV), basket size, average sale",
             "return_rate": "Return rate or product returns percentage",
             "units_on_hand": "Units on hand, current inventory, stock levels, restocking",
         }
@@ -92,6 +123,7 @@ class TypeSafeProvider(Provider):
             "channel": "Sales channels (e.g. Online, In-store)",
             "store": "Retail store locations",
             "segment": "Customer segments",
+            "date": "Time breakdown, date, day of sales, daily trends",
         }
         for d in dimensions:
             if d not in dim_criteria:
@@ -104,19 +136,20 @@ class TypeSafeProvider(Provider):
                     "Classify this user question for a business analytics and operations engine. "
                     "Select: "
                     "'structured' if answerable from warehouse tables and metrics alone; "
-                    "'unstructured' if asking about text documents, reviews, or customer feedback alone; "
-                    "'hybrid' if asking for both metrics and reasons/causes/thematic documents (e.g. 'why did revenue drop'); "
-                    "'conversational' if asking about capabilities, help, greetings, or who the assistant is."
+                    "'unstructured' if asking about text documents or reviews alone; "
+                    "'hybrid' if asking for both metrics and causes (e.g. 'why did revenue drop'); "
+                    "'conversational' if asking about capabilities, help, greetings, jokes, "
+                    "or current insights digest."
                 ),
                 criteria={
                     "structured": "Answerable from metrics/data alone",
                     "unstructured": "Answerable from customer feedback or documents alone",
                     "hybrid": "Requires numbers plus causal or thematic documents",
-                    "conversational": "General capabilities, help, or greetings",
+                    "conversational": "General capabilities, help, greetings, jokes, or digest",
                 },
             ),
             "is_change": Noul(
-                instructions="Is this question asking why a metric changed, grew, declined, or comparing periods?",
+                instructions="Is this question asking why a metric changed, grew, or declined?",
             ),
             "metric": Choice(
                 instructions="Which governed metric is requested by the user?",
@@ -139,7 +172,13 @@ class TypeSafeProvider(Provider):
         metric_choice = res.choices["metric"].choice
         dim_choice = res.choices["dimension"].choice
 
-        if is_change and ("why" in q.lower() or "cause" in q.lower() or "reason" in q.lower()):
+        day_words = (
+            "sales day", "highest day", "best day", "worst day", "by day", "by date", "per day"
+        )
+        if any(w in q_lower for w in day_words):
+            dim_choice = "date"
+
+        if is_change and ("why" in q_lower or "cause" in q_lower or "reason" in q_lower):
             route_choice = "hybrid"
 
         metric = None if metric_choice == "none" else metric_choice

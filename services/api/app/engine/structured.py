@@ -123,17 +123,30 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
 
     # --- restock question: return scalar total for eval + product breakdown ---
     if metric == "units_on_hand" and any(w in question.lower() for w in ("restock", "reorder")):
-        selection = MetricSelection(metric=metric, dimensions=[], filters=[_time_filter(time_range)])
+        selection = MetricSelection(
+            metric=metric, dimensions=[], filters=[_time_filter(time_range)]
+        )
         out = _run_sel(corr, selection, f"scalar:{metric}", attempts, expect_rows=True)
         sql.append(out.built.sql)
         eff_metric = out.selection.metric
-        total_units = float(out.result.rows[0][0]) if out.result.rows and out.result.rows[0][0] is not None else 0.0
+        total_units = (
+            float(out.result.rows[0][0])
+            if out.result.rows and out.result.rows[0][0] is not None
+            else 0.0
+        )
         tables.append(Table(title=f"{eff_metric}", columns=[eff_metric], rows=[[total_units]]))
 
-        prod_sel = MetricSelection(metric=metric, dimensions=["product"], filters=[_time_filter(time_range)], order_by_metric="asc")
+        prod_sel = MetricSelection(
+            metric=metric, dimensions=["product"],
+            filters=[_time_filter(time_range)], order_by_metric="asc"
+        )
         prod_out = _run_sel(corr, prod_sel, "grouped:product:restock", attempts, expect_rows=False)
         sql.append(prod_out.built.sql)
-        tables.append(Table(title=f"{eff_metric} by product", columns=prod_out.result.columns, rows=prod_out.result.rows))
+        tables.append(Table(
+            title=f"{eff_metric} by product",
+            columns=prod_out.result.columns,
+            rows=prod_out.result.rows,
+        ))
         product_rows = [{"label": r[0], "value": float(r[1])} for r in prod_out.result.rows]
         findings = {
             "kind": "restock",
@@ -148,10 +161,15 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
     # --- grouped question -----------------------------------------------------
     if route.get("group_dims"):
         dim = route["group_dims"][0]
-        order = "asc" if any(w in question.lower() for w in ("lowest", "least", "bottom")) else "desc"
+        order = (
+            "asc" if any(w in question.lower() for w in ("lowest", "least", "bottom"))
+            else "desc"
+        )
+        is_daily = dim == "date" and any(w in question.lower() for w in ("day", "daily"))
+        time_grain = "day" if is_daily else None
         selection = MetricSelection(
             metric=metric, dimensions=[dim], filters=[_time_filter(time_range)],
-            order_by_metric=order,
+            time_grain=time_grain, order_by_metric=order,
         )
         out = _run_sel(corr, selection, f"grouped:{dim}", attempts, expect_rows=True)
         sql.append(out.built.sql)
@@ -171,10 +189,10 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         eff_dim = eff_dims[0]
         tables.append(Table(title=f"{eff_metric} by {eff_dim}",
                             columns=out.result.columns, rows=out.result.rows))
-        rows = [{"label": r[0], "value": float(r[1])} for r in out.result.rows]
+        rows = [{"label": str(r[0]), "value": float(r[1])} for r in out.result.rows]
         findings = {"kind": "grouped", "metric": eff_metric, "dimension": eff_dim,
                     "format": _format_of(catalog, eff_metric),
-                    "period": _period_label(time_range), "rows": rows}
+                    "period": _period_label(time_range), "rows": rows, "question": question}
         return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
 
     # --- scalar question ------------------------------------------------------
