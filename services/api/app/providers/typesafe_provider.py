@@ -71,11 +71,32 @@ class TypeSafeProvider(Provider):
         metrics = list(p.get("metrics", []))
         dimensions = list(p.get("dimensions", []))
 
-        metric_criteria: dict[str, Any] = {m: None for m in metrics}
-        metric_criteria["none"] = "None of the listed governed metrics"
+        metric_criteria = {
+            "revenue": "Total sales, revenue, top-line income, or turnover",
+            "gross_margin": "Gross profit or margin (revenue minus COGS)",
+            "orders": "Number of orders, transactions, or order volume",
+            "units_sold": "Units sold, volume of items sold, quantity sold",
+            "avg_order_value": "Average order value (AOV), basket size",
+            "return_rate": "Return rate or product returns percentage",
+            "units_on_hand": "Units on hand, current inventory, stock levels, restocking",
+        }
+        for m in metrics:
+            if m not in metric_criteria:
+                metric_criteria[m] = f"Metric for {m}"
+        metric_criteria["none"] = "None of the governed metrics"
 
-        dim_criteria: dict[str, Any] = {d: None for d in dimensions}
-        dim_criteria["none"] = "No grouping or slice dimension"
+        dim_criteria = {
+            "region": "Geographic regions (e.g. North, South, East, West)",
+            "category": "Product categories (e.g. Electronics, Apparel, Home)",
+            "product": "Specific individual products or items",
+            "channel": "Sales channels (e.g. Online, In-store)",
+            "store": "Retail store locations",
+            "segment": "Customer segments",
+        }
+        for d in dimensions:
+            if d not in dim_criteria:
+                dim_criteria[d] = f"Dimension for {d}"
+        dim_criteria["none"] = "No grouping dimension requested"
 
         questions = {
             "route": Choice(
@@ -117,6 +138,9 @@ class TypeSafeProvider(Provider):
         is_change = res.nouls["is_change"].noul >= 0.5
         metric_choice = res.choices["metric"].choice
         dim_choice = res.choices["dimension"].choice
+
+        if is_change and ("why" in q.lower() or "cause" in q.lower() or "reason" in q.lower()):
+            route_choice = "hybrid"
 
         metric = None if metric_choice == "none" else metric_choice
         group_dims = [] if dim_choice == "none" else [dim_choice]
