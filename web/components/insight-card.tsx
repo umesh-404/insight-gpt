@@ -64,6 +64,71 @@ const CONFIDENCE_CLASS: Record<Confidence, string> = {
  * Markers with no matching citation stay plain text: mid-stream, the narrative
  * arrives before the `citations` frame, and a dead chip would flicker in.
  */
+function parseInline(
+  text: string,
+  citationNumbers: Set<number>,
+  onCite?: (n: number) => void,
+): React.ReactNode[] {
+  const tokenRegex = /(\[(\d{1,3})\])|(\*\*(.+?)\*\*)|(`([^`]+)`)|(\*([^*]+)\*)/g;
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      nodes.push(text.slice(lastIndex, match.index));
+    }
+
+    if (match[1]) {
+      const n = Number(match[2]);
+      if (citationNumbers.has(n)) {
+        nodes.push(
+          <button
+            key={`cite-${match.index}-${n}`}
+            type="button"
+            onClick={() => onCite?.(n)}
+            aria-label={`Jump to source ${n}`}
+            className="mx-px inline-flex min-w-[1.25rem] translate-y-[-1px] items-center justify-center rounded border border-primary/25 bg-primary/10 px-1 align-middle text-2xs font-semibold tabular-nums text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
+          >
+            {n}
+          </button>,
+        );
+      } else {
+        nodes.push(match[0]);
+      }
+    } else if (match[3]) {
+      nodes.push(
+        <strong key={`b-${match.index}`} className="font-semibold text-foreground">
+          {match[4]}
+        </strong>,
+      );
+    } else if (match[5]) {
+      nodes.push(
+        <code
+          key={`c-${match.index}`}
+          className="mx-0.5 rounded border border-border/70 bg-muted/80 px-1.5 py-0.5 font-mono text-xs font-medium text-foreground inline-block"
+        >
+          {match[6]}
+        </code>,
+      );
+    } else if (match[7]) {
+      nodes.push(
+        <em key={`i-${match.index}`} className="italic text-foreground/90">
+          {match[8]}
+        </em>,
+      );
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex));
+  }
+
+  return nodes;
+}
+
 function AnswerText({
   text,
   citationNumbers,
@@ -73,33 +138,62 @@ function AnswerText({
   citationNumbers: Set<number>;
   onCite?: (n: number) => void;
 }) {
-  const nodes = React.useMemo(() => {
-    const out: React.ReactNode[] = [];
-    const pattern = /\[(\d{1,3})\]/g;
-    let last = 0;
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(text)) !== null) {
-      const n = Number(match[1]);
-      if (!citationNumbers.has(n)) continue;
-      if (match.index > last) out.push(text.slice(last, match.index));
-      out.push(
-        <button
-          key={`cite-${match.index}-${n}`}
-          type="button"
-          onClick={() => onCite?.(n)}
-          aria-label={`Jump to source ${n}`}
-          className="mx-px inline-flex min-w-[1.25rem] translate-y-[-1px] items-center justify-center rounded border border-primary/25 bg-primary/10 px-1 align-middle text-2xs font-semibold tabular-nums text-primary transition-colors hover:bg-primary hover:text-primary-foreground"
-        >
-          {n}
-        </button>,
+  const blocks = React.useMemo(() => {
+    const rawBlocks = text.split(/\n\s*\n/);
+
+    return rawBlocks.map((block, bIdx) => {
+      const trimmed = block.trim();
+      if (!trimmed) return null;
+
+      const lines = trimmed.split('\n');
+      const isList = lines.length > 0 && lines.every((l) => /^\s*[-*•]\s+/.test(l));
+
+      if (isList) {
+        return (
+          <ul key={`b-${bIdx}`} className="my-2 space-y-1.5 pl-4 list-disc marker:text-primary/70 text-sm">
+            {lines.map((line, lIdx) => {
+              const content = line.replace(/^\s*[-*•]\s+/, '');
+              return (
+                <li key={`li-${bIdx}-${lIdx}`} className="leading-relaxed">
+                  {parseInline(content, citationNumbers, onCite)}
+                </li>
+              );
+            })}
+          </ul>
+        );
+      }
+
+      if (/^#{1,4}\s+/.test(trimmed)) {
+        const heading = trimmed.replace(/^#{1,4}\s+/, '');
+        return (
+          <h4 key={`b-${bIdx}`} className="font-semibold text-sm text-foreground pt-1.5 pb-0.5">
+            {parseInline(heading, citationNumbers, onCite)}
+          </h4>
+        );
+      }
+
+      if (/^\*\*[^*]+:?\*\*\s*$/.test(trimmed)) {
+        return (
+          <h4 key={`b-${bIdx}`} className="font-semibold text-sm text-foreground pt-1.5 pb-0.5">
+            {parseInline(trimmed, citationNumbers, onCite)}
+          </h4>
+        );
+      }
+
+      return (
+        <p key={`b-${bIdx}`} className="leading-relaxed">
+          {lines.map((line, lIdx) => (
+            <React.Fragment key={`l-${bIdx}-${lIdx}`}>
+              {lIdx > 0 ? <br /> : null}
+              {parseInline(line, citationNumbers, onCite)}
+            </React.Fragment>
+          ))}
+        </p>
       );
-      last = match.index + match[0].length;
-    }
-    if (last < text.length) out.push(text.slice(last));
-    return out;
+    });
   }, [text, citationNumbers, onCite]);
 
-  return <>{nodes}</>;
+  return <div className="space-y-2.5 text-sm">{blocks}</div>;
 }
 
 /** Three rising dots shown before the first token lands. */
@@ -308,7 +402,7 @@ export function InsightCard({
                       No answer was produced for this question.
                     </p>
                   ) : (
-                    <p className="whitespace-pre-wrap">
+                    <div className="leading-relaxed">
                       <AnswerText
                         text={envelope.answer}
                         citationNumbers={citationNumbers}
@@ -320,7 +414,7 @@ export function InsightCard({
                           aria-hidden
                         />
                       ) : null}
-                    </p>
+                    </div>
                   )}
                 </div>
 

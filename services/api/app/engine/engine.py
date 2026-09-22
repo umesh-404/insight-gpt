@@ -115,20 +115,22 @@ class InsightEngine:
     def _conversational_envelope(self, question: str) -> AnswerEnvelope:
         metrics = self.catalog.metric_names()
         dims = self.catalog.dimension_names()
+        metrics_pills = ", ".join(f"`{m}`" for m in metrics)
+        dims_pills = ", ".join(f"`{d}`" for d in dims)
         answer = (
-            "I am InsightGPT, an enterprise analytical and conversational assistant. "
-            "I can answer natural language questions about governed business metrics, breakdown dimensions, "
-            "root-cause changes, or retrieve unstructured customer feedback and operations notes.\n\n"
+            "I am InsightGPT, an enterprise analytical and conversational workspace. "
+            "You can query governed warehouse metrics, slice by business dimensions, analyze root causes "
+            "for performance changes, or retrieve unstructured customer feedback and operations records.\n\n"
             "**Governed Metrics:**\n"
-            + ", ".join(f"`{m}`" for m in metrics) + "\n\n"
+            f"{metrics_pills}\n\n"
             "**Supported Dimensions:**\n"
-            + ", ".join(f"`{d}`" for d in dims) + "\n\n"
+            f"{dims_pills}\n\n"
             "**Example questions you can ask:**\n"
-            "- *What was total revenue in 2026Q2?*\n"
-            "- *Show revenue by product for 2026Q2.*\n"
-            "- *Which products should we restock?*\n"
-            "- *Why did sales decline last quarter?*\n"
-            "- *What are customers saying about delivery delays?*"
+            "- What was total revenue in 2026Q2?\n"
+            "- Show revenue by product for 2026Q2.\n"
+            "- Which products should we restock?\n"
+            "- Why did sales decline last quarter?\n"
+            "- What are customers saying about delivery delays?"
         )
         return AnswerEnvelope(
             answer=answer,
