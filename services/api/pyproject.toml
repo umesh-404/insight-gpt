@@ -13,6 +13,7 @@ dependencies = [
     "sqlglot>=25.0",            # parses generated SQL for the guardrails (not regex)
     "httpx>=0.27",              # LLM provider HTTP (Ollama + cloud)
     "duckdb>=1.0",              # fixture warehouse so the engine runs with no external DB
+    "typesafe-sdk>=0.7.1",
 ]
 
 [project.optional-dependencies]

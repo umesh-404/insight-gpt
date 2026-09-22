@@ -53,6 +53,9 @@ class InsightEngine:
                 route="clarify", confidence="low", clarifying_question=r["clarify"],
             )
 
+        if r["route"] == "conversational":
+            return self._conversational_envelope(question)
+
         # The question named a metric that is not in the governed catalog and no
         # documents can stand in for it: refuse rather than compute the wrong
         # thing (docs/05 §9). Abstention is distinct from clarification — we
@@ -108,7 +111,37 @@ class InsightEngine:
             attempts=attempts,
         )
 
-    # ---- abstention + no-data envelopes --------------------------------------
+    # ---- abstention + no-data + conversational envelopes --------------------
+    def _conversational_envelope(self, question: str) -> AnswerEnvelope:
+        metrics = self.catalog.metric_names()
+        dims = self.catalog.dimension_names()
+        answer = (
+            "I am InsightGPT, an enterprise analytical and conversational assistant. "
+            "I can answer natural language questions about governed business metrics, breakdown dimensions, "
+            "root-cause changes, or retrieve unstructured customer feedback and operations notes.\n\n"
+            "**Governed Metrics:**\n"
+            + ", ".join(f"`{m}`" for m in metrics) + "\n\n"
+            "**Supported Dimensions:**\n"
+            + ", ".join(f"`{d}`" for d in dims) + "\n\n"
+            "**Example questions you can ask:**\n"
+            "- *What was total revenue in 2026Q2?*\n"
+            "- *Show revenue by product for 2026Q2.*\n"
+            "- *Which products should we restock?*\n"
+            "- *Why did sales decline last quarter?*\n"
+            "- *What are customers saying about delivery delays?*"
+        )
+        return AnswerEnvelope(
+            answer=answer,
+            route="conversational",
+            confidence="high",
+            caveats=[],
+            suggestions=[
+                "What was total revenue in 2026Q2?",
+                "Which products should we restock?",
+                "Why did sales decline last quarter?",
+            ],
+        )
+
     def _abstain(self, reason: str, suggestions: list[str],
                  attempts: list[CorrectionAttempt] | None = None) -> AnswerEnvelope:
         return AnswerEnvelope(
@@ -205,4 +238,7 @@ def _chart_for(tables: list[Table], findings: dict) -> Chart | None:
     if kind == "grouped":
         return Chart(type="bar", x=first.columns[0],
                      series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]")
+    if kind == "restock" and len(tables) > 1:
+        return Chart(type="bar", x=tables[1].columns[0],
+                     series=[ChartSeries(name=metric, y=tables[1].columns[-1])], data_ref="tables[1]")
     return None

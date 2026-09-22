@@ -274,6 +274,21 @@ async def delete_conversation(
     return {"status": "deleted", "id": conversation_id}
 
 
+class FeedbackRequest(BaseModel):
+    message_id: str = Field(min_length=1, max_length=200)
+    rating: str = Field(pattern=r"^(up|down)$")
+    reason: str | None = None
+
+
+@router.post("/feedback", status_code=200)
+async def submit_feedback(
+    body: FeedbackRequest,
+    claims: TokenClaims = Depends(current_claims),
+) -> dict[str, str]:
+    log.info("Feedback received for turn %s: rating=%s user=%s", body.message_id, body.rating, claims.sub)
+    return {"status": "recorded", "message_id": body.message_id}
+
+
 def _trace(request: Request, engine: InsightEngine, started: float, env: AnswerEnvelope) -> None:
     provider = getattr(engine.provider, "name", "unknown")
     model = getattr(engine.provider, "model", provider)

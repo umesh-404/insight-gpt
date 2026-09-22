@@ -14,7 +14,7 @@ from ..providers.base import Provider, extract_json
 from ..semantic.catalog import SemanticCatalog
 from .prompts import route_prompt
 
-_VALID_ROUTES = {"structured", "unstructured", "hybrid"}
+_VALID_ROUTES = {"structured", "unstructured", "hybrid", "conversational"}
 
 
 def route(question: str, catalog: SemanticCatalog, provider: Provider, today: str) -> dict:
@@ -32,6 +32,21 @@ def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
                 "entities": {}, "is_change_question": False, "needs_docs": False}
 
     r = obj.get("route")
+    if r == "conversational":
+        return {
+            "route": "conversational",
+            "metric": None,
+            "requested_metric": None,
+            "metric_unresolved": False,
+            "time_range": None,
+            "prior_time_range": None,
+            "group_dims": [],
+            "entities": {},
+            "is_change_question": False,
+            "needs_docs": False,
+            "clarify": None,
+        }
+
     if r not in _VALID_ROUTES:
         r = "structured"
 

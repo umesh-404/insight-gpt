@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import calendar
 import json
+import re
 from datetime import date
 
 from ..formatting import format_value
@@ -45,6 +46,13 @@ _TIME_WORDS = ("quarter", "month", "year", "week", "today", "yesterday",
 _DOC_WORDS = ("complain", "complaint", "review", "feedback", "summar", "theme",
               "saying", "sentiment", "issue")
 
+_CONVERSATIONAL_WORDS = (
+    "what else can you answer", "what can you do", "what can i ask",
+    "what do you do", "who are you", "what are your capabilities",
+    "how does this work", "how do you work",
+)
+_CONVERSATIONAL_EXACT = {"help", "hello", "hi", "hey"}
+
 
 class FakeProvider(Provider):
     name = "fake"
@@ -61,6 +69,20 @@ class FakeProvider(Provider):
     # ---- routing -------------------------------------------------------------
     def _route(self, p: dict) -> dict:
         q = str(p.get("question", "")).lower()
+        q_words = set(re.findall(r"\b\w+\b", q))
+        if any(w in q for w in _CONVERSATIONAL_WORDS) or bool(q_words & _CONVERSATIONAL_EXACT):
+            return {
+                "route": "conversational",
+                "metric": None,
+                "time_range": None,
+                "prior_time_range": None,
+                "group_dims": [],
+                "entities": {},
+                "is_change_question": False,
+                "needs_docs": False,
+                "clarify": None,
+            }
+
         today = _parse_date(p.get("today", "2026-07-15"))
         metrics = p.get("metrics", [])
 
@@ -141,6 +163,18 @@ class FakeProvider(Provider):
             conf = "high" if evidence else "medium"
             return {"answer": " ".join(parts), "confidence": conf, "caveats": f.get("caveats", [])}
 
+        if kind == "restock":
+            fmt = f.get("format", "number")
+            total = f.get("total_units", 0)
+            rows = f.get("rows", [])
+            top_restock = rows[:4]
+            listing = ", ".join(f"{r['label']} ({_num(r['value'], fmt)} units)" for r in top_restock)
+            answer = (
+                f"Units on hand for {f.get('period', 'the period')} was {_num(total, fmt)}. "
+                f"Priority products to restock first: {listing}."
+            ) if top_restock else f"Units on hand for {f.get('period', 'the period')} was {_num(total, fmt)}."
+            return {"answer": answer, "confidence": "high", "caveats": []}
+
         if kind == "scalar":
             return {
                 "answer": f"{_label(f['metric'])} for {f['period']} was "
@@ -206,7 +240,10 @@ def _detect_group_dims(q: str) -> list[str]:
     dims = []
     for token, dim in (("by region", "region"), ("by category", "category"),
                        ("by product", "product"), ("by channel", "channel"),
-                       ("per region", "region"), ("per category", "category")):
+                       ("per region", "region"), ("per category", "category"),
+                       ("per product", "product"), ("per channel", "channel"),
+                       ("which category", "category"), ("which region", "region"),
+                       ("what product", "product"), ("what products", "product")):
         if token in q:
             dims.append(dim)
     return dims
