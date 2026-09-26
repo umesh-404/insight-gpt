@@ -71,9 +71,9 @@ def _sample_count(mean: float, rng: random.Random) -> int:
     if mean <= 0:
         return 0
     noisy = mean * rng.uniform(0.8, 1.2)
-    whole = int(noisy)
-    frac = noisy - whole
-    return whole + (1 if rng.random() < frac else 0)
+    whole_count = int(noisy)
+    fraction = noisy - whole_count
+    return whole_count + (1 if rng.random() < fraction else 0)
 
 
 def _index_by(products: list[Product]) -> dict[str, list[Product]]:
