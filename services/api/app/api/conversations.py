@@ -94,6 +94,7 @@ class _Entry(BaseModel):
     created_at: datetime
     updated_at: datetime
     messages: list[Message] = Field(default_factory=list)
+    attachments: list[dict] = Field(default_factory=list)
 
 
 _LOCK = threading.RLock()
@@ -190,6 +191,7 @@ def append_turn(
     question: str,
     message_id: str,
     envelope: AnswerEnvelope,
+    attachments: list[dict] | None = None,
 ) -> Conversation:
     """Record a question + its answer, creating the conversation when needed.
 
@@ -215,6 +217,15 @@ def append_turn(
             # Only ever re-derive a title the user has not chosen. A renamed
             # thread keeps its name for every subsequent turn.
             entry.title = derive_title(question)
+
+        # Retain uploaded files in conversation context memory
+        if attachments:
+            existing_names = {a.get("name") for a in entry.attachments}
+            for att in attachments:
+                if att.get("name") not in existing_names:
+                    entry.attachments.append(att)
+                    existing_names.add(att.get("name"))
+
         entry.messages.append(
             Message(
                 id=new_id("m"),
@@ -234,6 +245,32 @@ def append_turn(
         )
         entry.updated_at = now
         return _view(entry)
+
+
+def get_conversation_attachments(user_id: str, conversation_id: str) -> list[dict]:
+    """Retrieve all attachments uploaded in this conversation."""
+    with _LOCK:
+        entry = _CONVERSATIONS.get((user_id, conversation_id))
+        if entry is None or not entry.attachments:
+            return []
+        return list(entry.attachments)
+
+
+def get_conversation_history(user_id: str, conversation_id: str, limit: int = 10) -> list[dict]:
+    """Retrieve recent turns as conversation history context."""
+    with _LOCK:
+        entry = _CONVERSATIONS.get((user_id, conversation_id))
+        if entry is None or not entry.messages:
+            return []
+        recent = entry.messages[-limit:]
+        return [
+            {
+                "role": m.role,
+                "content": m.content,
+                "envelope": m.envelope.model_dump() if m.envelope else None,
+            }
+            for m in recent
+        ]
 
 
 def _evict_locked() -> None:

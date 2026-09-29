@@ -46,14 +46,19 @@ class InsightEngine:
         )
 
     # ---- main entry point ----------------------------------------------------
-    def ask(self, question: str, attachments: list[dict] | None = None) -> AnswerEnvelope:
+    def ask(
+        self,
+        question: str,
+        attachments: list[dict] | None = None,
+        history: list[dict] | None = None,
+    ) -> AnswerEnvelope:
         # Grounded processing for uploaded spreadsheets and documents:
         # Computes actual figures, tables, and quotes from uploaded files rather than
         # relying on synthetic/canned responses.
         if attachments:
             from .attachments import answer_attachments_query
 
-            env = answer_attachments_query(question, attachments)
+            env = answer_attachments_query(question, attachments, history=history)
             if env is not None:
                 return env
 

@@ -136,3 +136,100 @@ def test_distributor_price_list_excel():
     assert env.sql
     assert "Column_1" not in env.answer
 
+
+def test_attachment_followup_highest_price_and_item_filter():
+    """Verify follow-up queries like 'which has highest price' and item/weight filter queries."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    headers = [
+        "S. No.", "Description", "Wht GMS", "Case Qty",
+        "DB Invoice Price", "DB Margin 10%", "Retailer Price", "MRP", "DB Case invoice price"
+    ]
+    for col_idx, h in enumerate(headers, start=1):
+        ws.cell(row=1, column=col_idx, value=h)
+
+    data = [
+        [1, "Sai Murugan Plain Papad (70g)", 70, 250, 11.36, 1.14, 12.5, 25.0, 2840.0],
+        [2, "Sai Murugan Plain Papad (100g)", 100, 200, 15.0, 1.50, 16.5, 35.0, 3000.0],
+        [3, "Sai Murugan Plain Papad (150g)", 150, 135, 22.5, 2.25, 24.75, 50.0, 3037.5],
+    ]
+    for r_offset, row_vals in enumerate(data, start=2):
+        for c_offset, val in enumerate(row_vals, start=1):
+            ws.cell(row=r_offset, column=c_offset, value=val)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    engine = InsightEngine.fixture()
+    attachments = [{"name": "ap distributor.xlsx", "kind": "document", "raw_bytes": buf.getvalue()}]
+
+    # Query 1: which has highest price?
+    env_max = engine.ask("which has highest price?", attachments=attachments)
+    assert env_max.route == "structured"
+    assert "50" in env_max.answer or "₹50.00" in env_max.answer
+    assert "150g" in env_max.answer or "Sai Murugan Plain Papad" in env_max.answer
+
+    # Query 2: price of 100g
+    env_filter = engine.ask("what is the price of 100g?", attachments=attachments)
+    assert env_filter.route == "structured"
+    assert "100" in env_filter.answer
+    assert "35" in env_filter.answer or "15" in env_filter.answer
+
+
+def test_conversation_attachment_context_memory():
+    """Verify that attachments uploaded in Turn 1 are remembered in Turn 2 across conversation store."""
+    from app.api.conversations import (
+        append_turn,
+        get_conversation_attachments,
+        get_conversation_history,
+    )
+    from app.engine.envelope import AnswerEnvelope, Citation
+
+    user_id = "test-user-123"
+    conv_id = "conv-multi-turn-001"
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["Item", "MRP"])
+    ws.append(["Premium Widget", 99.0])
+    buf = io.BytesIO()
+    wb.save(buf)
+    file_bytes = buf.getvalue()
+
+    # Turn 1: Attach spreadsheet and ask question
+    att_turn1 = [{"name": "catalog.xlsx", "kind": "document", "raw_bytes": file_bytes}]
+    append_turn(
+        user_id=user_id,
+        conversation_id=conv_id,
+        question="list all items",
+        message_id="msg-turn-1",
+        envelope=AnswerEnvelope(
+            answer="Premium Widget: ₹99.00",
+            route="structured",
+            citations=[Citation(n=1, doc_id="cat1", source_type="excel", title="catalog.xlsx")],
+        ),
+        attachments=att_turn1,
+    )
+
+    # Verify conversation remembered the attachment
+    persisted_atts = get_conversation_attachments(user_id=user_id, conversation_id=conv_id)
+    assert len(persisted_atts) == 1
+    assert persisted_atts[0]["name"] == "catalog.xlsx"
+    assert persisted_atts[0]["raw_bytes"] == file_bytes
+
+    # Turn 2: User asks follow-up with NO attachments sent in this turn
+    turn2_atts = []
+    if not turn2_atts and conv_id:
+        turn2_atts = get_conversation_attachments(user_id=user_id, conversation_id=conv_id)
+
+    assert len(turn2_atts) == 1
+
+    engine = InsightEngine.fixture()
+    history = get_conversation_history(user_id=user_id, conversation_id=conv_id)
+    env2 = engine.ask("what is the price of Premium Widget?", attachments=turn2_atts, history=history)
+    assert env2.route == "structured"
+    assert "99" in env2.answer
+
+

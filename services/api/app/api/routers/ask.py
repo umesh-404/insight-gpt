@@ -187,7 +187,7 @@ def _make_attachment_meta(files: list[UploadFile]) -> list[dict]:
 
 async def _read_ask_payload(request: Request) -> tuple[AskRequest, list[UploadFile], list[dict]]:
     content_type = request.headers.get("content-type", "")
-    if content_type.startswith("multipart/form-data"):
+    if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
         form = await request.form()
         files = form.getlist("files")
         payload = AskRequest(
@@ -200,27 +200,36 @@ async def _read_ask_payload(request: Request) -> tuple[AskRequest, list[UploadFi
     return AskRequest.model_validate(body), [], []
 
 
-def _call_engine(engine: InsightEngine, question: str, attachments: list[dict] | None) -> AnswerEnvelope:
+def _call_engine(
+    engine: InsightEngine,
+    question: str,
+    attachments: list[dict] | None,
+    history: list[dict] | None = None,
+) -> AnswerEnvelope:
     """Support both legacy ``engine.ask(question)`` and attachment-aware ``engine.ask(question, attachments)`` signatures."""
     try:
         params = inspect.signature(engine.ask).parameters
     except (TypeError, ValueError):
         return engine.ask(question, attachments)  # pragma: no cover - fallback for C-extensions
 
-    accepts_attachments = (
+    kwargs: dict[str, Any] = {}
+    if (
         "attachments" in params
         or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
         or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params.values())
-    )
-    if accepts_attachments:
-        return engine.ask(question, attachments)
-    return engine.ask(question)
+    ):
+        kwargs["attachments"] = attachments
+    if "history" in params:
+        kwargs["history"] = history
+
+    return engine.ask(question, **kwargs)
 
 
 async def _run(
     engine: InsightEngine,
     question: str,
     attachments: list[dict] | None = None,
+    history: list[dict] | None = None,
 ) -> AnswerEnvelope:
     """Run the engine, reducing any failure to a sanitized :class:`AskError`.
 
@@ -229,7 +238,7 @@ async def _run(
     request id in the envelope is the key into the full server-side log line.
     """
     try:
-        return await run_in_threadpool(_call_engine, engine, question, attachments)
+        return await run_in_threadpool(_call_engine, engine, question, attachments, history)
     except GuardrailError:
         log.warning("ask rejected by guardrails", exc_info=True)
         raise AskError(
@@ -243,8 +252,12 @@ async def _run(
 
 
 def _persist(
-    claims: TokenClaims, conversation_id: str, question: str, message_id: str,
+    claims: TokenClaims,
+    conversation_id: str,
+    question: str,
+    message_id: str,
     env: AnswerEnvelope,
+    attachments: list[dict] | None = None,
 ) -> None:
     """Append the turn to the caller's conversation; never fail the request."""
     try:
@@ -254,6 +267,7 @@ def _persist(
             question=question,
             message_id=message_id,
             envelope=env,
+            attachments=attachments,
         )
     except Exception:  # noqa: BLE001 — history is best-effort, the answer is not
         log.exception("failed to persist conversation turn")
@@ -269,6 +283,18 @@ async def ask(
     body, uploaded_files, attachments = await _read_ask_payload(request)
     conversation_id = body.conversation_id or store.new_id("c")
     message_id = store.new_id("m")
+
+    # Conversation Context Memory: If no new files were attached in this turn,
+    # recall any attachments uploaded previously in this conversation so
+    # follow-up questions retain full context over uploaded files!
+    if not attachments and conversation_id:
+        conversation_attachments = store.get_conversation_attachments(
+            claims.sub, conversation_id
+        )
+        if conversation_attachments:
+            attachments = conversation_attachments
+
+    history = store.get_conversation_history(claims.sub, conversation_id) if conversation_id else []
     prompt_question = _attach_context(body.question, uploaded_files)
 
     accept = request.headers.get("accept", "")
@@ -277,13 +303,13 @@ async def ask(
     if wants_json:
         started = time.perf_counter()
         try:
-            env = await _run(engine, prompt_question, attachments)
+            env = await _run(engine, prompt_question, attachments, history)
         except AskError as exc:
             if exc.status_code == 400:
                 raise BadRequestError(exc.message) from None
             raise APIError(exc.message) from None
         _trace(request, engine, started, env)
-        _persist(claims, conversation_id, body.question, message_id, env)
+        _persist(claims, conversation_id, body.question, message_id, env, attachments)
         response.headers["X-Conversation-Id"] = conversation_id
         response.headers["X-Message-Id"] = message_id
         return env
@@ -293,7 +319,7 @@ async def ask(
         rid = getattr(request.state, "request_id", "-")
         yield _sse("meta", {"conversation_id": conversation_id, "message_id": message_id})
         try:
-            env = await _run(engine, prompt_question, attachments)
+            env = await _run(engine, prompt_question, attachments, history)
         except AskError as exc:
             yield _sse("error", {"code": exc.code, "message": exc.message, "request_id": rid})
             return
@@ -335,7 +361,7 @@ async def ask(
 
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         _trace(request, engine, started, env)
-        _persist(claims, conversation_id, body.question, message_id, env)
+        _persist(claims, conversation_id, body.question, message_id, env, attachments)
         yield _sse(
             "done",
             {

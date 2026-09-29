@@ -568,6 +568,7 @@ def parse_document_bytes(payload: bytes, filename: str) -> ParsedDocument:
 def answer_spreadsheet_query(
     question: str,
     spreadsheet: ParsedSpreadsheet,
+    history: list[dict] | None = None,
 ) -> AnswerEnvelope:
     """Analyze a user question and compute grounded answers directly over the uploaded spreadsheet."""
     if not spreadsheet.sheets:
@@ -604,15 +605,15 @@ def answer_spreadsheet_query(
     chart: Chart | None = None
     answer_parts: list[str] = []
 
-    # 1. Check for aggregation questions (sum, total, average, max, min)
-    is_price = bool(re.search(r"\b(price|prices|pricing|rate|rates|cost|costs|mrp|invoice|margin)\b", q_lower))
+    # Check for aggregation questions (sum, total, average, max, min)
+    is_price = bool(re.search(r"\b(price|prices|pricing|rate|rates|cost|costs|mrp|invoice|margin|expensive|priciest|costly|cheapest)\b", q_lower))
     is_list = bool(re.search(r"\b(list|show|display|get|all|table|items|products|catalog|give me|what are|view)\b", q_lower))
     is_sum = bool(re.search(r"\b(total|sum|sum of|aggregate)\b", q_lower)) or (
         bool(re.search(r"\b(overall|entire)\b", q_lower)) and not is_list
     )
     is_avg = bool(re.search(r"\b(average|avg|mean)\b", q_lower))
-    is_max = bool(re.search(r"\b(highest|maximum|max|top|best)\b", q_lower))
-    is_min = bool(re.search(r"\b(lowest|minimum|min|bottom|worst)\b", q_lower))
+    is_max = bool(re.search(r"\b(highest|maximum|max|top|best|expensive|priciest|costly|most)\b", q_lower))
+    is_min = bool(re.search(r"\b(lowest|minimum|min|bottom|worst|cheapest|least)\b", q_lower))
     is_count = bool(re.search(r"\b(how many|count|number of rows|number of items|records)\b", q_lower))
     is_group = bool(re.search(r"\b(by|per|breakdown|grouped by)\b", q_lower)) and (matched_cat_cols or len(text_cols) > 0)
 
@@ -658,9 +659,16 @@ def answer_spreadsheet_query(
             f"Top contributors: {top_preview}."
         )
 
-    # B: Top / Highest / Lowest single or list
+    # B: Top / Highest / Lowest single or ranked list
     elif (is_max or is_min) and (matched_num_cols or numeric_cols):
-        num_col = matched_num_cols[0] if matched_num_cols else numeric_cols[0]
+        price_cols = [c for c in cols if any(k in c.lower() for k in ("mrp", "price", "cost", "rate", "invoice")) and c in numeric_cols]
+        if matched_num_cols:
+            num_col = matched_num_cols[0]
+        elif is_price and price_cols:
+            num_col = "MRP" if "MRP" in price_cols else price_cols[0]
+        else:
+            num_col = numeric_cols[0]
+
         num_ident = sanitize_sql_ident(num_col)
         order = "DESC" if is_max else "ASC"
         order_word = "Highest" if is_max else "Lowest"
@@ -684,10 +692,28 @@ def answer_spreadsheet_query(
         if best_row:
             val_idx = cols.index(num_col)
             val = best_row[val_idx]
+            ident_col = next((c for c in cols if any(k in c.lower() for k in ("desc", "description", "item", "product", "name", "particulars"))), None)
+            item_name = str(best_row[cols.index(ident_col)]) if ident_col else "Item"
+            weight_col = next((c for c in cols if any(k in c.lower() for k in ("wht", "weight", "gms", "kg"))), None)
+            weight_val = f" ({best_row[cols.index(weight_col)]}g)" if weight_col and best_row[cols.index(weight_col)] is not None else ""
+            is_money = any(k in num_col.lower() for k in ("price", "mrp", "invoice", "margin", "cost", "rate", "amount"))
+            val_formatted = f"₹{val:,.2f}" if is_money and isinstance(val, (int, float)) else f"{val:,}"
+
             answer_parts.append(
-                f"The {order_word.lower()} **{num_col}** in `{spreadsheet.filename}` is **{val:,}** "
-                f"from Sheet '{target_sheet.sheet_name}'."
+                f"The {order_word.lower()} **{num_col}** in `{spreadsheet.filename}` is **{val_formatted}** for **{item_name}{weight_val}** "
+                f"(Sheet: '{target_sheet.sheet_name}')."
             )
+
+            # Details breakdown of that specific top/bottom product
+            item_details = []
+            for c in cols:
+                if c not in (num_col, ident_col, weight_col) and best_row[cols.index(c)] is not None:
+                    c_val = best_row[cols.index(c)]
+                    c_money = any(k in c.lower() for k in ("price", "mrp", "invoice", "margin", "cost", "rate", "amount"))
+                    c_fmt = f"₹{c_val:,.2f}" if c_money and isinstance(c_val, (int, float)) else str(c_val)
+                    item_details.append(f"- **{c}**: {c_fmt}")
+            if item_details:
+                answer_parts.append("\n**Product Details:**\n" + "\n".join(item_details[:6]))
 
     # C: Specific numeric aggregate (Total or Average of column)
     elif (is_sum or is_avg or matched_num_cols) and not is_price and (matched_num_cols or numeric_cols):
@@ -720,8 +746,8 @@ def answer_spreadsheet_query(
             f"is **{agg_val:,.2f}** across {cnt_val:,} records (ranging from {min_val:,} to {max_val:,})."
         )
 
-    # D: Price / List / Table query (e.g. "list all prices", "show prices", "list all products")
-    elif is_price or is_list:
+    # D: Price / List / Full Catalog Table query
+    elif (is_price or is_list) and not any(re.findall(r"\b\d+(?:\.\d+)?\b", q_lower)):
         price_keywords = {"price", "rate", "cost", "mrp", "invoice", "margin", "amount", "total"}
         ident_keywords = {
             "no", "sno", "id", "code", "sku", "name", "desc", "description",
@@ -811,7 +837,79 @@ def answer_spreadsheet_query(
             if highlights:
                 answer_parts.append("**Pricing Highlights:**\n" + "\n".join(highlights))
 
-    # E: Count / Overview / General Analysis
+    # E: Specific Item / Filter Search (e.g. "what is the price of 100g?", "show plain papad 70", "how much is 150g?")
+    elif any(re.findall(r"\b\d+(?:\.\d+)?\b", q_lower)) or any(
+        any(tok in str(c_val).lower() for c_val in r)
+        for r in target_sheet.rows[:20]
+        for tok in re.findall(r"[a-zA-Z0-9]{3,}", q_lower)
+        if tok not in {"what", "which", "the", "price", "prices", "for", "and", "show", "how", "much", "tell", "about", "give", "list"}
+    ):
+        numbers_in_q = re.findall(r"\b\d+(?:\.\d+)?\b", q_lower)
+        where_clauses: list[str] = []
+        for num_str in numbers_in_q:
+            try:
+                num_v = float(num_str)
+                for nc in numeric_cols:
+                    where_clauses.append(f'"{sanitize_sql_ident(nc)}" = {num_v}')
+            except ValueError:
+                pass
+
+        text_words = [
+            w for w in re.findall(r"[a-zA-Z]{3,}", q_lower)
+            if w not in {
+                "what", "which", "the", "price", "prices", "for", "and", "show", "how", "much",
+                "tell", "about", "give", "list", "with", "this", "that", "from", "sheet", "file",
+                "product", "products", "item", "items", "retailer", "distributor"
+            }
+        ]
+        for tw in text_words:
+            for tc in text_cols:
+                where_clauses.append(f'lower("{sanitize_sql_ident(tc)}") LIKE \'%{tw}%\'')
+
+        filter_sql = (
+            f"SELECT * FROM {table_name} WHERE {' OR '.join(where_clauses)} LIMIT 10"
+            if where_clauses
+            else f"SELECT * FROM {table_name} LIMIT 10"
+        )
+        sql_statements.append(filter_sql)
+        filtered_rows = con.execute(filter_sql).fetchall()
+
+        if filtered_rows:
+            t = Table(
+                title=f"Filtered Results: {target_sheet.sheet_name} ({spreadsheet.filename})",
+                columns=cols,
+                rows=[list(r) for r in filtered_rows],
+            )
+            tables.append(t)
+
+            ident_col = next((c for c in cols if any(k in c.lower() for k in ("desc", "description", "item", "product", "name", "particulars"))), None)
+            weight_col = next((c for c in cols if any(k in c.lower() for k in ("wht", "weight", "gms", "kg"))), None)
+
+            answer_parts.append(f"Found **{len(filtered_rows)} matching product(s)** in `{spreadsheet.filename}`:")
+            for r in filtered_rows[:3]:
+                item_name = str(r[cols.index(ident_col)]) if ident_col else "Product"
+                weight_val = f" ({r[cols.index(weight_col)]}g)" if weight_col and r[cols.index(weight_col)] is not None else ""
+                answer_parts.append(f"\n### {item_name}{weight_val}")
+                for c in cols:
+                    if c not in (ident_col, weight_col) and r[cols.index(c)] is not None:
+                        c_val = r[cols.index(c)]
+                        is_m = any(k in c.lower() for k in ("price", "mrp", "invoice", "margin", "cost", "rate", "amount"))
+                        f_val = f"₹{c_val:,.2f}" if is_m and isinstance(c_val, (int, float)) else str(c_val)
+                        answer_parts.append(f"- **{c}**: {f_val}")
+        else:
+            # Fallback to preview if no filter match
+            sql = f"SELECT * FROM {table_name} LIMIT 10"
+            sql_statements.append(sql)
+            preview_rows = con.execute(sql).fetchall()
+            t = Table(
+                title=f"Data Preview: {target_sheet.sheet_name} ({spreadsheet.filename})",
+                columns=cols,
+                rows=[list(r) for r in preview_rows],
+            )
+            tables.append(t)
+            answer_parts.append(f"No exact match was found for '{clean_q}'. Here is the data preview from `{spreadsheet.filename}`.")
+
+    # F: Count / Overview / General Analysis
     else:
         sql = f"SELECT * FROM {table_name} LIMIT 10"
         sql_statements.append(sql)
@@ -860,6 +958,7 @@ def answer_spreadsheet_query(
 def answer_document_query(
     question: str,
     document: ParsedDocument,
+    history: list[dict] | None = None,
 ) -> AnswerEnvelope:
     """Answer a user question based on the content of an uploaded text document or PDF."""
     if not document.sections or not document.full_text.strip():
@@ -872,6 +971,13 @@ def answer_document_query(
 
     q_lower = question.lower()
     q_tokens = set(re.findall(r"\b\w{3,}\b", q_lower))
+
+    # Incorporate contextual keywords from recent history if question is short or refers to previous items
+    if history and (len(q_tokens) <= 3 or any(p in q_lower for p in ("it", "that", "this", "they", "them", "more", "previous"))):
+        for msg in reversed(history[-4:]):
+            text = msg.get("content", "") or msg.get("text", "")
+            hist_tokens = [w for w in re.findall(r"\b\w{3,}\b", text.lower())]
+            q_tokens.update(hist_tokens[:5])
 
     # Score each section by token overlap
     scored_sections: list[tuple[float, ParsedDocSection]] = []
@@ -966,6 +1072,7 @@ def answer_document_query(
 def answer_attachments_query(
     question: str,
     attachments: list[dict],
+    history: list[dict] | None = None,
 ) -> AnswerEnvelope | None:
     """Process single or multiple uploaded files (spreadsheets, documents, json datasets)."""
     if not attachments:
@@ -1005,11 +1112,11 @@ def answer_attachments_query(
 
     # Single spreadsheet
     if len(spreadsheets) == 1 and not documents:
-        return answer_spreadsheet_query(question, spreadsheets[0])
+        return answer_spreadsheet_query(question, spreadsheets[0], history=history)
 
     # Single document
     if len(documents) == 1 and not spreadsheets:
-        return answer_document_query(question, documents[0])
+        return answer_document_query(question, documents[0], history=history)
 
     # Multiple files (spreadsheets and/or documents)
     all_answers: list[str] = [f"### Summary of {len(spreadsheets) + len(documents)} Uploaded Files\n"]
@@ -1020,7 +1127,7 @@ def answer_attachments_query(
 
     cite_counter = 1
     for s in spreadsheets:
-        res = answer_spreadsheet_query(question, s)
+        res = answer_spreadsheet_query(question, s, history=history)
         all_answers.append(f"#### 📊 `{s.filename}`\n{res.answer}\n")
         all_sql.extend(res.sql)
         all_tables.extend(res.tables)
@@ -1040,7 +1147,7 @@ def answer_attachments_query(
             cite_counter += 1
 
     for d in documents:
-        res = answer_document_query(question, d)
+        res = answer_document_query(question, d, history=history)
         all_answers.append(f"#### 📄 `{d.filename}`\n{res.answer}\n")
         all_tables.extend(res.tables)
         for c in res.citations:
