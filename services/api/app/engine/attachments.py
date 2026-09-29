@@ -33,6 +33,7 @@ class ParsedSheet:
     types: list[str]  # 'DOUBLE', 'VARCHAR', 'BIGINT', etc.
     row_count: int
     numeric_summaries: dict[str, dict[str, float]] = field(default_factory=dict)
+    banners: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -103,6 +104,130 @@ def infer_duckdb_type(values: list[Any]) -> str:
     return "VARCHAR"
 
 
+def detect_header_and_columns(
+    raw_rows: list[list[Any] | tuple[Any, ...]],
+) -> tuple[int, list[int], list[str], list[str]]:
+    """Detect header row index, active column indices, clean headers, and banner metadata.
+
+    Handles real-world spreadsheets with:
+    - Empty columns on the left (e.g. columns 1..13 blank)
+    - Metadata/banner titles at the top (company name, address, title)
+    - Sub-headers and summary footers
+    """
+    if not raw_rows:
+        return 0, [], [], []
+
+    header_keywords = {
+        "no", "sno", "s_no", "s.no", "id", "code", "sku", "name", "desc", "description",
+        "item", "product", "particulars", "qty", "quantity", "case", "weight", "wht",
+        "gms", "kg", "unit", "price", "rate", "cost", "mrp", "invoice", "margin",
+        "amount", "total", "tax", "gst", "cgst", "sgst", "discount", "retailer",
+        "distributor", "customer", "vendor", "date", "month", "year", "category",
+        "status", "type", "sales", "revenue", "profit", "balance", "credit", "debit"
+    }
+
+    max_cols = max((len(r) for r in raw_rows), default=0)
+    if max_cols == 0:
+        return 0, [], [], []
+
+    # Check which column indices have any non-empty data across the sheet
+    col_has_data = [False] * max_cols
+    for r in raw_rows:
+        for c, val in enumerate(r):
+            if val is not None and str(val).strip() != "":
+                col_has_data[c] = True
+
+    active_cols = [c for c, has in enumerate(col_has_data) if has]
+    if not active_cols:
+        return 0, [], [], []
+
+    best_score = -9999
+    best_row_idx = 0
+
+    candidate_rows = range(min(30, len(raw_rows)))
+    for r_idx in candidate_rows:
+        row = raw_rows[r_idx]
+        non_empty_cells = []
+        for c in active_cols:
+            if c < len(row) and row[c] is not None and str(row[c]).strip() != "":
+                non_empty_cells.append((c, str(row[c]).strip()))
+
+        count = len(non_empty_cells)
+        if count == 0:
+            continue
+
+        if count == 1:
+            score = -50
+        else:
+            score = count * 3
+            # Check keywords and text types
+            for _, text in non_empty_cells:
+                tokens = set(re.findall(r"[a-zA-Z0-9]+", text.lower()))
+                matched = tokens.intersection(header_keywords)
+                if matched:
+                    score += 15 * len(matched)
+                try:
+                    float(text.replace(",", "").replace("$", "").replace("₹", ""))
+                    score -= 5
+                except ValueError:
+                    score += 4
+
+            # Bonus if row+1 exists and has aligned data
+            if r_idx + 1 < len(raw_rows):
+                next_row = raw_rows[r_idx + 1]
+                next_count = sum(
+                    1 for c in active_cols
+                    if c < len(next_row) and next_row[c] is not None and str(next_row[c]).strip() != ""
+                )
+                if next_count >= count * 0.7:
+                    score += 20
+
+        if score > best_score:
+            best_score = score
+            best_row_idx = r_idx
+
+    # Banner metadata rows before header
+    banners: list[str] = []
+    for r_idx in range(best_row_idx):
+        row = raw_rows[r_idx]
+        items = [
+            str(row[c]).strip()
+            for c in active_cols
+            if c < len(row) and row[c] is not None and str(row[c]).strip() != ""
+        ]
+        if items:
+            banners.append(" - ".join(items))
+
+    # In header row, check active cols
+    header_row = raw_rows[best_row_idx]
+    final_active_cols: list[int] = []
+    raw_headers: list[str] = []
+    for c in active_cols:
+        val = header_row[c] if c < len(header_row) else None
+        h_str = str(val).strip() if val is not None and str(val).strip() != "" else ""
+        has_subsequent_data = any(
+            c < len(r) and r[c] is not None and str(r[c]).strip() != ""
+            for r in raw_rows[best_row_idx + 1 :]
+        )
+        if h_str or has_subsequent_data:
+            final_active_cols.append(c)
+            raw_headers.append(h_str)
+
+    # Deduplicate headers and assign fallback
+    seen: dict[str, int] = {}
+    unique_headers: list[str] = []
+    for i, h in enumerate(raw_headers):
+        base = h if h else f"Column_{i + 1}"
+        if base in seen:
+            seen[base] += 1
+            unique_headers.append(f"{base}_{seen[base]}")
+        else:
+            seen[base] = 0
+            unique_headers.append(base)
+
+    return best_row_idx, final_active_cols, unique_headers, banners
+
+
 def parse_excel_bytes(payload: bytes, filename: str) -> ParsedSpreadsheet:
     """Parse an Excel (.xlsx, .xls) workbook into structured sheets and DuckDB tables."""
     import openpyxl
@@ -117,37 +242,15 @@ def parse_excel_bytes(payload: bytes, filename: str) -> ParsedSpreadsheet:
         if not raw_rows:
             continue
 
-        # Find first non-empty row as header
-        header_row_idx = 0
-        while header_row_idx < len(raw_rows) and not any(raw_rows[header_row_idx]):
-            header_row_idx += 1
-        if header_row_idx >= len(raw_rows):
+        header_row_idx, active_cols, unique_headers, banners = detect_header_and_columns(raw_rows)
+        if not unique_headers or not active_cols:
             continue
-
-        headers = [
-            str(col).strip() if col is not None else f"Column_{i + 1}"
-            for i, col in enumerate(raw_rows[header_row_idx])
-        ]
-        # Deduplicate headers
-        seen: dict[str, int] = {}
-        unique_headers: list[str] = []
-        for h in headers:
-            base = h if h else "Column"
-            if base in seen:
-                seen[base] += 1
-                unique_headers.append(f"{base}_{seen[base]}")
-            else:
-                seen[base] = 0
-                unique_headers.append(base)
 
         data_rows: list[list[Any]] = []
         for r in raw_rows[header_row_idx + 1 :]:
-            if not any(r):
+            row_vals = [r[c] if c < len(r) else None for c in active_cols]
+            if not any(v is not None and str(v).strip() != "" for v in row_vals):
                 continue
-            # Pad or trim to header length
-            row_vals = list(r)[: len(unique_headers)]
-            if len(row_vals) < len(unique_headers):
-                row_vals.extend([None] * (len(unique_headers) - len(row_vals)))
             data_rows.append(row_vals)
 
         table_ident = f"sheet_{sheet_idx + 1}_{sanitize_sql_ident(sheet_name)}"
@@ -216,6 +319,7 @@ def parse_excel_bytes(payload: bytes, filename: str) -> ParsedSpreadsheet:
                 types=col_types,
                 row_count=len(clean_rows),
                 numeric_summaries=numeric_summaries,
+                banners=banners,
             )
         )
 
@@ -233,22 +337,15 @@ def parse_csv_bytes(payload: bytes, filename: str) -> ParsedSpreadsheet:
     if not raw_rows:
         return ParsedSpreadsheet(filename=filename, sheets=[], duckdb_conn=con)
 
-    headers = [col.strip() if col.strip() else f"Column_{i + 1}" for i, col in enumerate(raw_rows[0])]
-    seen: dict[str, int] = {}
-    unique_headers: list[str] = []
-    for h in headers:
-        if h in seen:
-            seen[h] += 1
-            unique_headers.append(f"{h}_{seen[h]}")
-        else:
-            seen[h] = 0
-            unique_headers.append(h)
+    header_row_idx, active_cols, unique_headers, banners = detect_header_and_columns(raw_rows)
+    if not unique_headers or not active_cols:
+        return ParsedSpreadsheet(filename=filename, sheets=[], duckdb_conn=con)
 
     data_rows: list[list[Any]] = []
-    for r in raw_rows[1:]:
-        row_vals = list(r)[: len(unique_headers)]
-        if len(row_vals) < len(unique_headers):
-            row_vals.extend([""] * (len(unique_headers) - len(row_vals)))
+    for r in raw_rows[header_row_idx + 1 :]:
+        row_vals = [r[c] if c < len(r) else None for c in active_cols]
+        if not any(v is not None and str(v).strip() != "" for v in row_vals):
+            continue
         data_rows.append(row_vals)
 
     col_types = []
@@ -306,6 +403,7 @@ def parse_csv_bytes(payload: bytes, filename: str) -> ParsedSpreadsheet:
         types=col_types,
         row_count=len(clean_rows),
         numeric_summaries=numeric_summaries,
+        banners=banners,
     )
     return ParsedSpreadsheet(filename=filename, sheets=[sheet], duckdb_conn=con)
 
@@ -507,7 +605,11 @@ def answer_spreadsheet_query(
     answer_parts: list[str] = []
 
     # 1. Check for aggregation questions (sum, total, average, max, min)
-    is_sum = bool(re.search(r"\b(total|sum|overall|entire|all)\b", q_lower))
+    is_price = bool(re.search(r"\b(price|prices|pricing|rate|rates|cost|costs|mrp|invoice|margin)\b", q_lower))
+    is_list = bool(re.search(r"\b(list|show|display|get|all|table|items|products|catalog|give me|what are|view)\b", q_lower))
+    is_sum = bool(re.search(r"\b(total|sum|sum of|aggregate)\b", q_lower)) or (
+        bool(re.search(r"\b(overall|entire)\b", q_lower)) and not is_list
+    )
     is_avg = bool(re.search(r"\b(average|avg|mean)\b", q_lower))
     is_max = bool(re.search(r"\b(highest|maximum|max|top|best)\b", q_lower))
     is_min = bool(re.search(r"\b(lowest|minimum|min|bottom|worst)\b", q_lower))
@@ -588,7 +690,7 @@ def answer_spreadsheet_query(
             )
 
     # C: Specific numeric aggregate (Total or Average of column)
-    elif (is_sum or is_avg or matched_num_cols) and (matched_num_cols or numeric_cols):
+    elif (is_sum or is_avg or matched_num_cols) and not is_price and (matched_num_cols or numeric_cols):
         target_num = matched_num_cols[0] if matched_num_cols else numeric_cols[0]
         ident = sanitize_sql_ident(target_num)
         agg_func = "AVG" if is_avg else "SUM"
@@ -618,7 +720,98 @@ def answer_spreadsheet_query(
             f"is **{agg_val:,.2f}** across {cnt_val:,} records (ranging from {min_val:,} to {max_val:,})."
         )
 
-    # D: Count / Overview / General Analysis
+    # D: Price / List / Table query (e.g. "list all prices", "show prices", "list all products")
+    elif is_price or is_list:
+        price_keywords = {"price", "rate", "cost", "mrp", "invoice", "margin", "amount", "total"}
+        ident_keywords = {
+            "no", "sno", "id", "code", "sku", "name", "desc", "description",
+            "item", "product", "particulars", "wht", "weight", "gms", "kg", "case", "qty", "quantity",
+        }
+
+        has_price_cols = [c for c in cols if any(pk in c.lower() for pk in price_keywords)]
+        has_ident_cols = [c for c in cols if any(ik in c.lower() for ik in ident_keywords)]
+
+        # Select all columns if small table (<= 12 columns), else select ident + price cols
+        if len(cols) <= 12:
+            selected_cols = cols
+        elif has_price_cols and is_price:
+            wanted_cols = set(has_ident_cols + has_price_cols)
+            selected_cols = [c for c in cols if c in wanted_cols] or cols[:8]
+        else:
+            selected_cols = cols[:8]
+
+        sql_cols_str = ", ".join(f'"{sanitize_sql_ident(c)}" AS "{c}"' for c in selected_cols)
+        sql = f"SELECT {sql_cols_str} FROM {table_name} LIMIT 100"
+        sql_statements.append(sql)
+        query_rows = con.execute(sql).fetchall()
+
+        t = Table(
+            title=(
+                f"Price List: {target_sheet.sheet_name} ({spreadsheet.filename})"
+                if is_price
+                else f"{target_sheet.sheet_name} ({spreadsheet.filename})"
+            ),
+            columns=selected_cols,
+            rows=[list(r) for r in query_rows],
+        )
+        tables.append(t)
+
+        banner_prefix = f" (*{' - '.join(target_sheet.banners[:2])}*)" if target_sheet.banners else ""
+        intro = (
+            f"Here is the complete price list from **{spreadsheet.filename}**{banner_prefix}:"
+            if is_price
+            else f"Here are the records from **{spreadsheet.filename}** (Sheet: '{target_sheet.sheet_name}'){banner_prefix}:"
+        )
+        answer_parts.append(intro)
+
+        # Build clean Markdown table
+        md_table_lines = [
+            "| " + " | ".join(selected_cols) + " |",
+            "| " + " | ".join(["---"] * len(selected_cols)) + " |",
+        ]
+        for r in query_rows:
+            formatted_cells = []
+            for cell_val, col_name in zip(r, selected_cols, strict=False):
+                if cell_val is None or cell_val == "":
+                    formatted_cells.append("—")
+                elif isinstance(cell_val, (int, float)):
+                    c_low = col_name.lower()
+                    is_money = any(k in c_low for k in ("price", "mrp", "invoice", "margin", "cost", "rate", "amount"))
+                    if is_money:
+                        formatted_cells.append(f"₹{cell_val:,.2f}")
+                    elif isinstance(cell_val, int) or float(cell_val).is_integer():
+                        formatted_cells.append(f"{int(cell_val):,}")
+                    else:
+                        formatted_cells.append(f"{cell_val:,.2f}")
+                else:
+                    formatted_cells.append(str(cell_val).strip())
+            md_table_lines.append("| " + " | ".join(formatted_cells) + " |")
+
+        answer_parts.append("\n" + "\n".join(md_table_lines) + "\n")
+
+        # Highlights for price columns
+        if has_price_cols:
+            highlights = []
+            for pc in has_price_cols:
+                p_ident = sanitize_sql_ident(pc)
+                try:
+                    stats = con.execute(
+                        f'SELECT MIN("{p_ident}"), MAX("{p_ident}"), AVG("{p_ident}") FROM {table_name} WHERE "{p_ident}" IS NOT NULL'
+                    ).fetchone()
+                    if stats and stats[0] is not None:
+                        min_p = float(stats[0])
+                        max_p = float(stats[1])
+                        avg_p = float(stats[2])
+                        if min_p == max_p:
+                            highlights.append(f"- **{pc}**: ₹{min_p:,.2f}")
+                        else:
+                            highlights.append(f"- **{pc}**: ₹{min_p:,.2f} to ₹{max_p:,.2f} (Avg: ₹{avg_p:,.2f})")
+                except Exception:
+                    pass
+            if highlights:
+                answer_parts.append("**Pricing Highlights:**\n" + "\n".join(highlights))
+
+    # E: Count / Overview / General Analysis
     else:
         sql = f"SELECT * FROM {table_name} LIMIT 10"
         sql_statements.append(sql)
@@ -636,8 +829,9 @@ def answer_spreadsheet_query(
             summaries_text.append(f"**{col_name}**: Total {stats['sum']:,} (Avg {stats['avg']:,})")
 
         sum_block = "; ".join(summaries_text[:4]) if summaries_text else "None"
+        banner_context = f" (*{' - '.join(target_sheet.banners[:2])}*)" if target_sheet.banners else ""
         answer_parts.append(
-            f"Loaded and analyzed `{spreadsheet.filename}` (Sheet: '{target_sheet.sheet_name}'). "
+            f"Loaded and analyzed `{spreadsheet.filename}` (Sheet: '{target_sheet.sheet_name}'){banner_context}. "
             f"It contains **{target_sheet.row_count:,} rows** and **{len(cols)} columns** ({', '.join(cols[:6])}). "
             f"Key metrics: {sum_block}."
         )
@@ -652,7 +846,7 @@ def answer_spreadsheet_query(
     )
 
     return AnswerEnvelope(
-        answer=" ".join(answer_parts),
+        answer="\n\n".join(answer_parts),
         route="structured",
         sql=sql_statements,
         tables=tables,

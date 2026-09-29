@@ -88,3 +88,51 @@ def test_multi_file_attachments():
     assert "sales.xlsx" in env.answer
     assert "contract.txt" in env.answer
     assert len(env.citations) >= 2
+
+
+def test_distributor_price_list_excel():
+    """Test real-world distributor price list with banner headers and empty leading columns."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+
+    # Banner metadata rows
+    ws.cell(row=1, column=14, value="MURUGAN FOOD PRODUCTS")
+    ws.cell(row=2, column=14, value="#6/289, Temple Street, Madurai - 625001")
+    ws.cell(row=3, column=14, value="DISTRIBUTOR PRICE LIST")
+
+    # Table header at row 4
+    headers = [
+        "S. No.", "Description", "Wht GMS", "Case Qty",
+        "DB Invoice Price", "DB Margin 10%", "Retailer Price", "MRP", "DB Case invoice price"
+    ]
+    for col_idx, h in enumerate(headers, start=14):
+        ws.cell(row=4, column=col_idx, value=h)
+
+    # Data rows
+    data = [
+        [1, "Sai Murugan Plain Papad", 70, 250, 11.36, 1.14, 12.5, 25.0, 2840.0],
+        [2, "Sai Murugan Plain Papad", 100, 200, 15.0, 1.50, 16.5, 35.0, 3000.0],
+        [3, "Sai Murugan Plain Papad", 150, 135, 22.5, 2.25, 24.75, 50.0, 3037.5],
+    ]
+    for r_offset, row_vals in enumerate(data, start=5):
+        for c_offset, val in enumerate(row_vals, start=14):
+            ws.cell(row=r_offset, column=c_offset, value=val)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    engine = InsightEngine.fixture()
+    attachments = [{"name": "ap distributor.xlsx", "kind": "document", "raw_bytes": buf.getvalue()}]
+
+    env = engine.ask("list all prices", attachments=attachments)
+    assert env.route == "structured"
+    assert "Sai Murugan Plain Papad" in env.answer
+    assert "₹11.36" in env.answer
+    assert "₹25.00" in env.answer
+    assert "Pricing Highlights:" in env.answer
+    assert env.tables
+    assert len(env.tables[0].columns) == 9
+    assert env.sql
+    assert "Column_1" not in env.answer
+
