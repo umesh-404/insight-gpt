@@ -59,7 +59,7 @@ class Chart(BaseModel):
 
 class AnswerEnvelope(BaseModel):
     answer: str
-    route: Literal["structured", "unstructured", "hybrid", "clarify", "abstain"] = "structured"
+    route: Literal["structured", "unstructured", "hybrid", "clarify", "abstain", "conversational"] = "structured"
     sql: list[str] = Field(default_factory=list)
     tables: list[Table] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)

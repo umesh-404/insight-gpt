@@ -48,7 +48,7 @@ import * as wire from './wire';
 import * as mock from './mock';
 
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api/v1';
+  (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api/v1').trim().replace(/\/+$/, '');
 
 export const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true';
 

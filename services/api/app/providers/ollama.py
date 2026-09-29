@@ -20,10 +20,12 @@ class OllamaProvider(Provider):
     name = "ollama"
 
     def __init__(self, model: str = "llama3.1:8b", host: str = "http://127.0.0.1:11434",
-                 timeout: float = 120.0):
+                 timeout: float | None = None):
+        import os
         self.model = model
         self.host = host.rstrip("/")
-        self.timeout = timeout
+        env_timeout = os.getenv("OLLAMA_TIMEOUT")
+        self.timeout = float(env_timeout) if env_timeout else (timeout if timeout is not None else 300.0)
 
     def complete(self, prompt: str, **opts) -> str:
         return self.chat([Message(role="user", content=prompt)], **opts)

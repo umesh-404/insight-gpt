@@ -150,11 +150,15 @@
   }
 
   html {
+    max-width: 100vw;
+    overflow-x: hidden;
     -webkit-text-size-adjust: 100%;
     text-rendering: optimizeLegibility;
   }
 
   body {
+    max-width: 100vw;
+    overflow-x: hidden;
     @apply bg-background text-foreground antialiased;
     font-feature-settings:
       'rlig' 1,

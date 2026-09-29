@@ -109,16 +109,28 @@ def _build_blocks_sync(engine: InsightEngine, sections: list[str]) -> list[Repor
     blocks: list[ReportBlock] = []
     for section in sections:
         heading, question = _SECTION_QUESTIONS[section]
-        env = engine.ask(question)
-        blocks.append(
-            ReportBlock(
-                heading=heading,
-                prose=env.answer,
-                chart_spec=env.chart,
-                tables=list(env.tables),
-                citations=list(env.citations),
+        try:
+            env = engine.ask(question)
+            blocks.append(
+                ReportBlock(
+                    heading=heading,
+                    prose=env.answer,
+                    chart_spec=env.chart,
+                    tables=list(env.tables),
+                    citations=list(env.citations),
+                )
             )
-        )
+        except Exception as exc:
+            # Degrade gracefully per section rather than destroying the whole report
+            blocks.append(
+                ReportBlock(
+                    heading=heading,
+                    prose=f"Section generation temporarily unavailable ({type(exc).__name__}: {exc}).",
+                    chart_spec=None,
+                    tables=[],
+                    citations=[],
+                )
+            )
     return blocks
 
 

@@ -78,8 +78,8 @@ QUESTIONS = [
 _WORD = re.compile(r"[a-z0-9]+")
 # A number token not glued to letters (so "2026Q2", "W05" are not treated as
 # free-standing quantities). Group 1 is the number; a trailing '%' marks it as a
-# percentage. The trailing boundary is what keeps "2026" out of "2026Q2".
-_NUMBER = re.compile(r"(?<![A-Za-z0-9])(\d[\d,]*(?:\.\d+)?)(%?)(?![A-Za-z0-9])")
+# percentage. Group 2 matches unit suffixes like L, Cr, k, m.
+_NUMBER = re.compile(r"(?<![A-Za-z0-9])(\d[\d,]*(?:\.\d+)?)\s*(%|[LC]r?|k|m|b)?(?![A-Za-z0-9])", re.IGNORECASE)
 _MARKER = re.compile(r"\[\d+\]")
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
 
@@ -94,38 +94,59 @@ def _content_tokens(text: str) -> set[str]:
     }
 
 
-def _norm_number(raw: str) -> str:
+def _norm_number(raw: str, unit: str = "") -> float | None:
     raw = raw.replace(",", "")
     try:
-        value = float(raw)
+        val = float(raw)
     except ValueError:
-        return raw
-    if value.is_integer():
-        return str(abs(int(value)))
-    return str(abs(value))
+        return None
+    u = unit.lower()
+    if u == "l":
+        val *= 100_000
+    elif u == "cr":
+        val *= 10_000_000
+    elif u == "k":
+        val *= 1_000
+    elif u == "m":
+        val *= 1_000_000
+    elif u == "b":
+        val *= 1_000_000_000
+    return abs(val)
 
 
-def _answer_numbers(answer: str) -> list[str]:
+def _answer_numbers(answer: str) -> list[float]:
     """Absolute numbers in the answer (percentages and [n] markers excluded)."""
     answer = _MARKER.sub(" ", answer)  # citation markers are not quantities
-    numbers = []
+    numbers: list[float] = []
     for match in _NUMBER.finditer(answer):
         if match.group(2) == "%":
             continue
-        numbers.append(_norm_number(match.group(1)))
+        n = _norm_number(match.group(1), match.group(2) or "")
+        if n is not None:
+            numbers.append(n)
     return numbers
 
 
-def _table_numbers(env: AnswerEnvelope) -> set[str]:
-    grounded: set[str] = set()
+def _table_numbers(env: AnswerEnvelope) -> list[float]:
+    grounded: list[float] = []
     for table in env.tables:
         for row in table.rows:
             for cell in row:
                 if isinstance(cell, bool):
                     continue
                 if isinstance(cell, (int, float)):
-                    grounded.add(_norm_number(str(cell)))
+                    grounded.append(abs(float(cell)))
     return grounded
+
+
+def _is_grounded_number(num: float, table_numbers: list[float]) -> bool:
+    for t in table_numbers:
+        if t == 0:
+            if abs(num) < 1e-5:
+                return True
+        elif abs(num - t) / abs(t) <= 0.02:  # allow 2% tolerance for 3-sig-fig rounding
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -198,7 +219,7 @@ def score_answer(question: str, env: AnswerEnvelope, docs: DocIndex) -> AnswerSc
             grounded += 1
 
     numbers = _answer_numbers(env.answer)
-    grounded_numbers = sum(1 for n in numbers if n in table_numbers)
+    grounded_numbers = sum(1 for n in numbers if _is_grounded_number(n, table_numbers))
     needs_citation = env.route in ("unstructured", "hybrid")
 
     return AnswerScore(

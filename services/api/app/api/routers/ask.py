@@ -83,6 +83,36 @@ def _chunk_text(text: str, size: int = 6) -> list[str]:
 
 def _read_text_file(file_name: str, payload: bytes) -> str:
     name = file_name.lower()
+    if name.endswith((".xlsx", ".xls")):
+        try:
+            from ...engine.attachments import parse_excel_bytes
+
+            sheet_data = parse_excel_bytes(payload, file_name)
+            parts = [f"Excel Workbook: {file_name}"]
+            for s in sheet_data.sheets:
+                parts.append(f"Sheet: {s.sheet_name} ({s.row_count} rows, columns: {', '.join(s.columns)})")
+                if s.numeric_summaries:
+                    num_parts = [
+                        f"{col}: Sum={stats['sum']:,}, Avg={stats['avg']:,}"
+                        for col, stats in s.numeric_summaries.items()
+                    ]
+                    parts.append("Numeric stats: " + "; ".join(num_parts))
+                if s.rows:
+                    parts.append("Sample rows:")
+                    parts.append(" | ".join(s.columns[:8]))
+                    for row in s.rows[:5]:
+                        parts.append(" | ".join(str(cell if cell is not None else "") for cell in row[:8]))
+            return "\n".join(parts)
+        except Exception as exc:
+            return f"[Excel file could not be parsed: {exc}]"
+    if name.endswith(".docx"):
+        try:
+            from ...engine.attachments import parse_document_bytes
+
+            doc = parse_document_bytes(payload, file_name)
+            return doc.full_text[:12000]
+        except Exception as exc:
+            return f"[Word document could not be parsed: {exc}]"
     if name.endswith(".csv") or name.endswith(".txt") or name.endswith(".md"):
         return payload.decode("utf-8-sig", errors="replace").strip()
     if name.endswith(".json"):
@@ -136,7 +166,12 @@ def _make_attachment_meta(files: list[UploadFile]) -> list[dict]:
         payload = file.file.read() if hasattr(file, "file") else b""
         name = file.filename.lower()
         kind = "image" if name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")) else "document"
-        record = {"name": file.filename, "kind": kind}
+        record = {
+            "name": file.filename,
+            "kind": kind,
+            "raw_bytes": payload,
+            "content_type": getattr(file, "content_type", None),
+        }
         if kind == "image":
             record["data"] = base64.b64encode(payload).decode("ascii")
         else:
@@ -377,6 +412,21 @@ async def delete_conversation(
     if not store.delete_conversation(claims.sub, conversation_id):
         raise NotFoundError("Conversation not found.")
     return {"status": "deleted", "id": conversation_id}
+
+
+class FeedbackRequest(BaseModel):
+    message_id: str = Field(min_length=1, max_length=200)
+    rating: str = Field(pattern=r"^(up|down)$")
+    reason: str | None = None
+
+
+@router.post("/feedback", status_code=200)
+async def submit_feedback(
+    body: FeedbackRequest,
+    claims: TokenClaims = Depends(current_claims),
+) -> dict[str, str]:
+    log.info("Feedback received for turn %s: rating=%s user=%s", body.message_id, body.rating, claims.sub)
+    return {"status": "recorded", "message_id": body.message_id}
 
 
 def _trace(request: Request, engine: InsightEngine, started: float, env: AnswerEnvelope) -> None:

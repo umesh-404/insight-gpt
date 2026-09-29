@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-import { CornerDownLeft, Square } from 'lucide-react';
+import { CornerDownLeft, Square, Paperclip, FileSpreadsheet, FileText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { InsightCard } from '@/components/insight-card';
 import { PromptChips } from '@/components/prompt-chips';
@@ -96,6 +96,11 @@ export function ConversationView({
     async (question: string, files: File[] = []) => {
       const trimmed = question.trim();
       if ((!trimmed && files.length === 0) || busy) return;
+      const effectiveQuestion =
+        trimmed ||
+        (files.length > 0
+          ? `Analyze and summarize ${files.map((f) => f.name).join(', ')}`
+          : '');
       setInput('');
       setAttachments([]);
       setBusy(true);
@@ -106,7 +111,7 @@ export function ConversationView({
         ...prev,
         {
           id: `pending-${Date.now()}`,
-          question: trimmed || files.map((file) => file.name).join(', '),
+          question: effectiveQuestion,
           envelope: emptyEnvelope(),
           streaming: true,
           feedback: null,
@@ -120,7 +125,7 @@ export function ConversationView({
       const acc = new EnvelopeAccumulator();
 
       try {
-        await streamAsk(trimmed || files.map((file) => file.name).join(', '), {
+        await streamAsk(effectiveQuestion, {
           conversationId,
           signal: controller.signal,
           files,
@@ -258,27 +263,45 @@ export function ConversationView({
               className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:opacity-60"
             />
             <div className="flex items-center gap-2">
-              <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border bg-background px-2 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent">
-                Attach
+              <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border bg-background px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                <Paperclip className="size-3.5" />
+                <span>Attach</span>
                 <input
                   type="file"
                   multiple
-                  accept=".csv,.pdf,.txt,.md,.json,image/*"
+                  accept=".csv,.xlsx,.xls,.pdf,.txt,.md,.json,.docx,image/*"
                   className="hidden"
                   onChange={(e) => setAttachments(Array.from(e.target.files ?? []))}
                 />
               </label>
               {attachments.length > 0 && (
-                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                  {attachments.slice(0, 3).map((file) => (
-                    <span key={`${file.name}-${file.size}`} className="rounded border px-1.5 py-0.5">
-                      {file.name}
-                    </span>
-                  ))}
-                  {attachments.length > 3 && <span>+{attachments.length - 3}</span>}
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                  {attachments.map((file) => {
+                    const isSpreadsheet = file.name.match(/\.(xlsx|xls|csv)$/i);
+                    const isPdf = file.name.match(/\.pdf$/i);
+                    return (
+                      <span
+                        key={`${file.name}-${file.size}`}
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium ${
+                          isSpreadsheet
+                            ? 'border-emerald-500/30 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300'
+                            : isPdf
+                              ? 'border-rose-500/30 bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300'
+                              : 'border-blue-500/30 bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
+                        }`}
+                      >
+                        {isSpreadsheet ? (
+                          <FileSpreadsheet className="size-3" />
+                        ) : (
+                          <FileText className="size-3" />
+                        )}
+                        <span className="max-w-[120px] truncate">{file.name}</span>
+                      </span>
+                    );
+                  })}
                   <button
                     type="button"
-                    className="text-xs text-destructive"
+                    className="text-xs text-destructive hover:underline"
                     onClick={() => setAttachments([])}
                   >
                     Clear
@@ -301,7 +324,7 @@ export function ConversationView({
               <Button
                 type="submit"
                 size="icon"
-                disabled={!input.trim()}
+                disabled={!input.trim() && attachments.length === 0}
                 aria-label="Send question"
               >
                 <CornerDownLeft className="size-4" />
