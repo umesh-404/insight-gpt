@@ -23,7 +23,7 @@ _OPENAI_COMPATIBLE = {
 
 
 def get_provider(name: str | None = None, model: str | None = None) -> Provider:
-    name = (name or os.getenv("LLM_PROVIDER") or "ollama").lower()
+    name = (name or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
 
     if name == "fake":
         return FakeProvider()

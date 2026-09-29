@@ -47,6 +47,27 @@ class InsightEngine:
 
     # ---- main entry point ----------------------------------------------------
     def ask(self, question: str, attachments: list[dict] | None = None) -> AnswerEnvelope:
+        # Grounded processing for uploaded spreadsheets and documents:
+        # Computes actual figures, tables, and quotes from uploaded files rather than
+        # relying on synthetic/canned responses.
+        if attachments:
+            from .attachments import answer_attachments_query
+
+            env = answer_attachments_query(question, attachments)
+            if env is not None:
+                return env
+
+        if not attachments and "[Attached file:" in question:
+            from .attachments import answer_document_query, parse_document_bytes
+
+            m = re.search(r"\[Attached file:\s*([^\]]+)\]\n([\s\S]+)", question)
+            if m:
+                fname = m.group(1).strip()
+                fcontent = m.group(2).strip()
+                clean_q = question[: m.start()].strip() or "Summarize and analyze this document"
+                parsed_doc = parse_document_bytes(fcontent.encode("utf-8"), fname)
+                return answer_document_query(clean_q, parsed_doc)
+
         images = _images_for(attachments)
         r = route(question, self.catalog, self.provider, self.today, attachments=attachments)
 
