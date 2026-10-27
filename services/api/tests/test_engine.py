@@ -45,3 +45,39 @@ def test_numbers_never_come_from_the_model():
     env = make_engine().ask("Why did sales decline last quarter?")
     trend = env.tables[0]
     assert all(isinstance(r[1], (int, float)) for r in trend.rows)
+
+
+def test_comparison_answer_quotes_the_true_lowest_category():
+    """The disambiguation answer must name the real minimum, not a top-N tail.
+
+    The lowest category used to be read off the last row of a
+    ``desc LIMIT 3`` query, so with five categories it reported the
+    third-highest as the "lowest".
+    """
+    from app.semantic.query_builder import Filter, MetricSelection, build_query
+
+    engine = make_engine()
+    env = engine.ask("Why are the least and highest sales the same?")
+    assert env.route == "conversational"
+
+    _, _, start, end = engine._last_complete_quarter()
+    selection = MetricSelection(
+        metric="revenue",
+        dimensions=["category"],
+        order_by_metric="asc",
+        filters=[Filter(dimension="date", op="between", values=[start, end])],
+    )
+    built = build_query(selection, engine.catalog)
+    rows = engine.warehouse.run(built.sql, built.params).rows
+    assert len(rows) > 3, "fixture must have more categories than the old LIMIT 3"
+    true_lowest, true_highest = str(rows[0][0]), str(rows[-1][0])
+
+    lines = env.answer.splitlines()
+    category_header = next(
+        i for i, line in enumerate(lines) if line.startswith("**By category")
+    )
+    section = lines[category_header:]
+    highest_line = next(line for line in section if line.startswith("- Highest:"))
+    lowest_line = next(line for line in section if line.startswith("- Lowest:"))
+    assert true_highest in highest_line, env.answer
+    assert true_lowest in lowest_line, env.answer

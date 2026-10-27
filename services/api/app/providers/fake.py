@@ -24,7 +24,7 @@ _METRIC_KEYWORDS = [
     (("average order", "aov", "basket", "average sale", "avg sale"), "avg_order_value"),
     (("units", "quantity", "sold"), "units_sold"),
     (("orders", "order count"), "orders"),
-    (("revenue", "sales", "turnover"), "revenue"),
+    (("revenue", "sales", "sale", "turnover", "top-line"), "revenue"),
 ]
 _CHANGE_WORDS = ("why", "decline", "declin", "drop", "fell", "fall", "down",
                  "decreas", "increas", "grew", "growth", "rose", "up ")
@@ -52,7 +52,9 @@ _CONVERSATIONAL_WORDS = (
     "how does this work", "how do you work", "joke", "humor", "funny", "laugh",
     "current insight", "current insights", "what are the insights", "show insight",
     "show insights", "any insight", "anomal", "digest", "summary of business",
-    "business overview",
+    "business overview", "the same", "are the same", "why are they the same",
+    "same thing", "why are least and highest", "why are they equal",
+    "how can they be the same", "least and highest", "highest and least",
 )
 _CONVERSATIONAL_EXACT = {"help", "hello", "hi", "hey"}
 
@@ -190,31 +192,48 @@ class FakeProvider(Provider):
 
         if kind == "grouped":
             q_text = str(f.get("question", "")).lower()
-            top = f.get("rows", [])[:3]
+            top = f.get("rows", [])[:5]
             gfmt = f.get("format", "number")
-            listing = "; ".join(f"{r['label']}: {_num(r['value'], gfmt)}" for r in top)
             m_lbl = _label(f["metric"]).lower()
-            if (
-                top
-                and any(w in q_text for w in ("highest", "top", "best"))
-                and f.get("dimension") == "date"
-            ):
-                best = top[0]
-                answer = (
-                    f"The highest {m_lbl} day for {f['period']} was "
-                    f"{best['label']} with {_num(best['value'], gfmt)} in {m_lbl}."
+            dim = f.get("dimension", "category")
+            dim_noun = "day" if dim == "date" else dim
+
+            is_highest = any(
+                w in q_text for w in ("highest", "top", "best", "max", "leading", "most")
+            )
+            is_lowest = any(
+                w in q_text
+                for w in (
+                    "lowest", "least", "bottom", "worst", "minimum", "smallest", "teh least"
                 )
-            elif (
-                top
-                and any(w in q_text for w in ("lowest", "least", "bottom", "worst"))
-                and f.get("dimension") == "date"
-            ):
-                worst = top[0]
+            )
+
+            if top and is_highest:
+                best = top[0]
+                val_str = _num(best["value"], gfmt)
+                sec = (
+                    f", followed by **{top[1]['label']}** ({_num(top[1]['value'], gfmt)})"
+                    if len(top) > 1
+                    else ""
+                )
                 answer = (
-                    f"The lowest {m_lbl} day for {f['period']} was "
-                    f"{worst['label']} with {_num(worst['value'], gfmt)} in {m_lbl}."
+                    f"The highest-performing {dim_noun} for {m_lbl} in {f['period']} was "
+                    f"**{best['label']}** with **{val_str}** in {m_lbl}{sec}."
+                )
+            elif top and is_lowest:
+                worst = top[0]
+                val_str = _num(worst["value"], gfmt)
+                sec = (
+                    f", followed by **{top[1]['label']}** ({_num(top[1]['value'], gfmt)})"
+                    if len(top) > 1
+                    else ""
+                )
+                answer = (
+                    f"The lowest {dim_noun} for {m_lbl} in {f['period']} was "
+                    f"**{worst['label']}** with **{val_str}** in {m_lbl}{sec}."
                 )
             else:
+                listing = "; ".join(f"{r['label']}: {_num(r['value'], gfmt)}" for r in top[:3])
                 answer = (
                     f"{_label(f['metric'])} by {f['dimension']} for {f['period']} — top: {listing}."
                 )
@@ -280,6 +299,29 @@ def _detect_group_dims(q: str) -> list[str]:
                        ("highest sales day", "date")):
         if token in q:
             dims.append(dim)
+    if not dims:
+        if any(w in q for w in (
+            "over time", "trend", "monthly", "by month", "quarterly", "by quarter",
+            "yearly", "by year", "vs", "versus", "over 2 years", "over two years",
+            "last 2 years", "last two years",
+        )):
+            dims.append("date")
+        else:
+            extremum_words = (
+                "least sale", "lowest sale", "minimum sale", "lowest selling", "worst sale",
+                "worst selling", "least revenue", "lowest revenue", "teh least sale",
+                "highest sale", "top sale", "maximum sale", "best sale", "best selling",
+                "highest selling", "highest revenue", "top revenue", "most sale",
+            )
+            if any(w in q for w in extremum_words):
+                if any(w in q for w in ("day", "date", "daily", "when")):
+                    dims.append("date")
+                elif any(w in q for w in ("category", "categories")):
+                    dims.append("category")
+                elif any(w in q for w in ("region", "regions")):
+                    dims.append("region")
+                else:
+                    dims.append("product")
     return dims
 
 
@@ -288,7 +330,7 @@ def _detect_entities(q: str) -> dict:
     for region in ("north", "south", "east", "west"):
         if region in q:
             ents.setdefault("region", []).append(region.capitalize())
-    for cat in ("electronics", "apparel", "home"):
+    for cat in ("electronics", "apparel", "home", "beauty", "sports"):
         if cat in q:
             ents.setdefault("category", []).append(cat.capitalize())
     return ents
@@ -317,6 +359,32 @@ def _prev_quarter(year: int, q: int) -> tuple[int, int]:
 
 def _resolve_time(q: str, today: date, need_prior: bool) -> tuple[dict, dict | None]:
     cy, cq = today.year, _quarter(today)
+    if "2024" in q and "2025" in q:
+        return {"start": "2024-01-01", "end": "2025-12-31"}, None
+    if "2024" in q and "2026" in q:
+        return {"start": "2024-01-01", "end": f"{cy}-09-30"}, None
+    if any(w in q for w in ("2 years", "two years", "past 2 years", "last 2 years")):
+        return {"start": "2024-01-01", "end": f"{cy}-09-30"}, None
+    if "2024" in q:
+        cur = {"start": "2024-01-01", "end": "2024-12-31"}
+        prior = {"start": "2023-01-01", "end": "2023-12-31"} if need_prior else None
+        return cur, prior
+    if "2025" in q:
+        cur = {"start": "2025-01-01", "end": "2025-12-31"}
+        prior = {"start": "2024-01-01", "end": "2024-12-31"} if need_prior else None
+        return cur, prior
+
+    year_words = (
+        "this year", "current year", "the year", "in 2026", "for 2026", "annual", "annually", "ytd"
+    )
+    if any(w in q for w in year_words):
+        cur = {"start": f"{cy}-01-01", "end": f"{cy}-12-31"}
+        prior = {"start": f"{cy - 1}-01-01", "end": f"{cy - 1}-12-31"} if need_prior else None
+        return cur, prior
+    if any(w in q for w in ("last year", "previous year", "prior year")):
+        cur = {"start": f"{cy - 1}-01-01", "end": f"{cy - 1}-12-31"}
+        prior = {"start": f"{cy - 2}-01-01", "end": f"{cy - 2}-12-31"} if need_prior else None
+        return cur, prior
     if "last quarter" in q or "previous quarter" in q or ("quarter" in q and "this" not in q):
         ly, lq = _prev_quarter(cy, cq)
         cur = _quarter_range(ly, lq)

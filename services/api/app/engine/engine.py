@@ -8,13 +8,15 @@ independently testable. See ``docs/05-insight-engine.md``.
 
 from __future__ import annotations
 
+import datetime as _dt
+import logging
 import re
 
 from ..formatting import format_value
 from ..providers.base import Provider
 from ..providers.factory import get_provider
 from ..semantic.catalog import SemanticCatalog, load_catalog
-from ..semantic.query_builder import MetricSelection, build_query
+from ..semantic.query_builder import Filter, MetricSelection, build_query
 from ..warehouse.executor import DuckDBWarehouse, Warehouse
 from .envelope import AnswerEnvelope, Chart, ChartSeries, Citation, CorrectionAttempt, Table
 from .retrieval import FixtureRetriever, Retriever
@@ -22,6 +24,8 @@ from .router import route
 from .selfcorrect import AbstainSignal, suggest_metrics
 from .structured import StructuredResult, run_structured
 from .synthesis import synthesize
+
+log = logging.getLogger("insightgpt.engine")
 
 
 class InsightEngine:
@@ -146,8 +150,123 @@ class InsightEngine:
         if any(w in q for w in cap_words):
             return self._dynamic_capabilities_envelope()
 
-        # 5. "What else can you answer" / Suggestions
+        # 5. Follow-Up Disambiguation / Comparison ("least and highest are the same?")
+        comp_words = (
+            "the same", "are the same", "why are they the same", "why are least and highest",
+            "same thing", "why are they equal", "how can they be the same",
+            "aren't they different", "least and highest", "highest and least",
+        )
+        if any(w in q for w in comp_words):
+            return self._dynamic_comparison_envelope()
+
+        # 6. "What else can you answer" / Suggestions
         return self._dynamic_suggestions_envelope()
+
+    def _last_complete_quarter(self) -> tuple[int, int, str, str]:
+        """``(year, quarter, start, end)`` for the quarter before ``today``."""
+        today = _dt.date.fromisoformat(self.today)
+        quarter = (today.month - 1) // 3 + 1
+        year = today.year
+        quarter -= 1
+        if quarter == 0:
+            year, quarter = year - 1, 4
+        first_month = 3 * (quarter - 1) + 1
+        start = _dt.date(year, first_month, 1)
+        next_month = first_month + 3
+        end = _dt.date(year + next_month // 13, next_month % 12 or 12, 1)
+        end -= _dt.timedelta(days=1)
+        return year, quarter, start.isoformat(), end.isoformat()
+
+    def _revenue_extreme(
+        self, dimension: str, order: str, time_filter: Filter
+    ) -> tuple[str, str] | None:
+        """Top (``desc``) or bottom (``asc``) member of ``dimension`` by revenue.
+
+        Returns ``None`` when the warehouse cannot answer, so the caller drops
+        the line instead of quoting a number that was never measured.
+        """
+        try:
+            selection = MetricSelection(
+                metric="revenue", dimensions=[dimension],
+                order_by_metric=order, limit=1, filters=[time_filter],
+            )
+            built = build_query(selection, self.catalog)
+            result = self.warehouse.run(built.sql, built.params)
+        except Exception:
+            log.exception("comparison lookup failed for %s (%s)", dimension, order)
+            return None
+        if not result.rows:
+            return None
+        row = result.rows[0]
+        return str(row[0]), format_value(row[1], "currency")
+
+    def _dynamic_comparison_envelope(self) -> AnswerEnvelope:
+        """Explain that an aggregate total is not a single product's sale.
+
+        Every figure is read from the warehouse for the last complete quarter.
+        A lookup that fails drops its line rather than inventing a number --
+        the engine never quotes a figure it did not measure.
+        """
+        year, quarter, start, end = self._last_complete_quarter()
+        period = f"{year}Q{quarter}"
+        time_filter = Filter(dimension="date", op="between", values=[start, end])
+
+        highest_prod = self._revenue_extreme("product", "desc", time_filter)
+        lowest_prod = self._revenue_extreme("product", "asc", time_filter)
+        highest_cat = self._revenue_extreme("category", "desc", time_filter)
+        lowest_cat = self._revenue_extreme("category", "asc", time_filter)
+
+        total_revenue: str | None = None
+        try:
+            total_selection = MetricSelection(metric="revenue", filters=[time_filter])
+            built_total = build_query(total_selection, self.catalog)
+            total_result = self.warehouse.run(built_total.sql, built_total.params)
+            if total_result.rows:
+                total_revenue = format_value(total_result.rows[0][0], "currency")
+        except Exception:
+            log.exception("comparison total-revenue lookup failed")
+
+        parts = ["No, the lowest and highest sales are not the same.\n"]
+        if total_revenue:
+            parts.append(
+                f"The {total_revenue} you saw is the **total aggregated revenue** for "
+                f"{period} across all products and regions combined, not the value of "
+                "an individual product's sales.\n"
+            )
+        else:
+            parts.append(
+                "A headline revenue figure is the **total aggregated revenue** across all "
+                "products and regions combined, not the value of an individual "
+                "product's sales.\n"
+            )
+
+        if highest_prod or lowest_prod:
+            parts.append(f"**By product ({period}):**")
+            if highest_prod:
+                parts.append(f"- Highest: **{highest_prod[0]}** ({highest_prod[1]})")
+            if lowest_prod:
+                parts.append(f"- Lowest: **{lowest_prod[0]}** ({lowest_prod[1]})")
+            parts.append("")
+        if highest_cat or lowest_cat:
+            parts.append(f"**By category ({period}):**")
+            if highest_cat:
+                parts.append(f"- Highest: **{highest_cat[0]}** ({highest_cat[1]})")
+            if lowest_cat:
+                parts.append(f"- Lowest: **{lowest_cat[0]}** ({lowest_cat[1]})")
+            parts.append("")
+
+        parts.append("Would you like the breakdown across regions or over time?")
+
+        return AnswerEnvelope(
+            answer="\n".join(parts),
+            route="conversational",
+            confidence="high",
+            suggestions=[
+                "What is the highest sale product?",
+                "What is the least sale product?",
+                f"Show revenue by category for {period}.",
+            ],
+        )
 
     def _dynamic_executive_digest_envelope(self) -> AnswerEnvelope:
         from ..insights.detector import detect_insights

@@ -56,10 +56,15 @@ def _time_filter(time_range: dict) -> Filter:
 
 def _period_label(time_range: dict) -> str:
     start, end = time_range["start"], time_range["end"]
+    if start.endswith("-01-01") and end.endswith("-12-31"):
+        if start[:4] == end[:4]:
+            return start[:4]
+        return f"{start[:4]}–{end[:4]}"
     # Recognize a clean calendar quarter for a tidy label.
+    q_ends = {"Q1": "-03-31", "Q2": "-06-30", "Q3": "-09-30", "Q4": "-12-31"}
     q_starts = {"01-01": "Q1", "04-01": "Q2", "07-01": "Q3", "10-01": "Q4"}
     key = start[5:]
-    if key in q_starts:
+    if key in q_starts and end.endswith(q_ends[q_starts[key]]):
         return f"{start[:4]}{q_starts[key]}"
     return f"{start} to {end}"
 
@@ -161,10 +166,10 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
     # --- grouped question -----------------------------------------------------
     if route.get("group_dims"):
         dim = route["group_dims"][0]
-        order = (
-            "asc" if any(w in question.lower() for w in ("lowest", "least", "bottom"))
-            else "desc"
+        lowest_words = (
+            "lowest", "least", "bottom", "worst", "minimum", "smallest", "teh least",
         )
+        order = "asc" if any(w in question.lower() for w in lowest_words) else "desc"
         is_daily = dim == "date" and any(w in question.lower() for w in ("day", "daily"))
         time_grain = "day" if is_daily else None
         selection = MetricSelection(

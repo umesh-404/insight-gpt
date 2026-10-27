@@ -187,6 +187,14 @@ async def ask(
             yield _sse("abstain", {
                 "reason": env.abstain_reason, "suggestions": env.suggestions,
             })
+        # The router needs a disambiguation before it can answer.
+        if env.clarifying_question:
+            yield _sse("clarify", {"question": env.clarifying_question})
+        # Suggested follow-ups also ride on non-abstained answers (the
+        # conversational route always carries them). The `abstain` event
+        # already carried them above, so this is the non-abstained case only.
+        if env.suggestions and not env.abstained:
+            yield _sse("suggestions", {"items": env.suggestions})
         # Route + confidence complete the envelope for a client assembling it
         # from the stream alone.
         yield _sse("route", {
@@ -285,7 +293,10 @@ async def submit_feedback(
     body: FeedbackRequest,
     claims: TokenClaims = Depends(current_claims),
 ) -> dict[str, str]:
-    log.info("Feedback received for turn %s: rating=%s user=%s", body.message_id, body.rating, claims.sub)
+    log.info(
+        "Feedback received for turn %s: rating=%s user=%s",
+        body.message_id, body.rating, claims.sub,
+    )
     return {"status": "recorded", "message_id": body.message_id}
 
 

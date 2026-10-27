@@ -40,11 +40,9 @@ class GeneratorConfig(BaseModel):
 
     seed: int = 42
 
-    # Date span. Default: one year ending Q2 2026, so the holiday season (late
-    # 2025) gives visible seasonality and Q2 2026 carries the planted dip. With
-    # the reference "today" of 2026-07-15, "last quarter" resolves to 2026 Q2.
-    start_date: dt.date = dt.date(2025, 7, 1)
-    end_date: dt.date = dt.date(2026, 6, 30)
+    # Date span: 2+ full years from 2024 to present (Q3 2026).
+    start_date: dt.date = dt.date(2024, 1, 1)
+    end_date: dt.date = dt.date(2026, 9, 30)
 
     # Entity counts.
     n_customers: int = 300

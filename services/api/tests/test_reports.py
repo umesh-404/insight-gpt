@@ -246,3 +246,17 @@ def test_markdown_renders_tables_and_sources() -> None:
     assert "| South | - |" in text          # NULL cells do not blow up
     assert "**Sources**" in text
     assert "[1] Delays (2026-05-01)" in text
+
+
+def test_pdf_export_keeps_currency_figures_readable() -> None:
+    """The rupee sign must survive the latin-1 core PDF fonts.
+
+    Currency is INR everywhere, so an unmapped rupee sign turned every money
+    figure in an exported report into a literal "?".
+    """
+    from app.api.routers.reports import _pdf_text
+
+    rendered = _pdf_text("Revenue fell to ₹2.02Cr → ₹1.33Cr")
+    assert "?" not in rendered
+    assert "Rs.2.02Cr" in rendered
+    assert "Rs.1.33Cr" in rendered

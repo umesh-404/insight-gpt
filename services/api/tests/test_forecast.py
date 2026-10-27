@@ -164,20 +164,20 @@ def test_filters_flow_through_the_query_builder(catalog) -> None:
 def test_demo_warehouse_has_too_little_history_and_says_so(
     catalog, fixture_warehouse
 ) -> None:
-    history = fetch_history("revenue", catalog, fixture_warehouse, "quarter")
-    assert len(history) == 2, "the fixture warehouse is expected to hold two quarters"
+    history = fetch_history("revenue", catalog, fixture_warehouse, "year")
+    assert len(history) == 3, "the fixture warehouse holds three years (< min 4)"
 
-    result = forecast_metric("revenue", catalog, fixture_warehouse, grain="quarter")
+    result = forecast_metric("revenue", catalog, fixture_warehouse, grain="year")
 
     assert result.forecast == []          # no numbers at all
     assert result.confidence == "none"
     assert result.low_confidence is True
     assert result.method_family == "none"
-    assert result.n_history == 2
+    assert result.n_history == 3
     assert "Not enough history" in result.headline
     assert any("Refused to forecast" in c for c in result.caveats)
     # And the history it *does* have is still returned, for a chart.
-    assert [p.period for p in result.history] == ["2026Q1", "2026Q2"]
+    assert [p.period for p in result.history] == ["2024", "2025", "2026"]
 
 
 def test_refusal_over_the_api_is_200_with_no_numbers(
@@ -185,7 +185,7 @@ def test_refusal_over_the_api_is_200_with_no_numbers(
 ) -> None:
     resp = client.post(
         "/api/v1/forecast",
-        json={"metric": "revenue", "grain": "quarter", "horizon": 2},
+        json={"metric": "revenue", "grain": "year", "horizon": 2},
         headers=analyst,
     )
     assert resp.status_code == 200, resp.text
@@ -193,21 +193,21 @@ def test_refusal_over_the_api_is_200_with_no_numbers(
     assert body["forecast"] == []
     assert body["confidence"] == "none"
     assert body["low_confidence"] is True
-    assert body["n_history"] == 2
+    assert body["n_history"] == 3
 
 
 def test_forecastability_report_explains_every_metric(
     client: TestClient, viewer: dict[str, str]
 ) -> None:
-    resp = client.get("/api/v1/forecast/metrics?grain=quarter", headers=viewer)
+    resp = client.get("/api/v1/forecast/metrics?grain=year", headers=viewer)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["grain"] == "quarter"
+    assert body["grain"] == "year"
     assert body["min_history"] >= 2
     keys = {m["metric"] for m in body["metrics"]}
     assert {"revenue", "gross_margin_pct", "units_on_hand"} <= keys
     for row in body["metrics"]:
-        assert row["forecastable"] is False       # two quarters of demo data
+        assert row["forecastable"] is False       # three years of demo data (< 4 min)
         assert "Not enough history" in row["reason"]
         assert row["n_history"] < body["min_history"]
 

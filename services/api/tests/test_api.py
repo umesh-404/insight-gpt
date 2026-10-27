@@ -311,3 +311,37 @@ def test_stream_guardrail_failure_is_labelled(
     events = _sse_events(resp.text)
     assert events[-1][0] == "error"
     assert events[-1][1]["code"] == "guardrail_rejected"
+
+
+def test_sse_stream_carries_suggestions_for_non_abstained_answers(
+    client: TestClient,
+) -> None:
+    """A streamed answer must not lose follow-up suggestions.
+
+    The conversational route answers without abstaining but still carries
+    ``suggestions``; those only rode on the ``abstain`` event, so a client
+    reassembling the stream silently dropped them.
+    """
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    question = "Why are the least and highest sales the same?"
+
+    json_resp = client.post(
+        "/api/v1/ask",
+        json={"question": question, "stream": False},
+        headers={**_auth(token), "Accept": "application/json"},
+    )
+    assert json_resp.status_code == 200, json_resp.text
+    envelope = json_resp.json()
+    assert envelope["route"] == "conversational"
+    assert envelope["abstained"] is False
+    assert envelope["suggestions"], "fixture question must offer follow-ups"
+
+    stream_resp = client.post(
+        "/api/v1/ask",
+        json={"question": question, "stream": True},
+        headers=_auth(token),
+    )
+    assert stream_resp.status_code == 200
+    events = dict(_sse_events(stream_resp.text))
+    assert "suggestions" in events, "stream dropped the envelope's suggestions"
+    assert events["suggestions"]["items"] == envelope["suggestions"]

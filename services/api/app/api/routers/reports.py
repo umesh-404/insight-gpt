@@ -251,6 +251,11 @@ _TRANSLATE = str.maketrans(
         "—": "-", "–": "-", "‘": "'", "’": "'",
         "“": '"', "”": '"', "…": "...", "•": "-",
         " ": " ", "−": "-", "€": "EUR", "→": "->",
+        # Currency is INR throughout, so the rupee sign appears in every
+        # money figure we export; without it fpdf writes a literal "?".
+        "₹": "Rs.", "≈": "~", "≥": ">=", "≤": "<=",
+        # Narrative markers used by the insight digest.
+        "🔺": "(up)", "🔻": "(down)", "💡": "", "⚠": "[!]",
     }
 )
 

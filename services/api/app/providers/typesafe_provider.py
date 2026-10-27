@@ -85,7 +85,9 @@ class TypeSafeProvider(Provider):
             "how does this work", "how do you work", "joke", "humor", "funny", "laugh",
             "current insight", "current insights", "what are the insights", "show insight",
             "show insights", "any insight", "anomal", "digest", "summary of business",
-            "business overview",
+            "business overview", "the same", "are the same", "why are they the same",
+            "same thing", "why are least and highest", "why are they equal",
+            "how can they be the same", "least and highest", "highest and least",
         )
         if any(w in q_lower for w in conversational_patterns) or bool(
             q_words & {"help", "hello", "hi", "hey"}
@@ -123,12 +125,12 @@ class TypeSafeProvider(Provider):
             "channel": "Sales channels (e.g. Online, In-store)",
             "store": "Retail store locations",
             "segment": "Customer segments",
-            "date": "Time breakdown, date, day of sales, daily trends",
+            "date": "Explicit grouping by date/day/month (e.g. 'by day', 'daily trend')",
         }
         for d in dimensions:
             if d not in dim_criteria:
                 dim_criteria[d] = f"Dimension for {d}"
-        dim_criteria["none"] = "No grouping dimension requested"
+        dim_criteria["none"] = "No grouping dimension; aggregate across the period"
 
         questions = {
             "route": Choice(
@@ -173,10 +175,29 @@ class TypeSafeProvider(Provider):
         dim_choice = res.choices["dimension"].choice
 
         day_words = (
-            "sales day", "highest day", "best day", "worst day", "by day", "by date", "per day"
+            "sales day", "highest day", "best day", "worst day", "by day", "by date", "per day",
+            "over time", "trend", "monthly", "by month", "quarterly", "by quarter", "yearly",
+            "by year", "vs", "versus", "over 2 years", "over two years", "last 2 years",
+            "last two years",
         )
         if any(w in q_lower for w in day_words):
             dim_choice = "date"
+
+        extremum_words = (
+            "least sale", "lowest sale", "minimum sale", "lowest selling", "worst sale",
+            "worst selling", "least revenue", "lowest revenue", "teh least sale",
+            "highest sale", "top sale", "maximum sale", "best sale", "best selling",
+            "highest selling", "highest revenue", "top revenue", "most sale",
+        )
+        if any(w in q_lower for w in extremum_words) and dim_choice == "none":
+            if any(w in q_lower for w in ("day", "date", "daily", "when")):
+                dim_choice = "date"
+            elif any(w in q_lower for w in ("category", "categories")):
+                dim_choice = "category"
+            elif any(w in q_lower for w in ("region", "regions")):
+                dim_choice = "region"
+            else:
+                dim_choice = "product"
 
         if is_change and ("why" in q_lower or "cause" in q_lower or "reason" in q_lower):
             route_choice = "hybrid"

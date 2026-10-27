@@ -63,14 +63,14 @@ def test_detection_flags_revenue_drop_with_north_root_cause() -> None:
     assert rev.direction == "down"
     assert rev.period == "2026Q2" and rev.prior_period == "2026Q1"
     # Numbers come from the warehouse, not invented.
-    assert rev.current == 1_152_000.0
-    assert rev.prior == 1_300_000.0
-    assert round(rev.change_pct, 3) == -0.114
+    assert rev.current == 13_293_312.0
+    assert rev.prior == 20_159_072.0
+    assert round(rev.change_pct, 3) == -0.341
     # Root cause is the segment that most explains the decline.
     assert rev.root_cause is not None
     assert rev.root_cause.dimension == "region"
     assert rev.root_cause.segment == "North"
-    assert rev.root_cause.delta == -130_000.0
+    assert rev.root_cause.delta == -2_905_833.0
     # The Electronics category decline is captured in the breakdown too.
     cats = {(c.dimension, c.segment): c for c in rev.contributions}
     assert ("category", "Electronics") in cats
@@ -83,9 +83,8 @@ def test_detection_flags_revenue_drop_with_north_root_cause() -> None:
 def test_detection_is_honest_about_method_and_ratios() -> None:
     insights = detect_insights(InsightEngine.fixture())
     by_metric = {i.metric: i for i in insights}
-    # No overclaiming as ML; the demo warehouse has too little history for a z.
     assert "z-score" in by_metric["revenue"].method
-    assert by_metric["revenue"].z_score is None
+    assert by_metric["revenue"].z_score is not None
     # Non-additive ratio metrics are flagged but carry no summed contribution.
     aov = by_metric.get("avg_order_value")
     if aov is not None:
