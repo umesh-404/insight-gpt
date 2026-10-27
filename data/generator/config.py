@@ -40,9 +40,13 @@ class GeneratorConfig(BaseModel):
 
     seed: int = 42
 
-    # Date span: 2+ full years from 2024 to present (Q3 2026).
+    # Date span: 2+ full years from 2024 up to the demo's pinned "today".
+    # end_date MUST NOT exceed that date: the demo clock is pinned (the warehouse
+    # has no data after it, so a real today would make "last quarter" empty), and
+    # generating beyond it produces future-dated orders, which the quality
+    # invariant in tests/test_generator.py rejects.
     start_date: dt.date = dt.date(2024, 1, 1)
-    end_date: dt.date = dt.date(2026, 9, 30)
+    end_date: dt.date = dt.date(2026, 7, 15)
 
     # Entity counts.
     n_customers: int = 300
