@@ -71,3 +71,39 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA insight GRANT SELECT ON TABLES TO insight_app
 -- UI enqueues a `queued` row that the worker then picks up and advances. Scoped
 -- to this single ledger table -- the warehouse itself stays read-only.
 GRANT INSERT, UPDATE ON insight.pipeline_runs TO insight_app;
+
+-- The API also owns two small operational tables. Both stores create them
+-- defensively at startup, but the app role has no CREATE privilege (by design),
+-- so that attempt fails, the store silently degrades to its JSON-file backend,
+-- and a POST that persisted nothing still answers 201. Creating them here, with
+-- the owner role, is what makes the Postgres backend actually reachable.
+CREATE TABLE IF NOT EXISTS insight.sources (
+    id             text PRIMARY KEY,
+    name           text NOT NULL,
+    kind           text NOT NULL,
+    status         text NOT NULL,
+    last_tested_at timestamptz,
+    active         boolean NOT NULL DEFAULT true,
+    location       text,
+    detail         text,
+    options        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- Only the NAME of the environment variable holding a connection string is
+    -- ever stored. The credential itself never reaches this table.
+    dsn_env        text,
+    had_dsn        boolean NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS insight.insights (
+    id         text PRIMARY KEY,
+    metric     text NOT NULL,
+    period     text,
+    severity   text,
+    change_pct double precision,
+    created_at timestamptz DEFAULT now(),
+    payload    jsonb NOT NULL
+);
+
+-- These two are genuine app-owned state, so the app role writes them. The
+-- warehouse (`marts`) and the `raw` schema stay read-only and unreachable
+-- respectively -- the privilege separation that matters is unchanged.
+GRANT INSERT, UPDATE, DELETE ON insight.sources, insight.insights TO insight_app;

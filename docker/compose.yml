@@ -101,6 +101,10 @@ services:
       # fails at request time because the key never reaches the container.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # Same contract for the TypeSafe provider: without these, LLM_PROVIDER=typesafe
+      # builds a provider with no key and every answer fails at request time.
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      TYPESAFE_MODEL: ${TYPESAFE_MODEL:-jev-latest}
       WAREHOUSE: ${WAREHOUSE:-postgres}
       # The API queries as the SELECT-only role (created in initdb), so a
       # failure of the SQL guardrails still cannot mutate the warehouse.
@@ -109,8 +113,13 @@ services:
       RETRIEVER: ${RETRIEVER:-qdrant}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      # The API reranks at query time through the shared retrieval package, so it
+      # needs the SAME rerank model bootstrap pulled in the worker. Omitting it
+      # here let the API fall back to the config-file default while .env named a
+      # different model — the mismatch surfaces only as silently missing rerank.
+      RERANK_MODEL: ${RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:F16}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-.env}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3020,http://127.0.0.1:3020}
       TODAY: ${TODAY:-2026-07-15}
     healthcheck:
       # The API serves GET /health at the root. python (urllib) is always in the

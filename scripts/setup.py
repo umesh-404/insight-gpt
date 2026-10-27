@@ -326,10 +326,17 @@ def step_ports(env: dict[str, str]) -> dict[str, str]:
     if env.get("NEXT_PUBLIC_API_URL") != expected_api_url:
         set_env_value(ENV_FILE, "NEXT_PUBLIC_API_URL", expected_api_url)
         info(f"NEXT_PUBLIC_API_URL -> {expected_api_url}")
-    expected_cors = f"http://localhost:{web_port}"
-    if expected_cors not in env.get("CORS_ORIGINS", ""):
-        set_env_value(ENV_FILE, "CORS_ORIGINS", expected_cors)
-        info(f"CORS_ORIGINS -> {expected_cors}")
+    # CORS_ORIGINS is a LIST. Append the web origin instead of overwriting the
+    # whole value: replacing it would drop every other origin the user needs
+    # (the 3020 native-dev port, the 127.0.0.1 spellings), and a missing origin
+    # fails preflight so login stops working in the browser with no server error.
+    existing = [o.strip() for o in env.get("CORS_ORIGINS", "").split(",") if o.strip()]
+    wanted = [f"http://localhost:{web_port}", f"http://127.0.0.1:{web_port}"]
+    missing = [o for o in wanted if o not in existing]
+    if missing:
+        merged = ",".join(existing + missing)
+        set_env_value(ENV_FILE, "CORS_ORIGINS", merged)
+        info(f"CORS_ORIGINS += {', '.join(missing)}")
 
     return read_env(ENV_FILE)
 
