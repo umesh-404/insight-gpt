@@ -176,7 +176,7 @@ export function InsightDigestCard({ insight }: { insight: Insight }) {
           </span>
           <span
             className={cn(
-              'ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium tabular-nums',
+              'ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-base font-semibold tabular-nums',
               verdict === 'bad' && 'bg-destructive/12 text-destructive',
               verdict === 'good' && 'bg-success/12 text-success',
               verdict === 'neutral' && 'bg-muted text-muted-foreground',
@@ -196,7 +196,7 @@ export function InsightDigestCard({ insight }: { insight: Insight }) {
           </span>
         </div>
 
-        <h3 className="mt-3 text-lg font-medium leading-snug text-foreground">
+        <h3 className="mt-3 max-w-[70ch] text-lg font-semibold leading-snug tracking-tight text-foreground">
           {insight.headline}
         </h3>
 

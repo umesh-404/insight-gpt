@@ -305,13 +305,11 @@ export function InsightCard({
       <CardContent className="p-5">
         {/* Question echo */}
         {question ? (
-          <div className="mb-4 flex items-start gap-3">
-            <span className="mt-px flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-2xs font-semibold uppercase tracking-wide text-secondary-foreground">
-              You
-            </span>
-            <p className="pt-1 text-sm font-medium leading-snug text-foreground">
+          <div className="mb-4 border-b border-border pb-4">
+            <h2 className="max-w-[46ch] text-pretty text-xl font-semibold leading-snug tracking-tight text-foreground">
+              <span className="sr-only">Question: </span>
               {question}
-            </p>
+            </h2>
           </div>
         ) : null}
 
@@ -402,7 +400,7 @@ export function InsightCard({
                       No answer was produced for this question.
                     </p>
                   ) : (
-                    <div className="leading-relaxed">
+                    <div className="max-w-[72ch] leading-relaxed">
                       <AnswerText
                         text={envelope.answer}
                         citationNumbers={citationNumbers}

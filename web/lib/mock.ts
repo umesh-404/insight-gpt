@@ -89,13 +89,13 @@ const REVENUE_TREND = [
 ];
 
 export const FLAGSHIP_ANSWER =
-  'Revenue fell 12.4% quarter-over-quarter, from $4.20M in Q1 to $3.68M in Q2. ' +
+  'Revenue fell 12.4% quarter-over-quarter, from ₹42.0L in Q1 to ₹36.8L in Q2. ' +
   'The decline is concentrated in two areas. First, the Outdoor & Garden ' +
   'category dropped 28% as the seasonal promotion that ran in Q1 was not ' +
   'repeated [1] — this single category accounts for roughly two-thirds of the ' +
   'total shortfall. Second, the West region underperformed by 15%, coinciding ' +
   'with a spike in delivery-delay complaints after a carrier change in April [2]. ' +
-  'Average order value held steady ($131 → $129), so the driver is order ' +
+  'Average order value held steady (₹131 → ₹129), so the driver is order ' +
   'volume, not basket size. Customer sentiment corroborates the numbers: ' +
   'shipping-related complaints rose 41% over the same window [3].';
 
@@ -783,7 +783,7 @@ export function mockReport(id: string): Report {
         id: `${summary.id}_b0`,
         heading: 'Headline metrics',
         prose:
-          'Revenue for the period was $3.68M, down 12.4% versus the prior ' +
+          'Revenue for the period was ₹36.8L, down 12.4% versus the prior ' +
           'quarter. Orders fell 11% while average order value was essentially ' +
           'flat, indicating a volume-driven decline rather than a pricing or ' +
           'basket-size effect.',
@@ -872,7 +872,7 @@ export const MOCK_INSIGHTS: Insight[] = [
     method:
       'Period-over-period change at quarter grain (threshold 5%, min magnitude 0); insufficient history for a z-score.',
     headline:
-      'Revenue fell 11.4% in 2026Q2 vs 2026Q1, from $1.30M to $1.15M. North (region) drove most of the move (-$130.0K, 88% of the change).',
+      'Revenue fell 11.4% in 2026Q2 vs 2026Q1, from ₹13L to ₹11.5L. North (region) drove most of the move (-₹1.3L, 88% of the change).',
     root_cause: {
       dimension: 'region',
       segment: 'North',
