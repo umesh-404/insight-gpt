@@ -23,6 +23,7 @@ for %%C in (python python3 py) do (
     )
 )
 
+
 if not defined PY (
     echo.
     echo   Python 3.9+ was not found.
