@@ -14,10 +14,12 @@ Metrics:
   resolved citation marker).
 * **citation coverage** — every ``[n]`` marker in an answer resolves to a real
   citation, and every answer that leans on documents carries at least one.
-* **no-fabricated-number** — every *absolute* number in the answer appears in a
-  returned table cell. Percentages are exempted: they are ratios derived from
-  grounded values and are not expected to appear verbatim in a table (a
-  documented limitation of the offline check).
+* **no-fabricated-number** — every *absolute* number in the answer appears in
+  the returned evidence: a table cell, or the title/body of a cited document
+  (a document-only answer returns no tables at all, so matching against table
+  cells alone would score every quoted figure as fabricated). Percentages are
+  exempted: they are ratios derived from grounded values and are not expected
+  to appear verbatim in the evidence (a documented limitation of the check).
 
 The engine's citation objects intentionally do not carry document bodies, so the
 harness reconstructs the evidence text the engine saw from the same fixture
@@ -139,8 +141,20 @@ def _table_numbers(env: AnswerEnvelope) -> list[float]:
     return grounded
 
 
-def _is_grounded_number(num: float, table_numbers: list[float]) -> bool:
-    for t in table_numbers:
+def _text_numbers(text: str) -> list[float]:
+    """Absolute numbers appearing in a piece of evidence text."""
+    found: list[float] = []
+    for match in _NUMBER.finditer(text):
+        if match.group(2) == "%":
+            continue
+        n = _norm_number(match.group(1), match.group(2) or "")
+        if n is not None:
+            found.append(n)
+    return found
+
+
+def _is_grounded_number(num: float, evidence_numbers: list[float]) -> bool:
+    for t in evidence_numbers:
         if t == 0:
             if abs(num) < 1e-5:
                 return True
@@ -159,6 +173,21 @@ class DocIndex:
     @classmethod
     def build(cls) -> DocIndex:
         return cls(by_id={d["doc_id"]: d for d in get_sample_documents()})
+
+    def evidence_numbers(self, env: AnswerEnvelope) -> list[float]:
+        """Numbers that appear verbatim in the cited documents' title or body.
+
+        An answer that quotes a figure (or a year, e.g. "Q3 2026") straight out
+        of a cited document is grounded even when the route returned no table —
+        document-only answers have no table cells to match against at all.
+        """
+        numbers: list[float] = []
+        for cite in env.citations:
+            numbers += _text_numbers(cite.title)
+            doc = self.by_id.get(cite.doc_id)
+            if doc:
+                numbers += _text_numbers(f"{doc['title']} {doc['body']}")
+        return numbers
 
     def context_tokens(self, env: AnswerEnvelope) -> set[str]:
         tokens: set[str] = set()
@@ -201,7 +230,7 @@ class AnswerScore:
 def score_answer(question: str, env: AnswerEnvelope, docs: DocIndex) -> AnswerScore:
     context = docs.context_tokens(env)
     valid_markers = {c.n for c in env.citations}
-    table_numbers = _table_numbers(env)
+    evidence_numbers = _table_numbers(env) + docs.evidence_numbers(env)
 
     sentences = [s for s in _SENTENCE.split(env.answer.strip()) if s.strip()]
     grounded = 0
@@ -219,7 +248,7 @@ def score_answer(question: str, env: AnswerEnvelope, docs: DocIndex) -> AnswerSc
             grounded += 1
 
     numbers = _answer_numbers(env.answer)
-    grounded_numbers = sum(1 for n in numbers if _is_grounded_number(n, table_numbers))
+    grounded_numbers = sum(1 for n in numbers if _is_grounded_number(n, evidence_numbers))
     needs_citation = env.route in ("unstructured", "hybrid")
 
     return AnswerScore(

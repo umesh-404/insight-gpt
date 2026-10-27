@@ -195,51 +195,51 @@ def golden_cases() -> list[Case]:
         Case(
             "Why did revenue decline last quarter?",
             expected_route="hybrid", expected_metric="revenue",
-            value_check=change_check(1_152_000, 1_300_000, "North", "Electronics"),
-            value_desc="Q2 1,152,000 < Q1 1,300,000; drivers North / Electronics",
+            value_check=change_check(13_293_312, 20_159_072, "North", "Electronics"),
+            value_desc="Q2 13,293,312 < Q1 20,159_072; drivers North / Electronics",
         ),
         Case(
             "Why did sales decline last quarter?",
             expected_route="hybrid", expected_metric="revenue",
-            value_check=change_check(1_152_000, 1_300_000, "North", "Electronics"),
+            value_check=change_check(13_293_312, 20_159_072, "North", "Electronics"),
             value_desc="'sales' resolves to revenue; same decline story",
         ),
         # --- scalar structured -------------------------------------------------
         Case(
             "What was revenue last quarter?",
             expected_route="structured", expected_metric="revenue",
-            value_check=scalar_value(1_152_000), value_desc="revenue = 1,152,000",
+            value_check=scalar_value(13_293_312), value_desc="revenue = 13,293,312",
         ),
         Case(
             "How many orders were placed last quarter?",
             expected_route="structured", expected_metric="orders",
-            value_check=scalar_value(48), value_desc="orders = 48",
+            value_check=scalar_value(6887), value_desc="orders = 6,887",
         ),
         Case(
             "What was the average order value last quarter?",
             expected_route="structured", expected_metric="avg_order_value",
-            value_check=scalar_value(24_000), value_desc="AOV = 24,000",
+            value_check=scalar_value(1930.20), value_desc="AOV = 1,930",
         ),
         Case(
             "What were units sold last quarter?",
             expected_route="structured", expected_metric="units_sold",
-            value_check=scalar_value(153), value_desc="units_sold = 153",
+            value_check=scalar_value(6459), value_desc="units_sold = 6,459",
         ),
         Case(
             "How many units on hand do we have?",
             expected_route="structured", expected_metric="units_on_hand",
-            value_check=scalar_value(5_580), value_desc="units_on_hand = 5,580",
+            value_check=scalar_value(30_217), value_desc="units_on_hand = 30,217",
         ),
         Case(
             "Which products should we restock?",
             expected_route="structured", expected_metric="units_on_hand",
-            value_check=scalar_value(5_580), value_desc="restock -> inventory metric",
+            value_check=scalar_value(30_217), value_desc="restock -> inventory metric",
         ),
         # --- assertion-function checks (messy metrics; ranges, not equalities) -
         Case(
             "What was gross margin last quarter?",
             expected_route="structured", expected_metric="gross_margin",
-            value_check=assertion(lambda v: 0 < v < 1_152_000, "0 < margin < revenue"),
+            value_check=assertion(lambda v: 0 < v < 13_293_312, "0 < margin < revenue"),
             value_desc="gross margin positive and below revenue",
         ),
         Case(
@@ -253,15 +253,15 @@ def golden_cases() -> list[Case]:
             "Show revenue by region last quarter.",
             expected_route="structured", expected_metric="revenue",
             expected_dims=["region"],
-            value_check=grouped_top("region", "South", 313_600),
-            value_desc="top region South = 313,600",
+            value_check=grouped_top("region", "South", 3_763_379),
+            value_desc="top region South = 3,763,379",
         ),
         Case(
             "Show revenue by category last quarter.",
             expected_route="structured", expected_metric="revenue",
             expected_dims=["category"],
-            value_check=grouped_top("category", "Electronics", 501_600),
-            value_desc="top category Electronics = 501,600",
+            value_check=grouped_top("category", "Electronics", 5_060_044),
+            value_desc="top category Electronics = 5,060,044",
         ),
         # --- unstructured (documents only) ------------------------------------
         Case(
