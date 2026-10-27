@@ -22,6 +22,7 @@ for %%C in (python python3 py) do (
         if !errorlevel! equ 0 set "PY=%%C"
     )
 )
+..
 
 if not defined PY (
     echo.
