@@ -203,6 +203,11 @@ Feedback is written to the eval store; it feeds the offline quality harness in
 
 #### `GET /dashboards` — list dashboards; `GET /dashboards/{id}` — one dashboard
 
+> **Designed, not built.** There is no `dashboards` router in the running API.
+> The web app's dashboard screen composes its tiles client-side and resolves
+> every value through `/metrics/query`, which is why this endpoint was never
+> needed. The shape below is kept as the design record; do not expect a route.
+
 A dashboard is a saved layout of tiles, each referencing a governed metric plus
 default filters. The API returns the layout and metric references; the frontend
 resolves live values via `/metrics/query`.
@@ -413,7 +418,6 @@ graph TD
         ASKR["ask.py — SSE"]
         CONVR["conversations.py"]
         FBR["feedback.py"]
-        DASHR["dashboards.py"]
         METR["metrics.py"]
         SRCR["sources.py"]
         PIPER["pipelines.py"]
@@ -434,7 +438,6 @@ graph TD
     AUTHR --> AUTHDEP
     ASKR --> ENGINE
     METR --> ENGINE
-    DASHR --> DB
     CONVR --> DB
     SRCR --> DB
     PIPER --> WORKER
@@ -444,7 +447,7 @@ graph TD
     SYSR --> DB
 ```
 
-Each area is one router module in `services/api/routers/`, mounted with its
+Each area is one router module in `services/api/app/api/routers/`, mounted with its
 prefix and tags. Cross-cutting behavior (request IDs, logging, rate limiting,
 CORS) is middleware, applied once, not per-router.
 

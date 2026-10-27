@@ -155,6 +155,7 @@ API_PORT=8000
 
 # --- Database ---
 POSTGRES_DSN=postgresql://insight:insight@postgres:5432/insight
+APP_POSTGRES_DSN=postgresql://insight_app:insight@postgres:5432/insight
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
 POSTGRES_DB=insight
@@ -174,30 +175,38 @@ EMBED_MODEL=nomic-embed-text
 RERANK_MODEL=dengcao/Qwen3-Reranker-0.6B:F16
 
 # --- LLM provider (chat/reasoning step only) ---
-LLM_PROVIDER=ollama                # ollama (default) | openai | groq | gemini*
+LLM_PROVIDER=ollama                # ollama (default) | openai | groq | typesafe | gemini*
 LLM_MODEL=llama3.1:8b
 # OPENAI_API_KEY=                  # only if LLM_PROVIDER=openai
 # GROQ_API_KEY=                    # only if LLM_PROVIDER=groq
+# TYPESAFE_API_KEY=                # only if LLM_PROVIDER=typesafe
 
 # --- Pipeline ---
 REINDEX_SOURCE=ingested            # ingested | samples | <path>
 
 # --- Frontend ---
 NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+# Every origin the browser loads the web app from. The 3020 entries cover the
+# native (no-Docker) dev flow; an origin missing here fails CORS preflight and
+# login stops working in the browser with no server-side error.
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3020,http://127.0.0.1:3020
 ```
 
 `.env.example` is the authoritative list; the block above is a summary.
 
-**One database role.** The stack provisions a single `insight` role that owns
-`raw`, `marts`, and `insight` and is used by the API, ingestion, and dbt alike —
-that is what `docker/initdb/01-schemas.sql`, `docker/compose.yml`, and
-`services/warehouse/profiles.yml` all agree on. Splitting into a read-only app
-role and a writing ETL role is the right posture for a real deployment and is
-described as such in [`08-security.md`](08-security.md) §3, but it is **not**
-what this compose stack creates today. The SQL-safety guarantees the system
-actually relies on are enforced above the database: the engine never authors
-SQL, the query builder compiles only from the governed semantic layer, and the
-table allow-list rejects anything outside `marts`.
+**Two database roles.** `docker/initdb/01-schemas.sql` provisions the owner
+role `insight` (it owns `raw`, `marts`, and `insight`, and is what dbt,
+ingestion, and the seed job connect as) plus a second login role `insight_app`
+that holds only `CONNECT`, `USAGE`, and `SELECT` on `marts` and `insight` — with
+a narrow `INSERT, UPDATE` grant on `insight.pipeline_runs` so run tracking still
+works. The `api` service connects as that read-only role: compose maps
+`APP_POSTGRES_DSN` onto the container's `POSTGRES_DSN`, while the `worker`
+keeps the owner `POSTGRES_DSN` because dbt must create tables. So a failure of
+the SQL guardrails still cannot write to the warehouse. The guarantees above
+the database remain the first line of defence: the engine never authors SQL,
+the query builder compiles only from the governed semantic layer, and the table
+allow-list rejects anything outside `marts` (see
+[`08-security.md`](08-security.md) §3).
 
 **Cloud keys** reach the `api` container only if they are in the root `.env`
 *and* the stack was started a way that reads it (§2.1). Embeddings and reranking

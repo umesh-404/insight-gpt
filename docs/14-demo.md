@@ -307,11 +307,11 @@ again — completed steps become fast no-ops.
 | Question | Answer |
 |---|---|
 | *"Isn't this just the model writing SQL?"* | No — the model emits a metric selection (metric key, dimensions, time range). A query builder emits the SQL, and a validator rejects non-`SELECT` statements, non-allow-listed tables, and joins reaching unmodeled tables, then enforces a row limit and a statement timeout. |
-| *"What stops it hallucinating a number?"* | Numbers come from SQL result sets, and the faithfulness harness scores whether every figure in the prose appears in one — currently 8/8, floored at 0.90 in CI. |
+| *"What stops it hallucinating a number?"* | Numbers come from SQL result sets, and the faithfulness harness scores whether every figure in the prose appears in one — currently 9/9, floored at 0.90 in CI. |
 | *"What if the question has no answer?"* | It abstains and says why, with suggestions. §4. |
 | *"Does it need an API key / the internet?"* | No. Embeddings and reranking are always local (Ollama); the reasoning step defaults to local and takes a cloud provider only if you configure one. |
 | *"Is the data real?"* | Synthetic retail data, generated with a deliberately planted quarterly dip so the slice question has a genuine, discoverable cause — see [`02-data-model.md`](02-data-model.md). |
-| *"What isn't finished?"* | Job chaining, watermark incremental sync for SQL sources, the read-only Postgres role split, and a frontend test suite. All four are designed in the docs and listed in the README's status table. Say this plainly — it is a better answer than a feature list. |
+| *"What isn't finished?"* | Job chaining, watermark incremental sync for SQL sources, and a frontend test suite. All three are designed in the docs and listed in the README's status table. Say this plainly — it is a better answer than a feature list. |
 
 ---
 

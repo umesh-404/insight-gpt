@@ -167,10 +167,12 @@ The insight engine's grounded text-to-SQL is evaluated with its own golden set �
 `question → expected metric/dimension selection` and/or an
 `expected result` — plus a dedicated guardrail suite.
 
-- **Golden set** — `tests/eval/text2sql_golden.jsonl`: each row pairs a question
-  with the expected semantic-layer selection (metrics, dimensions, filters)
-  and, where deterministic, the expected result rows over the seeded demo
-  warehouse.
+- **Golden set** — `golden_cases()` in `tests/eval/text2sql.py`: each case pairs
+  a question with the expected semantic-layer selection (metrics, dimensions,
+  filters) and, where deterministic, the expected result rows over the seeded
+  demo warehouse. The cases live in Python rather than a data file so that a
+  case can assert against the catalog directly and drift is caught by the type
+  checker, not at eval time.
 - **Primary metric — execution accuracy:** run the generated (governed) query
   against the demo warehouse and compare the **result set** to the expected
   result. Execution accuracy is more honest than string-matching SQL, because

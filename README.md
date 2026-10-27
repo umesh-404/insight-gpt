@@ -124,14 +124,14 @@ of it is estimated, and there are no benchmarks from anywhere but this repo.
 | Capability | Evidence |
 |---|---|
 | Grounded text-to-SQL over a governed layer | `make eval` — execution accuracy **1.000** (12/12), routing accuracy **1.000** (13/13), metric-selection accuracy **1.000** (12/12), against floors of 0.90 |
-| Answers stay faithful to their sources | `make eval` — groundedness **1.000** (12/12 sentences), citation coverage **1.000** (16/16 markers resolve), no-fabricated-number rate **1.000** (8/8) |
+| Answers stay faithful to their sources | `make eval` — groundedness **1.000** (12/12 sentences), citation coverage **1.000** (20/20 markers resolve), no-fabricated-number rate **1.000** (9/9 numbers, 5/5 answers clean) |
 | Abstains rather than guessing | 2/2 out-of-scope probes abstained in the eval set; `services/api/tests/test_engine_selfcorrect.py::test_unknown_metric_abstains_with_suggestion_and_no_number` |
 | SQL guardrails hold | `services/api/tests/test_guardrails.py` — writes/DDL rejected, non-allow-listed tables rejected, joins reaching unmodeled tables rejected |
 | Self-correction is bounded, not a retry loop | `test_bounded_retries_give_up_without_looping`, `test_build_rejection_triggers_correction_not_error` |
 | Secrets and PII never reach the vector store | `services/ingestion/tests/test_redact.py` (tokens, emails, phones, Luhn-gated card numbers, private-key blocks) + `test_handoff.py::test_published_documents_are_redacted` |
 | Hybrid retrieval earns its second stage | `services/retrieval/retrieval/eval.py` scores Recall@1/@3 and MRR with reranking off vs. on against a golden set (needs live Qdrant + Ollama) |
 | Automatic insight detection with root cause | `GET /api/v1/insights` returns period-over-period movers with a contribution breakdown; covered by `services/api/tests/test_insights.py` |
-| The whole thing actually runs | 367 tests pass across the five offline suites: api 158, retrieval 108 (1 skipped), generator + drift 42, worker 34, ingestion 25 |
+| The whole thing actually runs | 640 tests pass across the five offline suites: api 430, retrieval 109, generator + drift 42, worker 34, ingestion 25 |
 
 Run it all yourself: `make ci-local` (lint + every offline suite + both eval
 harnesses; no Docker, no network, no models).
@@ -374,7 +374,6 @@ Designed in the docs and **deliberately not built**:
 |---|---|---|
 | Event-driven job chaining | [`docs/03-ingestion-etl.md`](docs/03-ingestion-etl.md) §5.1 | Each job is idempotent and gates its own work, so chaining is not needed for correctness; the two 30-minute jobs are offset instead |
 | Watermark-based incremental sync for SQL sources | [`docs/03-ingestion-etl.md`](docs/03-ingestion-etl.md) §3.2 | The SQL source connector itself is designed but not built; file and document sources use content hashes |
-| Separate read-only Postgres role | [`docs/08-security.md`](docs/08-security.md) §3 | The single-role deployment relies on the SELECT-only validator, allow-list, limit and timeout; the role split is a defence-in-depth layer, not the primary control |
 | `config/runtime.json` for discovered ports | [`docs/11-roadmap.md`](docs/11-roadmap.md) Phase 0 | Passing ports through the environment turned out to be enough |
 | Frontend test suite (Vitest / Playwright) | [`docs/10-testing-eval.md`](docs/10-testing-eval.md) | Not written; the web app is covered only by its type-check and build in CI |
 
