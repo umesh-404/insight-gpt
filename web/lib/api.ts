@@ -20,7 +20,9 @@ import {
   type AnswerEnvelope,
   type ApiErrorBody,
   type AskStreamEvent,
+  type AttachmentInput,
   type Cell,
+
   type Conversation,
   type ConversationSummary,
   type Insight,
@@ -923,6 +925,7 @@ function normalizeInsightPage(raw: unknown): InsightPage {
 
 export interface AskOptions {
   conversationId?: string;
+  attachments?: AttachmentInput[];
   signal?: AbortSignal;
   onEvent: (event: AskStreamEvent) => void;
 }
@@ -969,8 +972,10 @@ export async function streamAsk(
         question,
         conversation_id: opts.conversationId ?? null,
         stream: true,
+        attachments: opts.attachments ?? [],
       }),
     });
+
   } catch (err) {
     if (opts.signal?.aborted) return;
     opts.onEvent({

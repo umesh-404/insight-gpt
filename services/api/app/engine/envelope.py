@@ -31,6 +31,7 @@ class Citation(BaseModel):
     title: str
     date: str | None = None
     score: float | None = None
+    snippet: str | None = None
 
 
 class CorrectionAttempt(BaseModel):
@@ -61,7 +62,6 @@ class Chart(BaseModel):
 
 
 class AnswerEnvelope(BaseModel):
-    answer: str
     route: Route = "structured"
     sql: list[str] = Field(default_factory=list)
     tables: list[Table] = Field(default_factory=list)

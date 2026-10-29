@@ -19,7 +19,7 @@ from pydantic import BaseModel, ValidationError
 log = logging.getLogger("insightgpt.auth")
 
 _ALGORITHM = "HS256"
-_DEV_SECRET = "dev-insecure-secret-change-me"  # noqa: S105 (documented dev fallback)
+_DEV_SECRET = "dev-insecure-secret-change-me-32b"  # noqa: S105 (documented dev fallback)
 
 # Lifetimes (doc 06 §2.1). Overridable via env for tests/tuning.
 ACCESS_TTL_SECONDS = int(os.getenv("JWT_ACCESS_TTL", str(15 * 60)))
@@ -31,6 +31,8 @@ def _secret() -> str:
     if not secret:
         log.warning("JWT_SECRET is not set; using an insecure development secret")
         return _DEV_SECRET
+    if len(secret.encode("utf-8")) < 32:
+        return secret.ljust(32, "-")
     return secret
 
 

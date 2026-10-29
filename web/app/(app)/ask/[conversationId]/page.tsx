@@ -1,6 +1,8 @@
 'use client';
 
+import * as React from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { Loader2, MessageSquareOff } from 'lucide-react';
 import { ConversationList } from '@/components/conversation-list';
 import { ConversationView } from '@/components/conversation-view';
@@ -14,6 +16,7 @@ export default function ConversationPage({
 }: {
   params: { conversationId: string };
 }) {
+  const router = useRouter();
   const { data, isLoading, isError, error, refetch } = useConversation(
     params.conversationId,
   );
@@ -21,6 +24,12 @@ export default function ConversationPage({
   // A conversation owned by another user comes back as 404 — that is "not
   // found", not a failure worth an error panel.
   const notFound = error instanceof ApiError && error.status === 404;
+
+  React.useEffect(() => {
+    if (notFound) {
+      router.replace('/ask');
+    }
+  }, [notFound, router]);
 
   return (
     <div className="grid h-[calc(100vh-4rem)] grid-cols-1 md:grid-cols-[280px_1fr]">

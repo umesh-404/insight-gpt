@@ -119,9 +119,7 @@ def step_wait() -> None:
     _wait_http("ollama", f"{OLLAMA_HOST}/api/tags")
 
 
-# --------------------------------------------------------------------------- #
-# 2. Pull Ollama models                                                       #
-# --------------------------------------------------------------------------- #
+
 def _installed_models() -> set[str]:
     try:
         r = httpx.get(f"{OLLAMA_HOST}/api/tags", timeout=10.0)

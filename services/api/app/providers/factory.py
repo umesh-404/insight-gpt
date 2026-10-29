@@ -3,7 +3,9 @@
 ``LLM_PROVIDER`` picks the implementation; cloud keys come from the environment
 and are never written to the repo. The default is the local, private Ollama
 provider — and the fully offline ``FakeProvider`` backs tests and no-network
-runs. No provider here is a specific assistant vendor.
+runs. ``gemini`` uses Google AI Studio's OpenAI-compatible endpoint so it
+shares the same provider class as OpenAI and Groq. No provider here is a
+specific assistant vendor.
 """
 
 from __future__ import annotations
@@ -19,6 +21,11 @@ from .openai_compatible import OpenAICompatibleProvider
 _OPENAI_COMPATIBLE = {
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY", "gpt-4o-mini"),
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", "llama-3.1-8b-instant"),
+    "gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY",
+        "gemini-2.5-flash",
+    ),
 }
 
 
@@ -49,9 +56,5 @@ def get_provider(name: str | None = None, model: str | None = None) -> Provider:
             api_key=os.getenv("TYPESAFE_API_KEY"),
             model=model or os.getenv("TYPESAFE_MODEL", "jev-latest"),
         )
-    if name == "gemini":
-        raise NotImplementedError(
-            "gemini provider is declared in config but not yet implemented; "
-            "use 'ollama' (default) or 'openai'/'groq'/'typesafe'"
-        )
+    # gemini is now handled by _OPENAI_COMPATIBLE above
     raise ValueError(f"unknown LLM_PROVIDER {name!r}")

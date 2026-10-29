@@ -18,6 +18,7 @@ from ..providers.factory import get_provider
 from ..semantic.catalog import SemanticCatalog, load_catalog
 from ..semantic.query_builder import Filter, MetricSelection, build_query
 from ..warehouse.executor import DuckDBWarehouse, Warehouse
+from .attachments import AttachmentInput, process_attachments
 from .envelope import AnswerEnvelope, Chart, ChartSeries, Citation, CorrectionAttempt, Table
 from .retrieval import FixtureRetriever, Retriever
 from .router import route
@@ -50,23 +51,38 @@ class InsightEngine:
         )
 
     # ---- main entry point ----------------------------------------------------
-    def ask(self, question: str) -> AnswerEnvelope:
+    def ask(
+        self, question: str, attachments: list[AttachmentInput] | None = None
+    ) -> AnswerEnvelope:
+        parsed_attachments = process_attachments(attachments) if attachments else []
+        attachment_docs = [
+            att.to_doc(self.today, i + 1) for i, att in enumerate(parsed_attachments)
+        ]
+        attachment_tables = [att.table for att in parsed_attachments if att.table is not None]
+
         r = route(question, self.catalog, self.provider, self.today)
 
-        if r["route"] == "clarify":
+        # If files are attached, the user intends to query those files
+        if parsed_attachments:
+            if r["route"] in ("conversational", "clarify"):
+                r["route"] = "unstructured"
+            r["needs_docs"] = True
+
+
+        if r["route"] == "clarify" and not parsed_attachments:
             return AnswerEnvelope(
                 answer="I need a bit more detail to answer accurately.",
                 route="clarify", confidence="low", clarifying_question=r["clarify"],
             )
 
-        if r["route"] == "conversational":
+        if r["route"] == "conversational" and not parsed_attachments:
             return self._conversational_envelope(question)
 
         # The question named a metric that is not in the governed catalog and no
         # documents can stand in for it: refuse rather than compute the wrong
         # thing (docs/05 §9). Abstention is distinct from clarification — we
         # understood the question, we just cannot answer it reliably.
-        if r.get("metric_unresolved") and not r["needs_docs"]:
+        if r.get("metric_unresolved") and not r["needs_docs"] and not parsed_attachments:
             requested = _safe_echo(r.get("requested_metric"))
             return self._abstain(
                 f"'{requested}' is not a governed metric, so I cannot compute it "
@@ -89,6 +105,9 @@ class InsightEngine:
             query, filters = _retrieval_query(question, r, structured)
             docs = self.retriever.search(query, filters=filters, k=5)
 
+        if attachment_docs:
+            docs = attachment_docs + docs
+
         # Nothing to stand on — no governed number and no supporting document.
         if structured is None and not docs:
             return self._abstain(
@@ -102,20 +121,41 @@ class InsightEngine:
         if structured is not None and structured.status == "no_data":
             return self._no_data_envelope(structured, attempts)
 
-        findings = structured.findings if structured else {"kind": "docs"}
+        default_kind = "attachment" if parsed_attachments else "docs"
+        findings = structured.findings if structured else {"kind": default_kind}
+        if parsed_attachments and isinstance(findings, dict):
+            findings["attached_files"] = [
+                {
+                    "name": att.name,
+                    "rows": att.row_count,
+                    "summary": att.summary,
+                    "stats": att.stats,
+                }
+                for att in parsed_attachments
+            ]
         synth = synthesize(question, findings, docs, self.provider)
+
+        final_tables = (structured.tables if structured else []) + attachment_tables
+        if structured and attachment_docs:
+            out_route = "hybrid"
+        elif attachment_docs:
+            out_route = "unstructured"
+        else:
+            out_route = r["route"]
 
         return AnswerEnvelope(
             answer=synth["answer"],
-            route=r["route"],
+            route=out_route,
             sql=structured.sql if structured else [],
-            tables=structured.tables if structured else [],
+            tables=final_tables,
             citations=_citations(docs),
-            chart=_chart_for(structured.tables, findings) if structured else None,
-            confidence=synth.get("confidence", "medium"),
+            chart=_chart_for(final_tables, findings) if structured else None,
+            confidence=synth.get("confidence", "high" if parsed_attachments else "medium"),
             caveats=synth.get("caveats", []),
             attempts=attempts,
         )
+
+
 
     # ---- abstention + no-data + conversational envelopes --------------------
     # ---- conversational envelope (dynamic live responses) -------------------
@@ -620,10 +660,22 @@ def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:
 
 def _citations(docs) -> list[Citation]:
     return [
-        Citation(n=i + 1, doc_id=d.doc_id, source_type=d.source_type,
-                 title=d.title, date=d.date, score=d.score)
+        Citation(
+            n=i + 1,
+            doc_id=d.doc_id,
+            source_type=d.source_type,
+            title=d.title,
+            date=d.date,
+            score=d.score,
+            snippet=(
+                d.body[:250].replace("\n", " ").strip()
+                if d.source_type == "attachment"
+                else None
+            ),
+        )
         for i, d in enumerate(docs)
     ]
+
 
 
 def _chart_for(tables: list[Table], findings: dict) -> Chart | None:

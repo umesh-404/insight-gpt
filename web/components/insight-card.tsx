@@ -6,8 +6,10 @@ import {
   Code2,
   FileText,
   HelpCircle,
+  Paperclip,
   Sparkles,
   ThumbsDown,
+
   ThumbsUp,
   TriangleAlert,
 } from 'lucide-react';
@@ -44,6 +46,7 @@ const ROUTE_LABEL: Record<Route, string> = {
   hybrid: 'SQL + documents',
   clarify: 'Needs clarification',
   abstain: 'Withheld',
+  conversational: 'General discussion',
 };
 
 const CONFIDENCE_CLASS: Record<Confidence, string> = {
@@ -220,6 +223,7 @@ function ThinkingIndicator() {
 
 export interface InsightCardProps {
   question: string;
+  attachments?: { name: string; size?: number }[];
   envelope: AnswerEnvelope;
   /** True while tokens are still streaming into `envelope.answer`. */
   streaming?: boolean;
@@ -234,6 +238,7 @@ export interface InsightCardProps {
 
 export function InsightCard({
   question,
+  attachments,
   envelope,
   streaming,
   error,
@@ -241,6 +246,7 @@ export function InsightCard({
   onFeedback,
   onAsk,
 }: InsightCardProps) {
+
   const [tab, setTab] = React.useState('answer');
 
   const chart = envelope.chart_spec;
@@ -303,15 +309,38 @@ export function InsightCard({
       ) : null}
 
       <CardContent className="p-5">
-        {/* Question echo */}
-        {question ? (
+        {/* Question echo & attachments */}
+        {question || (attachments && attachments.length > 0) ? (
           <div className="mb-4 border-b border-border pb-4">
-            <h2 className="max-w-[46ch] text-pretty text-xl font-semibold leading-snug tracking-tight text-foreground">
-              <span className="sr-only">Question: </span>
-              {question}
-            </h2>
+            {question ? (
+              <h2 className="max-w-[46ch] text-pretty text-xl font-semibold leading-snug tracking-tight text-foreground">
+                <span className="sr-only">Question: </span>
+                {question}
+              </h2>
+            ) : null}
+            {attachments && attachments.length > 0 ? (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {attachments.map((att) => (
+                  <span
+                    key={att.name}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-muted/60 px-2 py-0.5 text-xs text-muted-foreground shadow-2xs"
+                  >
+                    <Paperclip className="size-3 text-primary/70" />
+                    <span className="font-medium text-foreground">{att.name}</span>
+                    {att.size ? (
+                      <span className="text-2xs text-muted-foreground/80">
+                        ({att.size > 1024 * 1024
+                          ? `${(att.size / (1024 * 1024)).toFixed(1)} MB`
+                          : `${Math.round(att.size / 1024)} KB`})
+                      </span>
+                    ) : null}
+                  </span>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
+
 
         <div className="flex items-start gap-3">
           <span

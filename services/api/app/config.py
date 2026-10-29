@@ -7,11 +7,42 @@ holds non-secret selectors and hosts. Mirrors the variables documented in
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _load_root_env() -> None:
+    candidates = [
+        Path(".env"),
+        Path(__file__).resolve().parents[3] / ".env",
+        Path(__file__).resolve().parents[2] / ".env",
+    ]
+    for env_path in candidates:
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k, v = k.strip(), v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+            break
+
+
+_load_root_env()
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="",
+        env_file=(".env", str(Path(__file__).resolve().parents[3] / ".env")),
+        extra="ignore",
+    )
 
     # LLM provider selection (secrets are read by the provider factory from env).
     llm_provider: str = "ollama"
@@ -35,3 +66,4 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+

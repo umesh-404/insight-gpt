@@ -71,9 +71,14 @@ def create_app() -> FastAPI:
     )
 
     # --- middleware (applied once, not per-router) ----------------------------
+    cors_origin_regex = os.getenv(
+        "CORS_ORIGIN_REGEX",
+        r"^https://.*\.vercel\.app$|^https://.*\.hf\.space$|^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=_cors_origins(),
+        allow_origin_regex=cors_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

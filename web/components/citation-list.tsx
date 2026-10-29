@@ -1,4 +1,4 @@
-import { ExternalLink, FileText } from 'lucide-react';
+import { ExternalLink, FileText, Paperclip } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { formatDate } from '@/lib/utils';
 import type { Citation } from '@/lib/types';
@@ -17,43 +17,55 @@ export function CitationList({ citations }: { citations: Citation[] }) {
   }
   return (
     <ol className="space-y-3">
-      {citations.map((citation, i) => (
-        <li
-          key={`${citation.doc_id}-${citation.n}-${i}`}
-          // Targeted by the inline `[n]` chips in an answer, which scroll the
-          // matching source into view and flash it.
-          id={`citation-${citation.n}`}
-          tabIndex={-1}
-          className="scroll-mt-4 rounded-lg border bg-card p-4 transition-colors target:border-primary target:bg-primary/[0.04] hover:border-primary/40"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex min-w-0 items-start gap-2.5">
-              <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-medium text-primary">
-                {citation.n}
-              </span>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <FileText
-                    className="size-3.5 shrink-0 text-muted-foreground"
-                    aria-hidden
-                  />
-                  <p className="truncate text-sm font-medium text-foreground">
-                    {citation.title}
+      {citations.map((citation, i) => {
+        const isAttachment = citation.source_type === 'attachment';
+        return (
+          <li
+            key={`${citation.doc_id}-${citation.n}-${i}`}
+            // Targeted by the inline `[n]` chips in an answer, which scroll the
+            // matching source into view and flash it.
+            id={`citation-${citation.n}`}
+            tabIndex={-1}
+            className="scroll-mt-4 rounded-lg border bg-card p-4 transition-colors target:border-primary target:bg-primary/[0.04] hover:border-primary/40"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-2.5">
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-medium text-primary">
+                  {citation.n}
+                </span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    {isAttachment ? (
+                      <Paperclip
+                        className="size-3.5 shrink-0 text-primary"
+                        aria-hidden
+                      />
+                    ) : (
+                      <FileText
+                        className="size-3.5 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                    )}
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {citation.title}
+                    </p>
+                  </div>
+                  {citation.snippet ? (
+                    <p className="mt-1.5 text-sm text-muted-foreground">
+                      {citation.snippet}
+                    </p>
+                  ) : null}
+                  <p className="mt-1.5 font-mono text-xs text-muted-foreground">
+                    {citation.doc_id}
+                    {citation.date ? ` · ${formatDate(citation.date)}` : ''}
                   </p>
                 </div>
-                {citation.snippet ? (
-                  <p className="mt-1.5 text-sm text-muted-foreground">
-                    {citation.snippet}
-                  </p>
-                ) : null}
-                <p className="mt-1.5 font-mono text-xs text-muted-foreground">
-                  {citation.doc_id}
-                  {citation.date ? ` · ${formatDate(citation.date)}` : ''}
-                </p>
               </div>
-            </div>
-            <div className="flex shrink-0 flex-col items-end gap-1.5">
-              <Badge variant="muted">{citation.source_type}</Badge>
+              <div className="flex shrink-0 flex-col items-end gap-1.5">
+                <Badge variant={isAttachment ? 'default' : 'muted'}>
+                  {isAttachment ? 'Attachment' : citation.source_type}
+                </Badge>
+
               {typeof citation.score === 'number' ? (
                 <span
                   className="text-xs tabular-nums text-muted-foreground"
@@ -75,7 +87,11 @@ export function CitationList({ citations }: { citations: Citation[] }) {
             </div>
           </div>
         </li>
-      ))}
+      );
+    })}
+
+
     </ol>
   );
 }
+

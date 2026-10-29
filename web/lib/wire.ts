@@ -148,6 +148,7 @@ const ROUTES: Route[] = [
   'hybrid',
   'clarify',
   'abstain',
+  'conversational',
 ];
 
 export function toRoute(value: unknown): Route | undefined {

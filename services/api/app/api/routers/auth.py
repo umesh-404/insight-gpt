@@ -51,12 +51,20 @@ def _cookie_secure() -> bool:
     return os.getenv("COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _cookie_samesite() -> str:
+    """SameSite flag for the refresh cookie; 'none' in cross-origin production."""
+    val = os.getenv("COOKIE_SAMESITE", "").strip().lower()
+    if val in {"none", "lax", "strict"}:
+        return val
+    return "none" if _cookie_secure() else "lax"
+
+
 def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
     response.set_cookie(
         key=REFRESH_COOKIE,
         value=refresh_token,
         httponly=True,
-        samesite="lax",
+        samesite=_cookie_samesite(),
         secure=_cookie_secure(),
         path=REFRESH_COOKIE_PATH,
         max_age=REFRESH_TTL_SECONDS,
@@ -68,7 +76,7 @@ def _clear_refresh_cookie(response: Response) -> None:
         key=REFRESH_COOKIE,
         path=REFRESH_COOKIE_PATH,
         httponly=True,
-        samesite="lax",
+        samesite=_cookie_samesite(),
         secure=_cookie_secure(),
     )
 

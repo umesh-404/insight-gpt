@@ -144,7 +144,8 @@ export type Route =
   | 'hybrid'
   | 'clarify'
   /** The engine understood the question but refused to answer it (see below). */
-  | 'abstain';
+  | 'abstain'
+  | 'conversational';
 
 /** The backend grades confidence qualitatively, not as a probability. */
 export type Confidence = 'low' | 'medium' | 'high';
@@ -275,6 +276,22 @@ export type AskStreamEvent =
   | { type: 'error'; data: ApiErrorBody };
 
 /* ----------------------------------------------------------------------------
+ * Attachments & File-grounded Q&A
+ * ------------------------------------------------------------------------- */
+
+export interface AttachmentInput {
+  name: string;
+  content: string; // Plain text or base64 data URL
+  content_type?: string;
+  size?: number;
+}
+
+export interface AttachmentInfo {
+  name: string;
+  size?: number;
+}
+
+/* ----------------------------------------------------------------------------
  * Conversations
  * ------------------------------------------------------------------------- */
 
@@ -290,10 +307,12 @@ export interface ConversationSummary {
 export interface ConversationTurn {
   id: string; // assistant message id
   question: string;
+  attachments?: AttachmentInfo[];
   envelope: AnswerEnvelope;
   created_at: string;
   feedback?: 'up' | 'down' | null;
 }
+
 
 export interface Conversation {
   id: string;

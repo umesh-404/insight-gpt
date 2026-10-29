@@ -18,12 +18,13 @@ and ``DELETE /conversations/{id}``.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Form, Path, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -31,6 +32,7 @@ from starlette.concurrency import run_in_threadpool
 from ...auth.roles import current_claims
 from ...auth.tokens import TokenClaims
 from ...config import get_settings
+from ...engine.attachments import AttachmentInput
 from ...engine.engine import InsightEngine
 from ...engine.envelope import AnswerEnvelope
 from ...engine.guardrails import GuardrailError
@@ -48,6 +50,7 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     conversation_id: str | None = None
     stream: bool = True
+    attachments: list[AttachmentInput] = Field(default_factory=list)
 
 
 class AskError(Exception):
@@ -79,7 +82,11 @@ def _chunk_text(text: str, size: int = 6) -> list[str]:
     return chunks or [text]
 
 
-async def _run(engine: InsightEngine, question: str) -> AnswerEnvelope:
+async def _run(
+    engine: InsightEngine,
+    question: str,
+    attachments: list[AttachmentInput] | None = None,
+) -> AnswerEnvelope:
     """Run the engine, reducing any failure to a sanitized :class:`AskError`.
 
     A guardrail rejection is the caller's problem (400); anything else is ours
@@ -87,7 +94,20 @@ async def _run(engine: InsightEngine, question: str) -> AnswerEnvelope:
     request id in the envelope is the key into the full server-side log line.
     """
     try:
-        return await run_in_threadpool(engine.ask, question)
+        import inspect
+
+        kwargs: dict[str, object] = {}
+        if attachments:
+            try:
+                sig = inspect.signature(engine.ask)
+                if "attachments" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    kwargs["attachments"] = attachments
+            except (ValueError, TypeError):
+                kwargs["attachments"] = attachments
+
+        return await run_in_threadpool(engine.ask, question, **kwargs)
     except GuardrailError:
         log.warning("ask rejected by guardrails", exc_info=True)
         raise AskError(
@@ -134,7 +154,7 @@ async def ask(
     if wants_json:
         started = time.perf_counter()
         try:
-            env = await _run(engine, body.question)
+            env = await _run(engine, body.question, body.attachments)
         except AskError as exc:
             if exc.status_code == 400:
                 raise BadRequestError(exc.message) from None
@@ -153,10 +173,11 @@ async def ask(
         rid = getattr(request.state, "request_id", "-")
         yield _sse("meta", {"conversation_id": conversation_id, "message_id": message_id})
         try:
-            env = await _run(engine, body.question)
+            env = await _run(engine, body.question, body.attachments)
         except AskError as exc:
             yield _sse("error", {"code": exc.code, "message": exc.message, "request_id": rid})
             return
+
 
         for piece in _chunk_text(env.answer):
             yield _sse("token", {"text": piece})
@@ -223,7 +244,42 @@ async def ask(
     )
 
 
+@router.post("/ask/upload", dependencies=[Depends(rate_limit("ask"))])
+async def ask_upload(
+    request: Request,
+    response: Response,
+    files: list[UploadFile] = File(...),
+    question: str = Form("Analyze the attached file(s) and provide key insights."),
+    conversation_id: str | None = Form(None),
+    stream: bool = Form(False),
+    claims: TokenClaims = Depends(current_claims),
+    engine: InsightEngine = Depends(get_engine),
+):
+    """Multipart file upload endpoint that parses attached files and answers queries."""
+    attachments_input: list[AttachmentInput] = []
+    for f in files:
+        content_bytes = await f.read()
+        b64 = base64.b64encode(content_bytes).decode("ascii")
+        data_url = f"data:{f.content_type or 'application/octet-stream'};base64,{b64}"
+        attachments_input.append(
+            AttachmentInput(
+                name=f.filename or "uploaded_file",
+                content=data_url,
+                content_type=f.content_type,
+                size=len(content_bytes),
+            )
+        )
+    req = AskRequest(
+        question=question,
+        conversation_id=conversation_id,
+        stream=stream,
+        attachments=attachments_input,
+    )
+    return await ask(req, request, response, claims=claims, engine=engine)
+
+
 @router.get("/conversations", response_model=store.ConversationPage)
+
 async def list_conversations(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -295,7 +351,9 @@ async def submit_feedback(
 ) -> dict[str, str]:
     log.info(
         "Feedback received for turn %s: rating=%s user=%s",
-        body.message_id, body.rating, claims.sub,
+        body.message_id,
+        body.rating,
+        claims.sub,
     )
     return {"status": "recorded", "message_id": body.message_id}
 

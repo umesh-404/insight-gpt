@@ -1,3 +1,13 @@
+---
+title: InsightGPT API
+emoji: ⚡
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # InsightGPT
 
 **Ask your business data a question in plain English. Get a cited answer, the

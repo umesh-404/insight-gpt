@@ -71,6 +71,8 @@ export function useConversation(id: string): UseQueryResult<Conversation> {
     queryFn: () => api.getConversation(id),
     enabled: Boolean(id),
     retry: retryUnlessClientError,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

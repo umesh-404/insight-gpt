@@ -34,7 +34,7 @@ ServiceStatus = Literal["ok", "degraded", "down", "fixture"]
 _OFFLINE_PROVIDERS = {"fake"}
 # Cloud providers and the env var that carries their key (the key is never read
 # into a response — only its presence is reported).
-_PROVIDER_KEY_ENV = {"openai": "OPENAI_API_KEY", "groq": "GROQ_API_KEY"}
+_PROVIDER_KEY_ENV = {"openai": "OPENAI_API_KEY", "groq": "GROQ_API_KEY", "gemini": "GEMINI_API_KEY"}
 _PROBE_TIMEOUT_S = 2.0
 _MAX_COUNTED_TABLES = 12
 

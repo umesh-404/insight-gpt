@@ -242,6 +242,24 @@ class FakeProvider(Provider):
                 "confidence": "high", "caveats": f.get("caveats", []),
             }
 
+        # Check if evidence contains an attached file
+        att_items = [
+            e for e in evidence
+            if e.get("source_type") == "attachment" or "attachment:" in str(e.get("doc_id", ""))
+        ]
+        if att_items:
+            first_att = att_items[0]
+            title = first_att.get("title", "the attached file")
+            body_preview = first_att.get("body", "")[:250].replace("\n", " ").strip()
+            return {
+                "answer": (
+                    f"Based on {title} [1], here are the key insights answering your query: "
+                    f"{body_preview}."
+                ),
+                "confidence": "high",
+                "caveats": [],
+            }
+
         # docs-only
         titles = "; ".join(e.get("title", e["doc_id"]) for e in evidence[:3])
         answer = (
@@ -250,6 +268,7 @@ class FakeProvider(Provider):
             f"Representative items: {titles}."
         ) if evidence else "No relevant documents were found for that question."
         return {"answer": answer, "confidence": "medium" if evidence else "low", "caveats": []}
+
 
 
 # --- helpers ------------------------------------------------------------------
