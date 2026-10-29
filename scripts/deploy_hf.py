@@ -29,8 +29,9 @@ title: InsightGPT API
 emoji: ⚡
 colorFrom: indigo
 colorTo: blue
-sdk: docker
-app_port: 7860
+sdk: gradio
+sdk_version: 5.20.0
+app_file: app.py
 pinned: false
 ---
 
@@ -39,8 +40,8 @@ pinned: false
 Grounded, cited conversational analytics and document/file Q&A powered by FastAPI and Gemini.
 
 ### Endpoints
-- **Health**: `GET /health`
-- **Documentation**: `GET /api/v1/docs`
+- **Health Check**: `GET /health`
+- **Interactive Swagger Docs**: `GET /api/v1/docs`
 - **Grounded Q&A**: `POST /api/v1/ask`
 - **Multipart File Upload & Ask**: `POST /api/v1/ask/upload`
 
@@ -53,6 +54,72 @@ Configure these in **Settings -> Variables and secrets**:
 - `COOKIE_SECURE` (Variable): `true`
 - `COOKIE_SAMESITE` (Variable): `none`
 - `CORS_ORIGIN_REGEX` (Variable): `^https://.*\\.vercel\\.app$|^https://.*\\.hf\\.space$`
+"""
+
+HF_APP_PY = '''"""InsightGPT API server on Hugging Face Spaces (Gradio SDK).
+
+Runs the FastAPI application mounted inside Gradio on port 7860.
+All API endpoints (/api/v1/ask, /api/v1/auth/login, /health, /api/v1/docs)
+are directly accessible by the Vercel frontend.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+# Add services/api and services/retrieval to sys.path
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "services" / "api"))
+sys.path.insert(0, str(HERE / "services" / "retrieval"))
+sys.path.insert(0, str(HERE))
+
+import gradio as gr
+from app.api.main import create_app
+
+# Create full FastAPI app with versioned routers, CORS, and auth
+fastapi_app = create_app()
+
+# Status landing page on "/"
+with gr.Blocks(title="InsightGPT Backend API") as demo:
+    gr.Markdown("# ⚡ InsightGPT Backend API is Running")
+    gr.Markdown(
+        "Grounded conversational analytics and document/file Q&A powered by FastAPI & Gemini."
+    )
+    gr.Markdown("""
+    ### Endpoints & Documentation
+    - 📖 **Interactive Swagger UI**: [/api/v1/docs](/api/v1/docs)
+    - 🩺 **Health Check**: [/health](/health)
+    - 💬 **Ask Endpoint**: `POST /api/v1/ask`
+    - 📎 **Upload & Ask Endpoint**: `POST /api/v1/ask/upload`
+    """)
+
+# Mount Gradio onto the FastAPI app
+app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("PORT", "7860"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+'''
+
+HF_REQUIREMENTS = """gradio>=5.0.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+pyyaml>=6.0
+sqlglot>=25.0
+httpx>=0.27
+duckdb>=1.0
+typesafe-sdk>=0.7.1
+pyjwt>=2.9
+python-multipart>=0.0.9
+openpyxl>=3.1
+pypdf>=4.0
+fpdf2>=2.7,<3
 """
 
 HF_DOCKERFILE = """# InsightGPT API — Hugging Face Spaces Dockerfile
@@ -158,11 +225,17 @@ def prepare_bundle(out_dir: Path) -> None:
     print("  -> Copying data (fixtures)...")
     _copy_tree_clean(REPO_ROOT / "data", out_dir / "data", ignore_patterns + ("warehouse", "generated"))
 
-    # Write README.md and Dockerfile
-    print("  -> Writing README.md with HF Spaces frontmatter...")
+    # Write README.md, app.py, requirements.txt, and Dockerfile
+    print("  -> Writing README.md with HF Spaces Gradio frontmatter...")
     (out_dir / "README.md").write_text(HF_README_TEMPLATE, encoding="utf-8")
 
-    print("  -> Writing Dockerfile (Port 7860, UID 1000)...")
+    print("  -> Writing app.py (Gradio + FastAPI runner on port 7860)...")
+    (out_dir / "app.py").write_text(HF_APP_PY, encoding="utf-8")
+
+    print("  -> Writing requirements.txt...")
+    (out_dir / "requirements.txt").write_text(HF_REQUIREMENTS, encoding="utf-8")
+
+    print("  -> Writing Dockerfile (fallback for Docker spaces)...")
     (out_dir / "Dockerfile").write_text(HF_DOCKERFILE, encoding="utf-8")
 
     # Write .dockerignore
