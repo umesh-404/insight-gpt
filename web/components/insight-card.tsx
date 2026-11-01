@@ -493,7 +493,12 @@ export function InsightCard({
                 {shownTables.length ? (
                   <div className="mt-4 space-y-4">
                     {shownTables.map((table, i) => (
-                      <DataTable key={`${table.name}-${i}`} block={table} />
+                      <DataTable
+                        key={`${table.name}-${i}`}
+                        block={table}
+                        question={question}
+                        answer={envelope.answer}
+                      />
                     ))}
                   </div>
                 ) : null}

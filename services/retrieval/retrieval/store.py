@@ -17,7 +17,12 @@ Two ideas from rememory carry the correctness here:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC  # Python 3.11+
+except ImportError:
+    UTC = timezone.utc  # type: ignore[assignment]  # Python 3.10 fallback
 from typing import Any
 
 from qdrant_client import QdrantClient, models

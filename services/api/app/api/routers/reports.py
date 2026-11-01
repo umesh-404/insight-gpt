@@ -15,7 +15,7 @@ stored ``ready`` (or ``failed`` with the reason recorded).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from ...auth.roles import Role, require_role
+from ...compat import UTC
 from ...engine.engine import InsightEngine
 from ...engine.envelope import Chart, Citation, Table
 from ..deps import get_engine, rate_limit

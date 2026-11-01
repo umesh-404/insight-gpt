@@ -34,7 +34,7 @@ import os
 import socket
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field, SecretStr
 from starlette.concurrency import run_in_threadpool
 
 from ...auth.roles import Role, require_role
+from ...compat import UTC
 from ..deps import rate_limit
 from ..errors import BadRequestError, NotFoundError
 from ..sources_store import SourceRecord, sanitize_options, store_from_env

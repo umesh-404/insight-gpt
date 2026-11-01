@@ -7,18 +7,24 @@ const nextConfig = {
     ignoreDuringBuilds: false,
   },
   async rewrites() {
-    // Optional dev convenience: proxy same-origin `/api/*` calls to the backend
-    // so the browser avoids CORS during local development. The typed client in
-    // `lib/api.ts` uses NEXT_PUBLIC_API_URL directly, so this is only a fallback.
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-    if (!apiUrl) return [];
+    const backendHost =
+      process.env.BACKEND_URL || 'https://Ajvex-insightgpt.hf.space';
     return [
       {
-        source: '/backend/:path*',
-        destination: `${apiUrl}/:path*`,
+        source: '/api/v1/:path*',
+        destination: `${backendHost}/api/v1/:path*`,
+      },
+      {
+        source: '/status',
+        destination: `${backendHost}/status`,
+      },
+      {
+        source: '/health',
+        destination: `${backendHost}/health`,
       },
     ];
   },
 };
 
 module.exports = nextConfig;
+

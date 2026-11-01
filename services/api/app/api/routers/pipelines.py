@@ -29,7 +29,7 @@ import contextlib
 import json
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from ...auth.roles import Role, require_role
+from ...compat import UTC
 from ...config import get_settings
 from ..deps import rate_limit
 from ..errors import ConflictError, DependencyUnavailableError, NotFoundError

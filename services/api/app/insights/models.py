@@ -9,10 +9,12 @@ prose is templated, never a model's guess at a figure.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from ..compat import UTC
 
 Severity = Literal["high", "medium", "low"]
 Direction = Literal["up", "down"]

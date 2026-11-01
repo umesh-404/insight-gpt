@@ -9,14 +9,58 @@ retrieval logic of its own — it just consumes ranked, cited results.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+from pathlib import Path
 import re
 from typing import Protocol
 
 from pydantic import BaseModel
 
+log = logging.getLogger("insightgpt.retrieval")
+
 _STOP = {"the", "a", "an", "did", "in", "on", "of", "to", "and", "why", "what",
          "this", "that", "last", "month", "quarter", "for", "is", "are", "our",
          "we", "customers", "customer"}
+
+
+def _load_default_corpus() -> list[dict]:
+    """Load sample documents and any generated documents found in data/generated/documents."""
+    from ..fixtures.retail import get_sample_documents
+    docs: list[dict] = list(get_sample_documents())
+
+    # Look for generated/documents directory
+    candidates = [
+        Path(os.environ.get("DOCUMENT_CORPUS_PATH", "")),
+        Path("data/generated/documents"),
+        Path(__file__).resolve().parents[4] / "data" / "generated" / "documents",
+        Path(__file__).resolve().parents[3] / "data" / "generated" / "documents",
+    ]
+
+    for cand in candidates:
+        if cand and cand.is_dir():
+            for json_file in cand.glob("*.json"):
+                try:
+                    data = json.loads(json_file.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        for item in data:
+                            if isinstance(item, dict) and "doc_id" in item:
+                                docs.append({
+                                    "doc_id": item["doc_id"],
+                                    "source_type": item.get("doc_type") or item.get("source_type") or "document",
+                                    "title": item.get("title") or item["doc_id"],
+                                    "body": item.get("body") or "",
+                                    "date": item.get("created_ts", "")[:10] if item.get("created_ts") else item.get("date"),
+                                    "region": item.get("region"),
+                                    "category": item.get("category"),
+                                    "author_role": item.get("author_role"),
+                                })
+                except Exception as exc:
+                    log.warning("Could not read document file %s: %s", json_file, exc)
+            break
+
+    return docs
 
 
 class RetrievedDoc(BaseModel):
@@ -35,12 +79,11 @@ class Retriever(Protocol):
 
 
 class FixtureRetriever:
-    """Keyword-overlap ranking over the in-repo sample documents."""
+    """Keyword-overlap ranking over sample documents and generated documents corpus."""
 
     def __init__(self, documents: list[dict] | None = None):
         if documents is None:
-            from ..fixtures.retail import get_sample_documents
-            documents = get_sample_documents()
+            documents = _load_default_corpus()
         self._docs = documents
 
     def search(self, query: str, *, filters: dict | None = None, k: int = 5) -> list[RetrievedDoc]:

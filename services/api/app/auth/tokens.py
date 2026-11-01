@@ -10,11 +10,13 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Literal
 
 import jwt
 from pydantic import BaseModel, ValidationError
+
+from ..compat import UTC
 
 log = logging.getLogger("insightgpt.auth")
 

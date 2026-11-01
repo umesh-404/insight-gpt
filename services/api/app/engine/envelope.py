@@ -62,6 +62,7 @@ class Chart(BaseModel):
 
 
 class AnswerEnvelope(BaseModel):
+    answer: str = ""
     route: Route = "structured"
     sql: list[str] = Field(default_factory=list)
     tables: list[Table] = Field(default_factory=list)

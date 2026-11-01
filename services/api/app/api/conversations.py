@@ -16,11 +16,12 @@ from __future__ import annotations
 import threading
 import uuid
 from collections import OrderedDict
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from ..compat import UTC
 from ..engine.envelope import AnswerEnvelope
 
 #: Hard cap on retained conversations; the least recently updated is evicted.

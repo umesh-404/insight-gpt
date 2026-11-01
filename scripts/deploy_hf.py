@@ -31,7 +31,7 @@ colorFrom: indigo
 colorTo: blue
 sdk: gradio
 sdk_version: 5.20.0
-app_file: app.py
+app_file: server.py
 pinned: false
 ---
 
@@ -56,9 +56,12 @@ Configure these in **Settings -> Variables and secrets**:
 - `CORS_ORIGIN_REGEX` (Variable): `^https://.*\\.vercel\\.app$|^https://.*\\.hf\\.space$`
 """
 
-HF_APP_PY = '''"""InsightGPT API server on Hugging Face Spaces (Gradio SDK).
+HF_SERVER_PY = '''"""InsightGPT API server on Hugging Face Spaces (Gradio SDK + FastAPI).
 
-Runs the FastAPI application mounted inside Gradio on port 7860.
+Runs the FastAPI application with Gradio mounted at "/" on port 7860.
+Uses a dummy demo.launch(prevent_thread_lock=True) before mounting so that
+ZeroGPU's startup scanner can detect the @spaces.GPU decorated function.
+
 All API endpoints (/api/v1/ask, /api/v1/auth/login, /health, /api/v1/docs)
 are directly accessible by the Vercel frontend.
 """
@@ -69,6 +72,23 @@ import os
 import sys
 from pathlib import Path
 
+# Ensure Gradio SSR mode is disabled so it doesn't spin up a Node server on port 7861
+os.environ["GRADIO_SSR_MODE"] = "False"
+
+# --- Import spaces FIRST (before any CUDA-touching library) ---
+try:
+    import spaces
+    _ON_ZERO_GPU = True
+except ImportError:
+    _ON_ZERO_GPU = False
+    class spaces:                       # type: ignore[no-redef]
+        """Fallback stub for local development (no ZeroGPU)."""
+        @staticmethod
+        def GPU(fn=None, **kwargs):
+            if fn is not None:
+                return fn
+            return lambda f: f
+
 # Add services/api and services/retrieval to sys.path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "services" / "api"))
@@ -76,12 +96,18 @@ sys.path.insert(0, str(HERE / "services" / "retrieval"))
 sys.path.insert(0, str(HERE))
 
 import gradio as gr
+import uvicorn
 from app.api.main import create_app
 
-# Create full FastAPI app with versioned routers, CORS, and auth
+# --- GPU-decorated function for ZeroGPU ---
+@spaces.GPU
+def check_status(text: str) -> str:
+    return f"InsightGPT API is active. Echo: {text}"
+
+# 1. Create full FastAPI app with versioned routers, CORS, and auth
 fastapi_app = create_app()
 
-# Status landing page on "/"
+# 2. Status landing page on "/"
 with gr.Blocks(title="InsightGPT Backend API") as demo:
     gr.Markdown("# ⚡ InsightGPT Backend API is Running")
     gr.Markdown(
@@ -95,12 +121,30 @@ with gr.Blocks(title="InsightGPT Backend API") as demo:
     - 📎 **Upload & Ask Endpoint**: `POST /api/v1/ask/upload`
     """)
 
-# Mount Gradio onto the FastAPI app
-app = gr.mount_gradio_app(fastapi_app, demo, path="/")
+    with gr.Row():
+        inp = gr.Textbox(label="Status Ping", value="ping")
+        out = gr.Textbox(label="Status Echo")
+    btn = gr.Button("Check Status", variant="primary")
+    btn.click(fn=check_status, inputs=inp, outputs=out)
+
+# 3. Dummy launch so ZeroGPU registers the @spaces.GPU hooks, then tear it down
+#    (mount_gradio_app bypasses demo.launch, so ZeroGPU never sees the decorator
+#    unless we trigger the launch path first).
+if _ON_ZERO_GPU:
+    try:
+        demo.launch(prevent_thread_lock=True, server_port=7863, quiet=True)
+    except Exception:
+        pass
+    # Shut down the throwaway server so port 7863 is freed
+    try:
+        demo.close()
+    except Exception:
+        pass
+
+# 4. Mount Gradio onto the FastAPI app so Hugging Face Spaces serves both
+app = gr.mount_gradio_app(fastapi_app, demo, path="/", ssr_mode=False)
 
 if __name__ == "__main__":
-    import uvicorn
-
     port = int(os.getenv("PORT", "7860"))
     uvicorn.run(app, host="0.0.0.0", port=port)
 '''
@@ -140,8 +184,8 @@ COPY config ./config
 COPY data ./data
 
 RUN uv pip install --system --no-cache \\
-        -e "./services/api[api]" \\
-        -e "./services/retrieval"
+        "./services/api[api]" \\
+        "./services/retrieval"
 
 FROM python:3.12-slim AS runtime
 
@@ -221,22 +265,22 @@ def prepare_bundle(out_dir: Path) -> None:
     print("  -> Copying config...")
     _copy_tree_clean(REPO_ROOT / "config", out_dir / "config", ignore_patterns)
 
-    # Copy data (seed fixtures)
-    print("  -> Copying data (fixtures)...")
-    _copy_tree_clean(REPO_ROOT / "data", out_dir / "data", ignore_patterns + ("warehouse", "generated"))
+    # Copy data (seed fixtures and generated CSV data)
+    print("  -> Copying data (fixtures & generated CSVs)...")
+    _copy_tree_clean(REPO_ROOT / "data", out_dir / "data", ignore_patterns + ("warehouse",))
 
-    # Write README.md, app.py, requirements.txt, and Dockerfile
+    # Write README.md, app.py, and requirements.txt
     print("  -> Writing README.md with HF Spaces Gradio frontmatter...")
     (out_dir / "README.md").write_text(HF_README_TEMPLATE, encoding="utf-8")
 
-    print("  -> Writing app.py (Gradio + FastAPI runner on port 7860)...")
-    (out_dir / "app.py").write_text(HF_APP_PY, encoding="utf-8")
+    print("  -> Writing server.py (Gradio native server with embedded FastAPI)...")
+    (out_dir / "Dockerfile").unlink(missing_ok=True)
+    (out_dir / "main.py").unlink(missing_ok=True)
+    (out_dir / "app.py").unlink(missing_ok=True)
+    (out_dir / "server.py").write_text(HF_SERVER_PY, encoding="utf-8")
 
     print("  -> Writing requirements.txt...")
     (out_dir / "requirements.txt").write_text(HF_REQUIREMENTS, encoding="utf-8")
-
-    print("  -> Writing Dockerfile (fallback for Docker spaces)...")
-    (out_dir / "Dockerfile").write_text(HF_DOCKERFILE, encoding="utf-8")
 
     # Write .dockerignore
     dockerignore = """__pycache__/
