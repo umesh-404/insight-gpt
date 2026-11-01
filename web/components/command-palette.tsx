@@ -66,8 +66,9 @@ export function CommandPalette() {
     restoreFocusRef.current?.focus();
   }, []);
 
-  // Global shortcut. Registered once, and ignored while the user is typing in a
-  // field — ⌘K inside the composer should not steal the keystroke.
+  // Global shortcut, registered once. ⌘K / Ctrl-K is claimed app-wide on
+  // purpose: it is the one key the demo is driven from, and it must work from
+  // inside the composer as well as from the page body.
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const isToggle = event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey);
@@ -95,6 +96,17 @@ export function CommandPalette() {
 
   React.useEffect(() => {
     if (open) inputRef.current?.focus();
+  }, [open]);
+
+  // An `aria-modal` overlay has to behave like one: the page behind it must not
+  // scroll, and Tab must not walk focus out into a sidebar the user cannot see.
+  React.useEffect(() => {
+    if (!open) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
   }, [open]);
 
   const commands = React.useMemo<Command[]>(() => {
@@ -194,6 +206,13 @@ export function CommandPalette() {
     if (event.key === 'Enter') {
       event.preventDefault();
       runAt(active);
+      return;
+    }
+    if (event.key === 'Tab') {
+      // Only the input and the result rows live inside the dialog, and the rows
+      // are reachable with the arrow keys, so Tab simply stays on the input.
+      event.preventDefault();
+      inputRef.current?.focus();
     }
   };
 

@@ -115,8 +115,24 @@ function UserCard() {
   );
 }
 
+/**
+ * The palette answers Ctrl-K as well as ⌘K, but the hint used to claim ⌘K on
+ * every platform — wrong, and unreadable, on the Windows/Linux machines this
+ * is demoed from. Resolved after mount so the server and first client render
+ * still agree.
+ */
+function useShortcutHint(): string {
+  const [hint, setHint] = React.useState('Ctrl K');
+  React.useEffect(() => {
+    const ua = `${navigator.platform ?? ''} ${navigator.userAgent ?? ''}`;
+    if (/mac|iphone|ipad|ipod/i.test(ua)) setHint('⌘K');
+  }, []);
+  return hint;
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = React.useState(false);
+  const shortcutHint = useShortcutHint();
 
   // Escape closes the drawer — expected of any modal overlay, and the only way
   // out for a keyboard user who opened it with the menu button.
@@ -207,7 +223,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           >
             <Search className="size-4 shrink-0" aria-hidden />
             <span className="flex-1 text-left">Search or jump to…</span>
-            <kbd className="rounded border bg-muted px-1.5 py-0.5 text-2xs">⌘K</kbd>
+            <kbd className="shrink-0 rounded border bg-muted px-1.5 py-0.5 text-2xs">
+              {shortcutHint}
+            </kbd>
           </button>
 
           <div className="ml-auto flex items-center gap-1 sm:ml-0">
