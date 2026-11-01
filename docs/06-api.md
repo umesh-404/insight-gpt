@@ -584,20 +584,45 @@ payload small, themeable, and accessible.
 
 ## 8. Rate limiting
 
-A token-bucket limiter runs as middleware, keyed by user id (falling back to
-client IP for unauthenticated `/auth/login`). Limits are tiered because the
-`/ask` path is far more expensive than a dashboard read:
+A token-bucket limiter runs as a **route dependency** (`rate_limit(bucket)` in
+`app/api/deps.py`), not as middleware — buckets differ per route, and a
+dependency lets each router declare the bucket it belongs to instead of a
+middleware re-deriving it from the path. It is keyed per caller: user id from
+the token, falling back to client IP for unauthenticated `/auth/login`. Limits
+are tiered because the `/ask` path is far more expensive than a dashboard read:
 
-| Bucket | Default limit | Applies to |
+| Bucket | Base limit | Applies to |
 |---|---|---|
-| `ask` | 20 req / min / user | `POST /ask`, `POST /reports` |
-| `read` | 120 req / min / user | dashboards, metrics, conversations |
-| `mutate` | 30 req / min / user | sources, pipeline triggers, feedback |
+| `ask` | 20 req / min | `POST /ask`, `POST /reports` |
+| `read` | 120 req / min | dashboards, metrics, conversations |
+| `mutate` | 30 req / min | sources, pipeline triggers, feedback |
 | `login` | 10 req / min / IP | `POST /auth/login` |
 
+These are the **viewer** budgets. Roles are additive in capability, so their
+budgets are too: the base is multiplied by **1× viewer, 2× analyst, 4× admin**,
+so an admin's `ask` budget is 80/min. Defaults live in `_DEFAULT_LIMITS` in
+code and each bucket is overridable by environment variable —
+`RATE_LIMIT_ASK="40/60"`, or a bare `RATE_LIMIT_ASK="40"` meaning per minute. A
+malformed override falls back to the default rather than taking the API down.
+`RATE_LIMIT_ENABLED` gates the whole thing, and defaults off under pytest so
+test runs are not order-dependent.
+
 Exhaustion returns `429 rate_limited` with `Retry-After` and
-`X-RateLimit-Remaining`. Limits are config values (`config/api.yaml`), not
-hardcoded.
+`X-RateLimit-Remaining`; successful responses carry `X-RateLimit-Limit` and
+`X-RateLimit-Remaining`.
+
+**Bucket state is swept.** The limiter holds one entry per (bucket, caller) in
+memory. That dict was append-only, which for an IP-keyed anonymous endpoint
+means unbounded growth chosen by whoever is calling. An entry idle for longer
+than its refill window is equivalent to an absent one — both start the next
+caller at full capacity — so insertions of unseen keys amortise a sweep that
+drops them. No background task, and no decision changes.
+
+Two known limits, accepted for this scope: the state is per-process, so a
+multi-replica deployment enforces the limit per replica (a shared store is the
+fix, and is out of scope here); and behind a reverse proxy every anonymous
+caller presents the proxy's address, so the IP-keyed `login` bucket is shared
+across them unless the proxy's forwarded-for header is trusted explicitly.
 
 ## 9. Observability
 

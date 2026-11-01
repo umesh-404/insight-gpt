@@ -122,19 +122,35 @@ class Decision:
 
 
 class TokenBucketLimiter:
-    """A tiny thread-safe token bucket. No dependencies, no shared state."""
+    """A tiny thread-safe token bucket. No dependencies, no shared state.
+
+    Idle entries are swept, because the dict was otherwise append-only: one
+    entry per (bucket, user-or-IP) for the process lifetime, which an anonymous
+    endpoint keyed by client IP grows without bound at the caller's choosing.
+    An entry older than its refill window is equivalent to an absent one — both
+    start the next caller at ``capacity`` — so dropping it changes no decision.
+    The sweep is amortised onto insertions of unseen keys rather than run on a
+    timer, so the limiter still needs no background task.
+    """
+
+    # Sweep after this many insertions of a previously unseen key. High enough
+    # that normal traffic never pays for it, low enough to bound the dict.
+    _SWEEP_EVERY = 512
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # key -> (tokens, last refill monotonic timestamp)
         self._buckets: dict[str, tuple[float, float]] = {}
+        self._since_sweep = 0
 
     def check(self, key: str, capacity: int, window: float) -> Decision:
         rate = capacity / window
         now = time.monotonic()
         with self._lock:
-            tokens, last = self._buckets.get(key, (float(capacity), now))
+            previous = self._buckets.get(key)
+            tokens, last = previous if previous is not None else (float(capacity), now)
             tokens = min(float(capacity), tokens + (now - last) * rate)
+            self._note_insert(previous)
             if tokens >= 1.0:
                 self._buckets[key] = (tokens - 1.0, now)
                 return Decision(True, capacity, int(tokens - 1.0), 0)
@@ -142,9 +158,35 @@ class TokenBucketLimiter:
             retry_after = max(1, int((1.0 - tokens) / rate) + 1)
             return Decision(False, capacity, 0, retry_after)
 
+    def _note_insert(self, previous: tuple[float, float] | None) -> None:
+        """Count new keys and sweep periodically. Caller holds the lock."""
+        if previous is not None:
+            return
+        self._since_sweep += 1
+        if self._since_sweep < self._SWEEP_EVERY:
+            return
+        self._since_sweep = 0
+        now = time.monotonic()
+        # A bucket refills in exactly its own window: the role multiplier scales
+        # capacity and refill rate together, so it cancels out. Capacity is not
+        # stored per key, so the test is "idle longer than the widest window",
+        # doubled for headroom against a large RATE_LIMIT_* override. Keeping an
+        # entry too long only costs a row; dropping one too early would hand the
+        # caller a fresh budget, so the bias goes towards keeping.
+        horizon = 2 * max(window for _, window in _DEFAULT_LIMITS.values())
+        self._buckets = {
+            key: value for key, value in self._buckets.items() if now - value[1] < horizon
+        }
+
     def reset(self) -> None:
         with self._lock:
             self._buckets.clear()
+            self._since_sweep = 0
+
+    def tracked_keys(self) -> int:
+        """How many buckets are currently held. For tests and diagnostics."""
+        with self._lock:
+            return len(self._buckets)
 
 
 _LIMITER = TokenBucketLimiter()

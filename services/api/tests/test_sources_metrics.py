@@ -442,3 +442,57 @@ def test_host_port_parsing_handles_both_dsn_forms() -> None:
     assert src._host_port("postgresql://u:p@db.internal/x", "postgres") == ("db.internal", 5432)
     assert src._host_port("host=db.internal port=3307", "mysql") == ("db.internal", 3307)
     assert src._host_port("not-a-dsn", "mysql") is None
+
+
+def test_unknown_query_field_is_rejected_not_ignored(
+    client: TestClient, admin: dict[str, str]
+) -> None:
+    """A mis-spelled window must fail, not silently widen to all time.
+
+    Sending ``start``/``end`` instead of ``time_range`` used to return 200 with
+    the grand total: a plausible figure, and the wrong one. Silently dropping an
+    unrecognised field is the dangerous default for an API whose whole purpose is
+    numbers someone will put on a slide.
+    """
+    scoped = client.post(
+        "/api/v1/metrics/query",
+        headers=admin,
+        json={
+            "metric": "revenue",
+            "time_range": {"start": "2026-04-01", "end": "2026-06-30"},
+        },
+    )
+    assert scoped.status_code == 200
+    quarter = scoped.json()["rows"][0][0]
+
+    unscoped = client.post(
+        "/api/v1/metrics/query",
+        headers=admin,
+        json={"metric": "revenue"},
+    )
+    assert unscoped.status_code == 200
+    all_time = unscoped.json()["rows"][0][0]
+    # Precondition: the two really do differ, or this test proves nothing.
+    assert quarter < all_time
+
+    typo = client.post(
+        "/api/v1/metrics/query",
+        headers=admin,
+        json={"metric": "revenue", "start": "2026-04-01", "end": "2026-06-30"},
+    )
+    assert typo.status_code == 422, (
+        f"expected 422, got {typo.status_code} returning {typo.json()!r}"
+    )
+
+
+def test_unknown_time_range_field_is_rejected(client: TestClient, admin: dict[str, str]) -> None:
+    """Same contract one level down, where a typo is just as silent."""
+    response = client.post(
+        "/api/v1/metrics/query",
+        headers=admin,
+        json={
+            "metric": "revenue",
+            "time_range": {"from": "2026-04-01", "to": "2026-06-30"},
+        },
+    )
+    assert response.status_code == 422
