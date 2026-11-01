@@ -54,14 +54,17 @@ semantic_models:
         type_params:
           time_granularity: day
     measures:
+      # Net of returns: a returned line contributes no revenue and no margin,
+      # matching units_non_returned. See the RETURNS CONVENTION note in
+      # config/semantic_layer.yml — the two files must agree.
       - name: revenue_amount
-        description: "Net revenue = gross_revenue - discount_amount."
+        description: "Net revenue on non-returned lines = gross_revenue - discount_amount."
         agg: sum
-        expr: gross_revenue - discount_amount
+        expr: case when is_returned then 0 else gross_revenue - discount_amount end
       - name: margin_amount
-        description: "Gross margin = gross_revenue - discount_amount - cost_amount."
+        description: "Gross margin on non-returned lines."
         agg: sum
-        expr: gross_revenue - discount_amount - cost_amount
+        expr: case when is_returned then 0 else gross_revenue - discount_amount - cost_amount end
       - name: units_non_returned
         description: "Quantity on non-returned lines."
         agg: sum

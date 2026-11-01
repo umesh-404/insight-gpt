@@ -195,20 +195,20 @@ def golden_cases() -> list[Case]:
         Case(
             "Why did revenue decline last quarter?",
             expected_route="hybrid", expected_metric="revenue",
-            value_check=change_check(13_293_312, 20_159_072, "North", "Electronics"),
-            value_desc="Q2 13,293,312 < Q1 20,159_072; drivers North / Electronics",
+            value_check=change_check(489_164_981, 752_130_117, "North", "Electronics"),
+            value_desc="Q2 48,91,64,981 < Q1 75,21,30,117; drivers North / Electronics",
         ),
         Case(
             "Why did sales decline last quarter?",
             expected_route="hybrid", expected_metric="revenue",
-            value_check=change_check(13_293_312, 20_159_072, "North", "Electronics"),
+            value_check=change_check(489_164_981, 752_130_117, "North", "Electronics"),
             value_desc="'sales' resolves to revenue; same decline story",
         ),
         # --- scalar structured -------------------------------------------------
         Case(
             "What was revenue last quarter?",
             expected_route="structured", expected_metric="revenue",
-            value_check=scalar_value(13_293_312), value_desc="revenue = 13,293,312",
+            value_check=scalar_value(489_164_981), value_desc="revenue = 48,91,64,981",
         ),
         Case(
             "How many orders were placed last quarter?",
@@ -218,12 +218,12 @@ def golden_cases() -> list[Case]:
         Case(
             "What was the average order value last quarter?",
             expected_route="structured", expected_metric="avg_order_value",
-            value_check=scalar_value(1930.20), value_desc="AOV = 1,930",
+            value_check=scalar_value(71_027.30), value_desc="AOV = 71,027",
         ),
         Case(
             "What were units sold last quarter?",
             expected_route="structured", expected_metric="units_sold",
-            value_check=scalar_value(6459), value_desc="units_sold = 6,459",
+            value_check=scalar_value(42_221), value_desc="units_sold = 42,221",
         ),
         Case(
             "How many units on hand do we have?",
@@ -239,7 +239,7 @@ def golden_cases() -> list[Case]:
         Case(
             "What was gross margin last quarter?",
             expected_route="structured", expected_metric="gross_margin",
-            value_check=assertion(lambda v: 0 < v < 13_293_312, "0 < margin < revenue"),
+            value_check=assertion(lambda v: 0 < v < 489_164_981, "0 < margin < revenue"),
             value_desc="gross margin positive and below revenue",
         ),
         Case(
@@ -253,15 +253,15 @@ def golden_cases() -> list[Case]:
             "Show revenue by region last quarter.",
             expected_route="structured", expected_metric="revenue",
             expected_dims=["region"],
-            value_check=grouped_top("region", "South", 3_763_379),
-            value_desc="top region South = 3,763,379",
+            value_check=grouped_top("region", "South", 138_979_864),
+            value_desc="top region South = 13,89,79,864",
         ),
         Case(
             "Show revenue by category last quarter.",
             expected_route="structured", expected_metric="revenue",
             expected_dims=["category"],
-            value_check=grouped_top("category", "Electronics", 5_060_044),
-            value_desc="top category Electronics = 5,060,044",
+            value_check=grouped_top("category", "Electronics", 184_668_692),
+            value_desc="top category Electronics = 18,46,68,692",
         ),
         # --- unstructured (documents only) ------------------------------------
         Case(
