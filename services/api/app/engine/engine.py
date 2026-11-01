@@ -8,6 +8,7 @@ independently testable. See ``docs/05-insight-engine.md``.
 
 from __future__ import annotations
 
+import calendar as _calendar
 import datetime as _dt
 import logging
 import re
@@ -698,10 +699,41 @@ def _as_time_range(raw: dict | None) -> dict | None:
     return {"start": first.isoformat(), "end": last.isoformat()}
 
 
+def _month_shift(day: _dt.date, months: int) -> _dt.date:
+    """``day`` moved by ``months``, clamped to the target month's last day."""
+    index = (day.year * 12 + day.month - 1) + months
+    year, month = divmod(index, 12)
+    month += 1
+    last = _calendar.monthrange(year, month)[1]
+    return _dt.date(year, month, min(day.day, last))
+
+
+def _whole_months(first: _dt.date, last: _dt.date) -> int | None:
+    """The month count when ``[first, last]`` is exactly N whole months."""
+    if first.day != 1 or last.day != _calendar.monthrange(last.year, last.month)[1]:
+        return None
+    return (last.year * 12 + last.month) - (first.year * 12 + first.month) + 1
+
+
 def _preceding_span(time_range: dict) -> dict:
-    """The equal-length window ending the day before ``time_range`` starts."""
+    """The comparable window immediately before ``time_range``.
+
+    A period that is a whole number of calendar months gets the preceding
+    whole months, so a quarter compares against the previous quarter and
+    reads as "2026Q1 -> 2026Q2". The equal-length day count is only a
+    fallback: applied to a quarter it starts a day early, which both labels
+    the comparison as a date pair instead of a quarter and drags a one-day
+    sliver of the quarter before it into the breakdown.
+    """
     first = _dt.date.fromisoformat(time_range["start"])
     last = _dt.date.fromisoformat(time_range["end"])
+    months = _whole_months(first, last)
+    if months is not None:
+        prior_first = _month_shift(first, -months)
+        return {
+            "start": prior_first.isoformat(),
+            "end": (first - _dt.timedelta(days=1)).isoformat(),
+        }
     length = (last - first).days + 1
     prior_end = first - _dt.timedelta(days=1)
     return {

@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.deps import reset_caches  # noqa: E402
 from app.api.main import create_app  # noqa: E402
 from app.api.routers import reports as reports_router  # noqa: E402
+from app.engine.engine import _preceding_span  # noqa: E402
 from app.engine.envelope import Citation, Table  # noqa: E402
 
 PERIOD = {"grain": "month", "start": "2026-04-01", "end": "2026-06-30"}
@@ -165,6 +166,50 @@ def test_backwards_period_is_rejected(
         headers=analyst,
     )
     assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [
+        # A whole quarter compares against the previous quarter, not against
+        # the 91 days before it - which starts a day early, labels the
+        # comparison as a date pair rather than "2026Q1", and drags a one-day
+        # sliver of 2025Q4 into the breakdown.
+        (("2026-04-01", "2026-06-30"), ("2026-01-01", "2026-03-31")),
+        (("2026-01-01", "2026-06-30"), ("2025-07-01", "2025-12-31")),
+        (("2026-01-01", "2026-12-31"), ("2025-01-01", "2025-12-31")),
+        (("2026-03-01", "2026-03-31"), ("2026-02-01", "2026-02-28")),
+        # Not a whole number of months: fall back to the equal-length span.
+        (("2026-06-24", "2026-06-30"), ("2026-06-17", "2026-06-23")),
+    ],
+)
+def test_comparison_window_is_calendar_aligned(
+    period: tuple[str, str], expected: tuple[str, str]
+) -> None:
+    span = _preceding_span({"start": period[0], "end": period[1]})
+    assert (span["start"], span["end"]) == expected
+
+
+def test_quarter_report_compares_against_the_previous_quarter(
+    client: TestClient, analyst: dict[str, str]
+) -> None:
+    """A change section names the prior quarter, not a straddling date pair."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Q2 change",
+            "period": {"start": "2026-04-01", "end": "2026-06-30"},
+            "sections": ["sales"],
+        },
+        headers=analyst,
+    )
+    assert resp.status_code == 202, resp.text
+    rid = resp.json()["report_id"]
+    prose = client.get(f"/api/v1/reports/{rid}", headers=analyst).json()["blocks"][0][
+        "prose"
+    ]
+    assert "2026Q1" in prose and "2026Q2" in prose, prose
+    assert "2025-12-31" not in prose, prose
 
 
 def test_unknown_report_is_404(client: TestClient, analyst: dict[str, str]) -> None:
