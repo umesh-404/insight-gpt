@@ -48,8 +48,22 @@ function gradientId(key: string): string {
   return `fill-${key.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 }
 
-const AXIS_TICK = { fill: 'hsl(var(--muted-foreground))', fontSize: 11 };
+/**
+ * Axis ink is deliberately heavier than the usual `muted-foreground` caption.
+ *
+ * These charts are read off a projector in a lit room, where 11px grey ticks
+ * are the first thing to disappear. Ticks carry the scale, so they get
+ * `foreground` at 72% — recessive next to the marks, but still legible when the
+ * contrast ratio of the whole image collapses.
+ */
+const AXIS_TICK = {
+  fill: 'hsl(var(--foreground) / 0.72)',
+  fontSize: 12,
+  fontVariantNumeric: 'tabular-nums',
+} as const;
+/** Solid hairline, not a dash pattern: dashes shimmer and alias when projected. */
 const GRID_STROKE = 'hsl(var(--border))';
+const AXIS_LINE = 'hsl(var(--border))';
 
 /**
  * Dash patterns paired with the series colours.
@@ -174,13 +188,22 @@ export function ChartRenderer({ spec, height = 280, className }: ChartRendererPr
     );
   }
 
+  // The accessible name always exists; the *visible* caption only when the spec
+  // names the chart. Most call sites (TrendChart, dashboards, reports) already
+  // sit under a card title, so a fallback caption printed "Area chart" directly
+  // beneath "Revenue" — a second heading that names the widget instead of the
+  // data, and competes with the real one. Nothing is lost by dropping it.
   const caption =
     spec.title || `${spec.kind[0]?.toUpperCase() ?? ''}${spec.kind.slice(1)} chart`;
 
   return (
     <figure className={className}>
-      <figcaption className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-sm font-medium text-foreground">{caption}</span>
+      <figcaption className="mb-2 flex min-h-7 items-center justify-between gap-2">
+        {spec.title ? (
+          <span className="text-sm font-medium text-foreground">{spec.title}</span>
+        ) : (
+          <span aria-hidden />
+        )}
         <button
           type="button"
           onClick={() => setView((v) => (v === 'chart' ? 'table' : 'chart'))}
@@ -202,7 +225,7 @@ export function ChartRenderer({ spec, height = 280, className }: ChartRendererPr
       {view === 'table' ? (
         <DataTableView spec={spec} data={data} xKey={xKey} yFormat={yFormat} />
       ) : (
-        <div style={{ height }} role="img" aria-label={caption}>
+        <div style={{ height }} className="min-w-0" role="img" aria-label={caption}>
           <ResponsiveContainer width="100%" height="100%">
             {renderChart(spec, data, xKey, {
               yTickFormatter,
@@ -225,16 +248,26 @@ function renderChart(
   },
 ): React.ReactElement {
   const { series, kind } = spec;
+  // Recharts picks the cursor *element* from the chart type: a band rectangle
+  // for bar, a line for line/area/scatter. Passing `fill` to all of them left
+  // the continuous charts with the unstyled default stroke, so a hover on the
+  // revenue trend showed a grey hairline that matched nothing on the page.
+  const bandCursor = kind === 'bar';
   const tooltip = (
     <Tooltip
       content={<ChartTooltip yFormat={fmt.yFormat} />}
-      cursor={{ fill: 'hsl(var(--muted) / 0.4)' }}
+      cursor={
+        bandCursor
+          ? { fill: 'hsl(var(--muted) / 0.4)' }
+          : { stroke: 'hsl(var(--foreground) / 0.35)', strokeWidth: 1 }
+      }
     />
   );
   const legend =
     series.length > 1 ? (
       <Legend
-        wrapperStyle={{ fontSize: 12, color: 'hsl(var(--muted-foreground))' }}
+        iconSize={10}
+        wrapperStyle={{ fontSize: 12, color: 'hsl(var(--foreground) / 0.72)' }}
       />
     ) : null;
 
@@ -242,12 +275,12 @@ function renderChart(
     case 'line':
       return (
         <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
+          <CartesianGrid stroke={GRID_STROKE} strokeOpacity={0.7} vertical={false} />
           <XAxis
             dataKey={xKey}
             tick={AXIS_TICK}
             tickLine={false}
-            axisLine={{ stroke: GRID_STROKE }}
+            axisLine={{ stroke: AXIS_LINE }}
             tickFormatter={truncateCategory}
             minTickGap={12}
           />
@@ -265,7 +298,7 @@ function renderChart(
               // Colour + pattern, so the series survive greyscale and CVD.
               strokeDasharray={series.length > 1 ? seriesDash(i) : undefined}
               dot={false}
-              activeDot={{ r: 4, strokeWidth: 0 }}
+              activeDot={{ r: 4.5, stroke: 'hsl(var(--background))', strokeWidth: 2 }}
             />
           ))}
         </LineChart>
@@ -281,12 +314,12 @@ function renderChart(
               </linearGradient>
             ))}
           </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
+          <CartesianGrid stroke={GRID_STROKE} strokeOpacity={0.7} vertical={false} />
           <XAxis
             dataKey={xKey}
             tick={AXIS_TICK}
             tickLine={false}
-            axisLine={{ stroke: GRID_STROKE }}
+            axisLine={{ stroke: AXIS_LINE }}
             tickFormatter={truncateCategory}
             minTickGap={12}
           />
@@ -308,15 +341,75 @@ function renderChart(
           ))}
         </AreaChart>
       );
-    case 'bar':
+    case 'bar': {
+      // A ranked bar chart over long category names is the one case where the
+      // vertical form fails outright: "Top products by revenue" dropped five of
+      // its eight product labels to Recharts' tick-collision logic, leaving
+      // unidentifiable bars. Turning the chart on its side gives each label a
+      // full line of its own, and reading a ranking top-to-bottom is the
+      // natural direction anyway. Time series and stacks keep the vertical form.
+      const longestCategory = data.reduce(
+        (max, row) => Math.max(max, formatAxisCategory(row[xKey]).length),
+        0,
+      );
+      const horizontal =
+        series.length === 1 &&
+        !spec.stacked &&
+        data.length <= 12 &&
+        longestCategory > 12;
+
+      if (horizontal) {
+        const s = series[0]!;
+        return (
+          <BarChart
+            data={data}
+            layout="vertical"
+            margin={{ top: 4, right: 16, bottom: 4, left: 4 }}
+            barCategoryGap="22%"
+          >
+            <CartesianGrid stroke={GRID_STROKE} strokeOpacity={0.7} horizontal={false} />
+            <XAxis
+              type="number"
+              tick={AXIS_TICK}
+              tickLine={false}
+              axisLine={{ stroke: AXIS_LINE }}
+              tickFormatter={fmt.yTickFormatter}
+            />
+            <YAxis
+              type="category"
+              dataKey={xKey}
+              tick={AXIS_TICK}
+              tickLine={false}
+              axisLine={false}
+              width={132}
+              interval={0}
+              tickFormatter={(v: unknown) => {
+                const text = formatAxisCategory(v);
+                // Kept under the 132px gutter at 12px: Recharts word-wraps a
+                // tick that overflows, and a two-line tick collides with its
+                // neighbours. The tooltip carries the full name.
+                return text.length > 17 ? `${text.slice(0, 16)}…` : text;
+              }}
+            />
+            {tooltip}
+            <Bar
+              dataKey={s.y}
+              name={s.label ?? s.y}
+              fill={seriesColor(0)}
+              radius={[0, 4, 4, 0]}
+            />
+          </BarChart>
+        );
+      }
+
       return (
         <BarChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} vertical={false} />
+          <CartesianGrid stroke={GRID_STROKE} strokeOpacity={0.7} vertical={false} />
           <XAxis
             dataKey={xKey}
             tick={AXIS_TICK}
             tickLine={false}
-            axisLine={{ stroke: GRID_STROKE }}
+            axisLine={{ stroke: AXIS_LINE }}
             tickFormatter={truncateCategory}
             minTickGap={12}
           />
@@ -329,28 +422,48 @@ function renderChart(
               dataKey={s.y}
               name={s.label ?? s.y}
               fill={seriesColor(i)}
-              radius={[4, 4, 0, 0]}
+              // Rounding every stacked segment makes each one read as a
+              // separate bar; only the exposed top of the stack is rounded.
+              radius={
+                spec.stacked
+                  ? i === series.length - 1
+                    ? [4, 4, 0, 0]
+                    : [0, 0, 0, 0]
+                  : [4, 4, 0, 0]
+              }
+              // A 2px gap in the surface colour keeps touching segments from
+              // fusing into one block when two series sit next to each other
+              // in the palette.
+              stroke={spec.stacked ? 'hsl(var(--background))' : undefined}
+              strokeWidth={spec.stacked ? 2 : undefined}
               stackId={spec.stacked ? 'stack' : undefined}
               maxBarSize={48}
             />
           ))}
         </BarChart>
       );
+    }
     case 'pie': {
       const nameKey = spec.options?.nameKey ?? 'name';
       const valueKey = spec.options?.valueKey ?? series[0]?.y ?? 'value';
       return (
-        <PieChart>
+        // The per-slice labels said exactly what the legend already said, then
+        // pushed their leader lines outside the plot and got clipped, which
+        // shrank the donut to make room for text nobody could finish reading.
+        // One naming layer is enough; the legend keeps it inside the box.
+        <PieChart margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
           {tooltip}
-          <Legend wrapperStyle={{ fontSize: 12, color: 'hsl(var(--muted-foreground))' }} />
+          <Legend
+            iconSize={10}
+            wrapperStyle={{ fontSize: 12, color: 'hsl(var(--foreground) / 0.72)' }}
+          />
           <Pie
             data={data}
             dataKey={valueKey}
             nameKey={nameKey}
-            innerRadius="45%"
-            outerRadius="78%"
+            innerRadius="48%"
+            outerRadius="80%"
             paddingAngle={2}
-            label={(entry: { name?: string }) => entry.name ?? ''}
           >
             {data.map((_, i) => (
               <Cell key={i} fill={seriesColor(i)} stroke="hsl(var(--background))" strokeWidth={2} />
@@ -362,13 +475,13 @@ function renderChart(
     case 'scatter':
       return (
         <ScatterChart margin={{ top: 8, right: 12, bottom: 8, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} />
+          <CartesianGrid stroke={GRID_STROKE} strokeOpacity={0.7} />
           <XAxis
             type="category"
             dataKey={xKey}
             tick={AXIS_TICK}
             tickLine={false}
-            axisLine={{ stroke: GRID_STROKE }}
+            axisLine={{ stroke: AXIS_LINE }}
             tickFormatter={truncateCategory}
           />
           <YAxis type="number" dataKey={series[0]?.y} tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />

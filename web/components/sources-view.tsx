@@ -127,6 +127,23 @@ function validate(
   return errors;
 }
 
+/**
+ * Show the tail of a source path, not its head.
+ *
+ * Every registered source in a deployment lives under the same root, so a
+ * head-truncated path rendered the same 38 characters on every row
+ * ("D:\Projects\insight-gpt\data\generated\…") and clipped the only part that
+ * tells the rows apart. Keeping the last two segments makes the column scannable;
+ * the full path stays in the `title` tooltip.
+ */
+function shortenLocation(location: string): string {
+  if (location.length <= 40) return location;
+  const parts = location.split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return location;
+  const sep = location.includes('\\') ? '\\' : '/';
+  return `…${sep}${parts.slice(-2).join(sep)}`;
+}
+
 export function SourcesView() {
   const { toast } = useToast();
   const { hasRole } = useAuth();
@@ -266,7 +283,7 @@ export function SourcesView() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead scope="col" className="min-w-[180px]">Name</TableHead>
+                      <TableHead scope="col" className="min-w-[150px]">Name</TableHead>
                       <TableHead scope="col" className="w-[100px]">Kind</TableHead>
                       <TableHead scope="col" className="min-w-[180px]">Status</TableHead>
                       <TableHead scope="col" className="w-[130px]">Last tested</TableHead>
@@ -292,7 +309,7 @@ export function SourcesView() {
                                 className="mt-0.5 block max-w-xs sm:max-w-sm md:max-w-md xl:max-w-xs 2xl:max-w-sm truncate font-mono text-xs font-normal text-muted-foreground"
                                 title={source.location}
                               >
-                                {source.location}
+                                {shortenLocation(source.location)}
                               </span>
                             ) : null}
                           </TableCell>
