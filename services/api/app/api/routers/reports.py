@@ -188,7 +188,7 @@ async def export_report(
             content=pdf,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f'attachment; filename="{report.id}.pdf"',
+                "Content-Disposition": _disposition(report, "pdf"),
                 "Content-Length": str(len(pdf)),
             },
         )
@@ -196,10 +196,26 @@ async def export_report(
     return PlainTextResponse(
         markdown,
         media_type="text/markdown",
-        headers={
-            "Content-Disposition": f'attachment; filename="{report.id}.md"',
-        },
+        headers={"Content-Disposition": _disposition(report, "md")},
     )
+
+
+def _slug(title: str) -> str:
+    """An ASCII, filesystem-safe stem for the download - headers are latin-1."""
+    kept = [c.lower() if c.isascii() and c.isalnum() else "-" for c in title]
+    return "-".join("".join(kept).split("-")).strip("-")[:60]
+
+
+def _disposition(report: Report, extension: str) -> str:
+    """Name the download after the report, not its opaque id.
+
+    The browser saves whatever this header says, so exporting "Executive
+    summary" wrote ``rep_f1e8477e933e.pdf`` into the reader's downloads
+    folder. The id stays in the name so two exports of one title never
+    collide.
+    """
+    stem = _slug(report.title) or "report"
+    return f'attachment; filename="{stem}-{report.id}.{extension}"'
 
 
 # --- rendering ----------------------------------------------------------------

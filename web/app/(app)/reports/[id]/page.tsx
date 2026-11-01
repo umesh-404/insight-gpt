@@ -104,7 +104,16 @@ export default function ReportDetailPage({
           }
         />
       ) : isError || !report ? (
-        <ErrorState error={error} onRetry={() => void refetch()} />
+        // A 403 is a permanent answer for this role (reports are analyst-gated),
+        // so a "Try again" button here can never succeed.
+        <ErrorState
+          error={error}
+          onRetry={
+            error instanceof ApiError && error.status === 403
+              ? undefined
+              : () => void refetch()
+          }
+        />
       ) : report.status === 'generating' ? (
         <EmptyState
           title="Generating your report…"

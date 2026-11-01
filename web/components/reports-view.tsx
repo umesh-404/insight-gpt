@@ -3,9 +3,8 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FileText, Loader2, Plus, Sparkles } from 'lucide-react';
+import { CheckCircle2, FileText, Loader2, Plus, Sparkles, XCircle } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
-import { StatusBadge } from '@/components/status-badge';
 import { describeError, EmptyState, ErrorState } from '@/components/states';
 import {
   Card,
@@ -13,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -26,7 +26,7 @@ import { qk } from '@/lib/hooks';
 import { useQueryClient } from '@tanstack/react-query';
 import { RANGE_OPTIONS, resolveRange, type RangeKey } from '@/lib/metrics';
 import { formatDateTime } from '@/lib/utils';
-import type { ReportSection } from '@/lib/types';
+import { ApiError, type ReportSection, type ReportSummary } from '@/lib/types';
 
 const SECTIONS: Array<{ id: ReportSection; label: string }> = [
   { id: 'kpis', label: 'Headline KPIs' },
@@ -34,6 +34,36 @@ const SECTIONS: Array<{ id: ReportSection; label: string }> = [
   { id: 'inventory', label: 'Inventory health' },
   { id: 'voice_of_customer', label: 'Voice of customer' },
 ];
+
+/**
+ * A report's states are ready / generating / failed. Mapping them onto the run
+ * vocabulary printed "Success" next to a finished report, which reads as the
+ * outcome of a job rather than the state of a document.
+ */
+function ReportStatusBadge({ status }: { status: ReportSummary['status'] }) {
+  if (status === 'failed') {
+    return (
+      <Badge variant="destructive">
+        <XCircle className="size-3" aria-hidden /> Failed
+      </Badge>
+    );
+  }
+  if (status === 'generating') {
+    return (
+      <Badge variant="default">
+        <span className="animate-spin">
+          <Loader2 className="size-3" aria-hidden />
+        </span>
+        Generating
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="success">
+      <CheckCircle2 className="size-3" aria-hidden /> Ready
+    </Badge>
+  );
+}
 
 export function ReportsView() {
   const router = useRouter();
@@ -70,7 +100,18 @@ export function ReportsView() {
         period,
         sections: Array.from(selected),
       });
-      toast({ title: 'Report generation started', variant: 'success' });
+      // Generation is synchronous on the offline stack, so the handle already
+      // carries the final state: announcing "started" for a report that is
+      // already ready — or that failed — misreports what just happened.
+      const failed = res.status === 'failed';
+      toast({
+        title: failed
+          ? 'Report generation failed'
+          : res.status === 'generating'
+            ? 'Report generation started'
+            : 'Report ready',
+        variant: failed ? 'destructive' : 'success',
+      });
       void queryClient.invalidateQueries({ queryKey: qk.reports });
       router.push(`/reports/${res.report_id}`);
     } catch (err) {
@@ -102,7 +143,16 @@ export function ReportsView() {
               ))}
             </div>
           ) : reports.isError ? (
-            <ErrorState error={reports.error} onRetry={() => void reports.refetch()} />
+            // A 403 is a permanent answer for this role — offering "Try again"
+            // invites the reader to click a button that can never succeed.
+            <ErrorState
+              error={reports.error}
+              onRetry={
+                reports.error instanceof ApiError && reports.error.status === 403
+                  ? undefined
+                  : () => void reports.refetch()
+              }
+            />
           ) : reports.data && reports.data.length ? (
             <ul className="stagger space-y-3">
               {reports.data.map((report) => (
@@ -120,17 +170,18 @@ export function ReportsView() {
                         Created {formatDateTime(report.created_at)}
                       </p>
                     </div>
-                    <StatusBadge
-                      status={report.status === 'ready' ? 'success' : report.status === 'failed' ? 'failed' : 'running'}
-                    />
+                    <ReportStatusBadge status={report.status} />
                   </Link>
                 </li>
               ))}
             </ul>
           ) : (
+            // The generate panel only sits "on the right" at xl and above;
+            // below that it stacks underneath this list, so the copy must not
+            // point at a position.
             <EmptyState
               title="No reports yet"
-              description="Generate your first executive report from the panel on the right."
+              description="Use the generate panel to build your first executive report."
               icon={<FileText className="size-5" />}
             />
           )}
@@ -201,9 +252,12 @@ export function ReportsView() {
                 </Button>
               </form>
             ) : (
+              // Reports are analyst-gated end to end: GET /reports and
+              // GET /reports/{id} both refuse a viewer, so promising read
+              // access here sent viewers to a 403.
               <p className="text-sm text-muted-foreground">
-                Report generation requires the analyst role or higher. You can
-                still open and read existing reports.
+                Reports are available to the analyst role and above. Ask an
+                administrator to raise your role to generate and read them.
               </p>
             )}
           </CardContent>

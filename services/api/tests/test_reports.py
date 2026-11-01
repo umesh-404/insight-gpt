@@ -113,7 +113,11 @@ def test_export_markdown(client: TestClient, analyst: dict[str, str], report_id:
     resp = client.get(f"/api/v1/reports/{report_id}/export", headers=analyst)
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"].startswith("text/markdown")
-    assert f'filename="{report_id}.md"' in resp.headers["content-disposition"]
+    # Named after the report, with the id kept so two exports never collide.
+    assert (
+        f'filename="q2-executive-review-{report_id}.md"'
+        in resp.headers["content-disposition"]
+    )
     text = resp.text
     assert text.startswith("# Q2 executive review")
     assert "_Generated:" in text
@@ -128,7 +132,10 @@ def test_export_pdf_is_a_real_document(
     )
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"] == "application/pdf"
-    assert f'filename="{report_id}.pdf"' in resp.headers["content-disposition"]
+    assert (
+        f'filename="q2-executive-review-{report_id}.pdf"'
+        in resp.headers["content-disposition"]
+    )
     body = resp.content
     assert body.startswith(b"%PDF-")
     assert body.rstrip().endswith(b"%%EOF")
