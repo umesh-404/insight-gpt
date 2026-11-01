@@ -164,7 +164,7 @@ COPY --from=build --chown=user:user /app /home/user/app
 EXPOSE 7860
 
 HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=3 \\
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:7860/health', timeout=4).status==200 else 1)" || exit 1
+    CMD python -c "import urllib.request as u;u.urlopen('http://localhost:7860/health')" || exit 1
 
 CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "7860"]
 """
@@ -223,7 +223,10 @@ def prepare_bundle(out_dir: Path) -> None:
 
     # Copy data (seed fixtures)
     print("  -> Copying data (fixtures)...")
-    _copy_tree_clean(REPO_ROOT / "data", out_dir / "data", ignore_patterns + ("warehouse", "generated"))
+    _copy_tree_clean(
+        REPO_ROOT / "data", out_dir / "data",
+        ignore_patterns + ("warehouse", "generated"),
+    )
 
     # Write README.md, app.py, requirements.txt, and Dockerfile
     print("  -> Writing README.md with HF Spaces Gradio frontmatter...")
@@ -302,15 +305,19 @@ def push_to_space(bundle_dir: Path, space_name: str, token: str | None = None) -
     else:
         print("\nPush failed. If authentication was rejected:")
         print("  1. Create a Write Token at: https://huggingface.co/settings/tokens")
-        print("  2. Re-run: python scripts/deploy_hf.py --space", clean_name, "--push --token <HF_TOKEN>")
+        print("  2. Re-run: python scripts/deploy_hf.py --space", clean_name,
+              "--push --token <HF_TOKEN>")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Deploy InsightGPT backend to Hugging Face Spaces")
-    parser.add_argument("--space", type=str, default="", help="Hugging Face Space (format: username/space-name)")
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="Output bundle directory")
+    parser.add_argument("--space", type=str, default="",
+                        help="Hugging Face Space (format: username/space-name)")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
+                        help="Output bundle directory")
     parser.add_argument("--push", action="store_true", help="Push directly via git")
-    parser.add_argument("--token", type=str, default=os.getenv("HF_TOKEN", ""), help="Hugging Face User Access Token")
+    parser.add_argument("--token", type=str, default=os.getenv("HF_TOKEN", ""),
+                        help="Hugging Face User Access Token")
 
     args = parser.parse_args()
 
@@ -321,15 +328,16 @@ def main() -> None:
             push_to_space(args.out_dir, args.space, args.token or None)
         else:
             clean_name = args.space.replace("https://huggingface.co/spaces/", "").strip("/")
-            user, space = clean_name.split("/", 1) if "/" in clean_name else (clean_name, "insight-gpt-api")
+            user, space = (clean_name.split("/", 1) if "/" in clean_name
+                           else (clean_name, "insight-gpt-api"))
             public_host = f"https://{user}-{space.replace('_', '-')}.hf.space"
             print(f"\n[+] Bundle ready in: {args.out_dir}")
-            print(f"To push manually:")
+            print("To push manually:")
             print(f"  cd {args.out_dir}")
-            print(f"  git init && git checkout -b main")
+            print("  git init && git checkout -b main")
             print(f"  git remote add origin https://huggingface.co/spaces/{user}/{space}")
-            print(f"  git add . && git commit -m 'Deploy InsightGPT API'")
-            print(f"  git push -u origin main --force")
+            print("  git add . && git commit -m 'Deploy InsightGPT API'")
+            print("  git push -u origin main --force")
             print(f"\nYour backend will be available at: {public_host}/api/v1")
 
 

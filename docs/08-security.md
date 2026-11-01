@@ -276,6 +276,20 @@ return all rows") are part of the text-to-SQL eval harness; see
 - **AuthN — JWT.** The FastAPI backend issues signed JWTs on login; every
   protected endpoint validates the token. Tokens are short-lived; the signing
   secret (`JWT_SECRET`) comes from the environment, never the codebase.
+- **Startup fails on an unusable `JWT_SECRET`.** A missing secret, a known
+  placeholder (the in-repo development fallback, the compose default) or one
+  shorter than 32 bytes raises at app construction. The insecure development
+  fallback is *opt-in* via `APP_ENV=development|local|test`, never the default:
+  a deployment that simply forgot to set the variable must not boot signing
+  tokens with a value printed in a public repository, because that lets anyone
+  holding the repo mint an admin token. Padding a short secret out to 32 bytes
+  is not a mitigation — it adds no entropy and only hides a weak key, so a
+  short secret is rejected rather than padded.
+- **Refresh re-reads the user.** `POST /auth/refresh` resolves the role from the
+  user store, never from the refresh token's `role` claim. A refresh token lives
+  seven days, so trusting its claim would leave a demotion or a deactivation
+  unenforceable for a week. Refresh shares login's IP-keyed rate-limit budget,
+  since it is reachable with only a cookie.
 - **AuthZ — roles.** Three roles with least privilege:
 
   | Role | Can | Cannot |

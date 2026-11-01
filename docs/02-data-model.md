@@ -289,7 +289,10 @@ allows slicing by product and category. `fact_sales` exists so order-level
 metrics (AOV, order counts, shipping) are not distorted by fanning out to line
 grain. The inventory fact is a **snapshot** grain — additive across stores/SKUs
 but **not** across dates (you never sum stock levels over time; you pick a
-date), which the metrics layer encodes as non-additive.
+date). The metrics layer encodes that as `semi_additive: true` — deliberately
+*not* as `additive: false`, which the metrics API and the forecaster both read
+as "ratio metric". The query builder turns a date range on a semi-additive
+metric into a pin on the latest snapshot inside that range.
 
 ## 5. dbt project structure
 
@@ -376,14 +379,24 @@ The eight governed metrics, exactly as `config/semantic_layer.yml` defines them:
 
 | Metric | Definition (measure) | Source fact | Grain / additivity | Allowed dimensions |
 |---|---|---|---|---|
-| `revenue` | `SUM(gross_revenue - discount_amount)` | fact_order_items | additive | date, region, category, subcategory, product, channel, segment |
-| `gross_margin` | `SUM(gross_revenue - discount_amount - cost_amount)` | fact_order_items | additive | date, region, category, subcategory, product, channel |
+| `revenue` | `SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount END)` | fact_order_items | additive, net of returns | date, region, category, subcategory, product, channel, segment |
+| `gross_margin` | `SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount - cost_amount END)` | fact_order_items | additive, net of returns | date, region, category, subcategory, product, channel |
 | `gross_margin_pct` | `gross_margin / NULLIF(revenue, 0)` | fact_order_items | ratio (non-additive) | date, region, category, product, channel |
 | `orders` | `COUNT(DISTINCT order_key)` | fact_order_items | additive | date, region, category, channel, segment |
 | `units_sold` | `SUM(CASE WHEN is_returned THEN 0 ELSE quantity END)` | fact_order_items | additive | date, category, subcategory, product, channel |
 | `avg_order_value` (alias `aov`) | `revenue / NULLIF(orders, 0)` | fact_order_items | ratio | date, region, channel, segment |
 | `return_rate` | `SUM(quantity WHERE is_returned) / NULLIF(SUM(quantity), 0)` | fact_order_items | ratio | date, category, subcategory, product |
-| `units_on_hand` | `SUM(units_on_hand)` | fact_inventory_snapshot | additive (snapshot) | date, product, store |
+| `units_on_hand` | `SUM(units_on_hand)` | fact_inventory_snapshot | semi-additive (snapshot: never summed across dates) | date, product, store |
+
+**Returns convention.** Every money and unit measure over `fact_order_items`
+is net of returns: a returned line contributes no revenue, no margin, no cost
+and no units. `units_sold` and `return_rate` always worked that way; `revenue`
+did not, so a dashboard could report revenue that counted ~7% of lines it was
+simultaneously reporting as returned (Q2 2026: ₹1,32,93,312 gross of returns
+against ₹1,23,62,553 net, beside a `return_rate` of 6.2%). The inconsistency
+was the defect, so the whole order-line family now shares one convention.
+`return_rate` keeps its denominator over every line, returned included — that
+is what makes it a rate.
 
 `orders` is counted on `fact_order_items` rather than on an orders fact, because
 distinct-counting the order key at line grain gives the same answer while
