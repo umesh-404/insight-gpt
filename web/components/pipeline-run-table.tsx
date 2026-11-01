@@ -24,10 +24,23 @@ function runDuration(run: PipelineRun): number | null {
   return finished - started;
 }
 
+/**
+ * Keys in `row_counts` that are bookkeeping flags, not row totals.
+ *
+ * The offline store stamps `simulated: 1` on runs it advances itself. Summed
+ * blindly, a full reload that moved no rows reports "1 row", which reads as a
+ * real (and wrong) figure.
+ */
+const NON_ROW_KEYS = new Set(['simulated']);
+
 function totalRows(run: PipelineRun): number {
   // `row_counts` is optional on the wire and absent on queued runs.
-  return Object.values(run.row_counts ?? {}).reduce(
-    (a, b) => a + (typeof b === 'number' ? b : 0),
+  const counts = run.row_counts ?? {};
+  // `rows_processed` is the run's own total; summing it with the per-stage
+  // keys that may sit beside it would double-count the same rows.
+  if (typeof counts.rows_processed === 'number') return counts.rows_processed;
+  return Object.entries(counts).reduce(
+    (a, [key, b]) => a + (!NON_ROW_KEYS.has(key) && typeof b === 'number' ? b : 0),
     0,
   );
 }

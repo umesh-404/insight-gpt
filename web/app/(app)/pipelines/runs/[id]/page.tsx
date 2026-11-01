@@ -39,12 +39,26 @@ export default function RunDetailPage({
     );
   }
   if (isError || !run) {
+    // A mistyped or expired run id must still offer a way back; without this
+    // the failure panel is the only thing on the page.
     return (
-      <div className="p-6">
+      <div className="space-y-4 p-4 sm:p-6">
+        <Button asChild variant="ghost" size="sm" className="-ml-2">
+          <Link href="/pipelines">
+            <ArrowLeft className="size-4" /> Back to pipelines
+          </Link>
+        </Button>
         <ErrorState error={error} onRetry={() => void refetch()} />
       </div>
     );
   }
+
+  // `simulated` is a bookkeeping flag the offline store stamps on runs it
+  // advances itself, not a row total — rendering it as a headline figure puts
+  // an internal marker on screen beside the real counts.
+  const rowCounts = Object.entries(run.row_counts ?? {}).filter(
+    ([key]) => key !== 'simulated',
+  );
 
   const duration = run.finished_at
     ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
@@ -100,6 +114,18 @@ export default function RunDetailPage({
                 </TableRow>
               </TableHeader>
               <TableBody>
+                {run.stages.length === 0 ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={5}
+                      className="py-8 text-center text-sm text-muted-foreground"
+                    >
+                      {run.status === 'queued' || run.status === 'running'
+                        ? 'Stage detail appears as the run reports it.'
+                        : 'This run reported no stage detail.'}
+                    </TableCell>
+                  </TableRow>
+                ) : null}
                 {run.stages.map((stage) => (
                   <TableRow key={stage.name}>
                     <TableCell className="font-medium">{stage.name}</TableCell>
@@ -128,14 +154,14 @@ export default function RunDetailPage({
       </Card>
 
       {/* Row counts */}
-      {Object.keys(run.row_counts).length ? (
+      {rowCounts.length ? (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Row counts</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap gap-3">
-              {Object.entries(run.row_counts).map(([key, value]) => (
+              {rowCounts.map(([key, value]) => (
                 <div
                   key={key}
                   className="rounded-md border bg-muted/30 px-3 py-2"
