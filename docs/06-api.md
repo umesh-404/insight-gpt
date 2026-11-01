@@ -355,8 +355,20 @@ class PipelineRun(BaseModel):
 #### `POST /reports` — generate; `GET /reports/{id}`; `GET /reports/{id}/export`
 
 An executive report is a generated, cited narrative over a chosen scope
-(period, domain area). Generation is asynchronous — `POST` returns a report
-handle that the client polls or subscribes to.
+(period, domain area).
+
+`period` is **load-bearing**, not a header decoration. Each section maps to a
+fixed governed question that names no period of its own; the period is handed
+to the engine as an explicit override of the range it would otherwise resolve
+from the question's words. A change section's comparison window is re-derived
+as the equal-length span immediately preceding the chosen period, so the
+decomposition is against something comparable. `start` and `end` are inclusive
+ISO dates and are validated: a period that ends before it starts is a `422`.
+
+Generation runs **inline** on the offline stack — fast enough that there is no
+queue to poll. `POST` still answers `202` with a handle, but the handle already
+carries the final status (`ready` or `failed`); a client that announces
+"generation started" from it misreports what happened.
 
 ```python
 class ReportRequest(BaseModel):

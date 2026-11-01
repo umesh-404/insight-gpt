@@ -19,14 +19,38 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
-import { useReports } from '@/lib/hooks';
+import { useMetricQueries, useReports } from '@/lib/hooks';
 import { useAuth } from '@/lib/auth';
 import { api } from '@/lib/api';
 import { qk } from '@/lib/hooks';
 import { useQueryClient } from '@tanstack/react-query';
-import { RANGE_OPTIONS, resolveRange, type RangeKey } from '@/lib/metrics';
+import {
+  formatDay,
+  latestPeriodEnd,
+  RANGE_OPTIONS,
+  resolveRange,
+  type RangeKey,
+} from '@/lib/metrics';
 import { formatDateTime } from '@/lib/utils';
-import { ApiError, type ReportSection, type ReportSummary } from '@/lib/types';
+import {
+  ApiError,
+  type MetricQuery,
+  type ReportSection,
+  type ReportSummary,
+} from '@/lib/types';
+
+/**
+ * How far the warehouse actually runs, read the same way the dashboard reads
+ * it. "This quarter" has to mean the quarter the data is in: resolved against
+ * the browser clock it named a period the fixture has no rows for, so every
+ * section of the report came back empty.
+ */
+const COVERAGE_QUERY = [
+  {
+    name: 'coverage',
+    query: { metric: 'revenue', dimensions: ['date'], time_grain: 'month' } as MetricQuery,
+  },
+];
 
 const SECTIONS: Array<{ id: ReportSection; label: string }> = [
   { id: 'kpis', label: 'Headline KPIs' },
@@ -79,7 +103,18 @@ export function ReportsView() {
     new Set(['kpis', 'sales', 'voice_of_customer']),
   );
   const [submitting, setSubmitting] = React.useState(false);
-  const period = React.useMemo(() => resolveRange(range), [range]);
+
+  const coverage = useMetricQueries(COVERAGE_QUERY, canGenerate);
+  const anchor = React.useMemo(
+    () => latestPeriodEnd(coverage.byName.coverage, 'revenue'),
+    [coverage.byName.coverage],
+  );
+  const period = React.useMemo(
+    // Falls back to the wall clock when coverage is unknown — the honest
+    // answer for an empty warehouse, not a guessed date.
+    () => resolveRange(range, anchor ?? undefined),
+    [range, anchor],
+  );
 
   const toggle = (section: ReportSection) => {
     setSelected((prev) => {
@@ -216,6 +251,7 @@ export function ReportsView() {
                   />
                   <p className="text-xs text-muted-foreground">
                     {period.start} — {period.end}
+                    {anchor ? ` · data runs to ${formatDay(anchor)}` : ''}
                   </p>
                 </div>
                 <fieldset className="space-y-2">

@@ -103,6 +103,70 @@ def test_report_is_stored_with_blocks(
     assert body["error"] is None
 
 
+def _sql_of(client: TestClient, analyst: dict[str, str], period: dict) -> str:
+    """Generate a one-section report over ``period`` and return its SQL params."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={"title": "scoped", "period": period, "sections": ["kpis"]},
+        headers=analyst,
+    )
+    assert resp.status_code == 202, resp.text
+    rid = resp.json()["report_id"]
+    detail = client.get(f"/api/v1/reports/{rid}", headers=analyst)
+    assert detail.status_code == 200, detail.text
+    return detail.text
+
+
+def test_period_scopes_the_report(client: TestClient, analyst: dict[str, str]) -> None:
+    """The chosen period changes the numbers, not only the header.
+
+    The section questions name no period, so before the engine accepted an
+    explicit range it resolved "last quarter" from its own clock and every
+    report covered the same window whatever the reader picked.
+    """
+    q1 = _sql_of(client, analyst, {"start": "2026-01-01", "end": "2026-03-31"})
+    q2 = _sql_of(client, analyst, {"start": "2026-04-01", "end": "2026-06-30"})
+    assert "2026-01-01" in q1 and "2026-03-31" in q1
+    assert "2026-04-01" in q2 and "2026-06-30" in q2
+    # Different windows over the same fixture must not produce the same figures.
+    assert q1 != q2
+
+
+def test_period_is_echoed_in_the_export(
+    client: TestClient, analyst: dict[str, str]
+) -> None:
+    """The header states the period the report was actually built over."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "H1 review",
+            "period": {"start": "2026-01-01", "end": "2026-06-30"},
+            "sections": ["kpis"],
+        },
+        headers=analyst,
+    )
+    rid = resp.json()["report_id"]
+    export = client.get(f"/api/v1/reports/{rid}/export", headers=analyst)
+    assert export.status_code == 200
+    assert "Period: 2026-01-01 to 2026-06-30" in export.text
+
+
+def test_backwards_period_is_rejected(
+    client: TestClient, analyst: dict[str, str]
+) -> None:
+    """A period that ends before it starts is a 422, not an empty report."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "inverted",
+            "period": {"start": "2026-06-30", "end": "2026-01-01"},
+            "sections": ["kpis"],
+        },
+        headers=analyst,
+    )
+    assert resp.status_code == 422, resp.text
+
+
 def test_unknown_report_is_404(client: TestClient, analyst: dict[str, str]) -> None:
     resp = client.get("/api/v1/reports/rep_missing", headers=analyst)
     assert resp.status_code == 404

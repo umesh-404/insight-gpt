@@ -53,8 +53,19 @@ class InsightEngine:
 
     # ---- main entry point ----------------------------------------------------
     def ask(
-        self, question: str, attachments: list[AttachmentInput] | None = None
+        self,
+        question: str,
+        attachments: list[AttachmentInput] | None = None,
+        time_range: dict | None = None,
     ) -> AnswerEnvelope:
+        """Answer ``question``.
+
+        ``time_range`` overrides the period the router resolved from the
+        question's own words. It exists for callers that scope a question from
+        outside it - the report builder asks fixed section questions over a
+        period the reader picked, and without this the engine resolved "last
+        quarter" from its own clock and the chosen period was decorative.
+        """
         parsed_attachments = process_attachments(attachments) if attachments else []
         attachment_docs = [
             att.to_doc(self.today, i + 1) for i, att in enumerate(parsed_attachments)
@@ -62,6 +73,17 @@ class InsightEngine:
         attachment_tables = [att.table for att in parsed_attachments if att.table is not None]
 
         r = route(question, self.catalog, self.provider, self.today)
+
+        # An explicitly supplied period replaces the resolved one. The prior
+        # window is re-derived as the equal-length span immediately before it,
+        # so a change question still decomposes against a comparable period
+        # rather than against whatever the router's default happened to be.
+        override = _as_time_range(time_range)
+        if override is not None and r["route"] in ("structured", "hybrid"):
+            r["time_range"] = override
+            r["prior_time_range"] = (
+                _preceding_span(override) if r.get("prior_time_range") else None
+            )
 
         # If files are attached, the user intends to query those files
         if parsed_attachments:
@@ -120,7 +142,7 @@ class InsightEngine:
         # then silently reports a *different* period than the one asked about, so
         # honour the asked period instead and let the warehouse say it has no
         # rows for it.
-        asked_years = question_years(question)
+        asked_years = [] if override is not None else question_years(question)
         if r.get("time_range") and not years_covered(r["time_range"], asked_years):
             r["time_range"] = year_span(asked_years)
             r["prior_time_range"] = None
@@ -659,6 +681,33 @@ def _safe_echo(value: object, limit: int = 60) -> str:
     if len(cleaned) > limit:
         cleaned = cleaned[:limit].rstrip() + "..."
     return cleaned or "that metric"
+
+
+def _as_time_range(raw: dict | None) -> dict | None:
+    """A ``{start, end}`` ISO window, or ``None`` when ``raw`` is not usable."""
+    if not isinstance(raw, dict):
+        return None
+    start, end = raw.get("start"), raw.get("end")
+    try:
+        first = _dt.date.fromisoformat(str(start))
+        last = _dt.date.fromisoformat(str(end))
+    except (TypeError, ValueError):
+        return None
+    if last < first:
+        return None
+    return {"start": first.isoformat(), "end": last.isoformat()}
+
+
+def _preceding_span(time_range: dict) -> dict:
+    """The equal-length window ending the day before ``time_range`` starts."""
+    first = _dt.date.fromisoformat(time_range["start"])
+    last = _dt.date.fromisoformat(time_range["end"])
+    length = (last - first).days + 1
+    prior_end = first - _dt.timedelta(days=1)
+    return {
+        "start": (prior_end - _dt.timedelta(days=length - 1)).isoformat(),
+        "end": prior_end.isoformat(),
+    }
 
 
 def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:
