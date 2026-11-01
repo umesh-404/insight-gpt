@@ -259,6 +259,25 @@ function parseDataRef(ref: string): number {
  * than inlining rows, so the envelope's tables must be resolved here — without
  * this the renderer always shows "No data to visualize".
  */
+/**
+ * Map the engine's metric `format` onto a renderer dtype.
+ *
+ * The envelope's `chart.unit` carries the GOVERNED metric format, which is the
+ * only place that knows a column of numbers is rupees - `Table.columns` is a
+ * list of bare names, so value-sniffing cannot tell money from a count.
+ * `percent` becomes `ratio` because that is the renderer's name for the same
+ * thing; `integer`/`number` need no special axis treatment.
+ */
+function unitToDtype(raw: unknown): ColumnDtype | null {
+  switch (str(raw)) {
+    case 'currency':
+      return 'currency';
+    case 'percent':
+      return 'ratio';
+    default:
+      return null;
+  }
+}
 export function fromChart(raw: unknown, tables: TableBlock[] = []): ChartSpec | null {
   if (raw == null) return null;
   const o = obj(raw);
@@ -312,9 +331,15 @@ export function fromChart(raw: unknown, tables: TableBlock[] = []): ChartSpec | 
     series: resolvedSeries,
     options: {
       ...obj(o.options),
+      // Column dtype first (richer payloads carry it), then the engine's
+      // governed unit. Either beats value-sniffing, which can only ever
+      // return 'number' for a money column and so left money axes raw.
       ...(unitColumn && unitColumn.dtype !== 'number'
         ? { yFormat: unitColumn.dtype }
-        : {}),
+        : (() => {
+            const unit = unitToDtype(o.unit);
+            return unit ? { yFormat: unit } : {};
+          })()),
       ...(kind === 'pie' && x ? { nameKey: x, valueKey: resolvedSeries[0]?.y } : {}),
     },
     data,

@@ -116,3 +116,42 @@ export function timeAgo(iso: string | null | undefined): string {
   if (days < 7) return `${days}d ago`;
   return formatDateTime(iso);
 }
+
+/**
+ * Build a tick formatter that keeps ONE unit across a whole axis.
+ *
+ * `formatCurrency` compacts per value at the lakh threshold, which is right
+ * for a figure in prose and wrong for an axis: ticks of 0 / 50k / 1L / 1.5L /
+ * 2L rendered "₹0, ₹50,000, ₹1L, ₹1.5L, ₹2L", two units on one scale, so the
+ * reader re-anchors at every gridline. The unit is picked once from `max` -
+ * the largest value actually plotted - and applied to every tick, which also
+ * keeps labels short enough that a fixed-width axis cannot shear their
+ * leading digits off.
+ *
+ * Zero is always bare ("₹0", not "₹0Cr"): a scaled zero is still zero, and the
+ * suffix only adds noise at the axis origin.
+ */
+export function makeAxisTickFormatter(
+  max: number,
+  format?: string | null,
+): (value: number) => string {
+  const magnitude = Math.abs(max);
+  const { divisor, suffix } =
+    magnitude >= 1e7
+      ? { divisor: 1e7, suffix: 'Cr' }
+      : magnitude >= 1e5
+        ? { divisor: 1e5, suffix: 'L' }
+        : { divisor: 1, suffix: '' };
+
+  return (value: number) => {
+    if (format === 'ratio' || format === 'percent') return formatPercent(value, 0);
+    const currency = format === 'currency';
+    if (value === 0) return currency ? formatCurrency(0) : '0';
+    if (!suffix) return currency ? formatCurrency(value) : formatNumber(value);
+    const scaled = value / divisor;
+    const text = Number.isInteger(scaled)
+      ? String(scaled)
+      : scaled.toFixed(1).replace(/\.0$/, '');
+    return currency ? `₹${text}${suffix}` : `${text}${suffix}`;
+  };
+}

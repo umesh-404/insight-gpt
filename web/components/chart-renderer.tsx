@@ -25,7 +25,7 @@ import { Table as TableIcon, BarChart3 } from 'lucide-react';
 // `Cell` is aliased: recharts exports a component with the same name.
 import type { Cell as CellValue, ChartSpec, ColumnDtype } from '@/lib/types';
 import { seriesColor } from '@/lib/chart-colors';
-import { formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
+import { formatCurrency, formatNumber, formatPercent, makeAxisTickFormatter } from '@/lib/utils';
 import {
   Table,
   TableBody,
@@ -171,13 +171,25 @@ export function ChartRenderer({ spec, height = 280, className }: ChartRendererPr
   const xKey = spec.x ?? 'x';
   const yFormat = spec.options?.yFormat ?? spec.options?.unit;
 
-  const yTickFormatter = React.useCallback(
-    (value: number) => {
-      if (yFormat === 'currency') return formatCurrency(value);
-      if (yFormat === 'ratio') return formatPercent(value, 0);
-      return formatNumber(value);
-    },
-    [yFormat],
+  // The axis unit is chosen from the largest value PLOTTED, not per tick, so
+  // every gridline on one scale reads in the same unit.
+  const yMax = React.useMemo(() => {
+    let max = 0;
+    for (const row of data) {
+      for (const s of spec.series) {
+        const raw = row[s.y];
+        if (typeof raw === 'number' && Number.isFinite(raw)) {
+          max = Math.max(max, Math.abs(raw));
+        }
+      }
+    }
+    return max;
+  }, [data, spec.series]);
+
+  // One unit for the whole axis, chosen from the largest value plotted.
+  const yTickFormatter = React.useMemo(
+    () => makeAxisTickFormatter(yMax, yFormat),
+    [yFormat, yMax],
   );
 
   if (!data.length) {
@@ -284,7 +296,7 @@ function renderChart(
             tickFormatter={truncateCategory}
             minTickGap={12}
           />
-          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
+          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={64} tickFormatter={fmt.yTickFormatter} />
           {tooltip}
           {legend}
           {series.map((s, i) => (
@@ -323,7 +335,7 @@ function renderChart(
             tickFormatter={truncateCategory}
             minTickGap={12}
           />
-          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
+          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={64} tickFormatter={fmt.yTickFormatter} />
           {tooltip}
           {legend}
           {series.map((s, i) => (
@@ -413,7 +425,7 @@ function renderChart(
             tickFormatter={truncateCategory}
             minTickGap={12}
           />
-          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
+          <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} width={64} tickFormatter={fmt.yTickFormatter} />
           {tooltip}
           {legend}
           {series.map((s, i) => (
@@ -484,7 +496,7 @@ function renderChart(
             axisLine={{ stroke: AXIS_LINE }}
             tickFormatter={truncateCategory}
           />
-          <YAxis type="number" dataKey={series[0]?.y} tick={AXIS_TICK} tickLine={false} axisLine={false} width={56} tickFormatter={fmt.yTickFormatter} />
+          <YAxis type="number" dataKey={series[0]?.y} tick={AXIS_TICK} tickLine={false} axisLine={false} width={64} tickFormatter={fmt.yTickFormatter} />
           <ZAxis range={[60, 60]} />
           {tooltip}
           {series.map((s, i) => (

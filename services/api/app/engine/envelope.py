@@ -59,6 +59,13 @@ class Chart(BaseModel):
     x: str | None = None
     series: list[ChartSeries] = Field(default_factory=list)
     data_ref: str = "tables[0]"
+    #: How the y values should be formatted: the governed metric's ``format``
+    #: ("currency", "percent", "integer", "number"). The client cannot infer
+    #: this, because ``Table.columns`` carries bare names, so its only recourse
+    #: is to guess from the values - and a rupee amount and a plain count are
+    #: both just numbers. Without it every money axis rendered unformatted and
+    #: sheared its leading digits off against a fixed-width axis.
+    unit: str | None = None
 
 
 class AnswerEnvelope(BaseModel):

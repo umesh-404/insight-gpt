@@ -184,7 +184,7 @@ class InsightEngine:
             sql=structured.sql if structured else [],
             tables=final_tables,
             citations=_citations(docs),
-            chart=_chart_for(final_tables, findings) if structured else None,
+            chart=_chart_for(final_tables, findings, self.catalog) if structured else None,
             confidence=synth.get("confidence", "high" if parsed_attachments else "medium"),
             caveats=synth.get("caveats", []),
             attempts=attempts,
@@ -713,25 +713,43 @@ def _citations(docs) -> list[Citation]:
 
 
 
-def _chart_for(tables: list[Table], findings: dict) -> Chart | None:
+def _chart_unit(catalog: SemanticCatalog, metric: str) -> str | None:
+    """The governed metric's display format, for the client's y axis.
+
+    Resolved here rather than client-side because the catalog is the only
+    place that knows a column of numbers is rupees. An unknown metric name
+    yields ``None``: the client then falls back to plain number formatting,
+    which is what it did for every chart before this existed.
+    """
+    governed = catalog.metrics.get(metric)
+    return governed.format if governed is not None else None
+
+
+def _chart_for(
+    tables: list[Table], findings: dict, catalog: SemanticCatalog
+) -> Chart | None:
     if not tables:
         return None
     kind = findings.get("kind")
     metric = findings.get("metric", "value")
+    unit = _chart_unit(catalog, metric)
     first = tables[0]
     if kind == "change":  # trend table: [period, metric]
         return Chart(
             type="line", x=first.columns[0],
             series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]",
+            unit=unit,
         )
     if kind == "grouped":
         return Chart(
             type="bar", x=first.columns[0],
             series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]",
+            unit=unit,
         )
     if kind == "restock" and len(tables) > 1:
         return Chart(
             type="bar", x=tables[1].columns[0],
             series=[ChartSeries(name=metric, y=tables[1].columns[-1])], data_ref="tables[1]",
+            unit=unit,
         )
     return None

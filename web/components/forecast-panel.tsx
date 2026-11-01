@@ -21,7 +21,12 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/states';
 import { useForecast, useForecastMetrics } from '@/lib/hooks';
 import type { ForecastPoint, ForecastResult, MetricFormat } from '@/lib/types';
-import { formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
+import {
+  formatCurrency,
+  formatNumber,
+  formatPercent,
+  makeAxisTickFormatter,
+} from '@/lib/utils';
 
 /**
  * Projection of a governed metric, and — just as often — an explanation of why
@@ -149,6 +154,27 @@ function ForecastChart({ result }: { result: ForecastResult }) {
   const rows = React.useMemo(() => toRows(result), [result]);
   const seam = result.history[result.history.length - 1]?.period;
 
+  // Same contract as every other chart: one unit across the axis, picked from
+  // the largest value plotted. Per-tick compaction happened to look right here
+  // only because this panel's values all clear a crore; a shorter history that
+  // straddled the lakh threshold would have mixed units on one scale.
+  const yMax = React.useMemo(() => {
+    let max = 0;
+    for (const row of rows) {
+      for (const value of [row.actual, row.projected]) {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+          max = Math.max(max, Math.abs(value));
+        }
+      }
+      if (row.band) max = Math.max(max, Math.abs(row.band[1]));
+    }
+    return max;
+  }, [rows]);
+  const yTickFormatter = React.useMemo(
+    () => makeAxisTickFormatter(yMax, result.format),
+    [yMax, result.format],
+  );
+
   return (
     <div className="h-[280px] w-full">
       <ResponsiveContainer width="100%" height="100%">
@@ -165,7 +191,7 @@ function ForecastChart({ result }: { result: ForecastResult }) {
             axisLine={false}
             width={72}
             tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
-            tickFormatter={(v: number) => formatValue(v, result.format)}
+            tickFormatter={yTickFormatter}
           />
           <Tooltip
             content={
