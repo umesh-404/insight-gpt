@@ -69,8 +69,8 @@ copied into whichever image needs them.
 | `pgdata` | Postgres data dir | The warehouse — the durable source of truth |
 | `qdrant_storage` | Qdrant storage | Vectors + payloads; rebuildable from documents |
 | `ollama_models` | Pulled model blobs | Avoids re-downloading models on every restart |
-| `generated_data` | `worker:/app/data/generated` | The synthetic CSVs + document JSON `scripts/seed.py` writes |
-| `ingested_data` | `worker:/app/data/ingested` | The redacted document corpus handed to retrieval, plus its index state |
+| `generated_data` | `worker:/app/data/generated` (rw), `api:…:ro` | The synthetic CSVs + document JSON `scripts/seed.py` writes |
+| `ingested_data` | `worker:/app/data/ingested` (rw), `api:…:ro` | The redacted document corpus handed to retrieval, plus its index state |
 
 The last two exist because `make bootstrap` and `make seed` run in a throwaway
 `docker compose run --rm worker` container, while the scheduler that reindexes
@@ -79,6 +79,15 @@ the corpus would die with the container that produced it and every scheduled
 `reindex_docs` would fail with "document corpus not found". They are mounted at
 the two output directories rather than at `/app/data`, so the baked-in
 `data/generator` package stays visible.
+
+The `api` service mounts both **read-only**. `GET /sources` reports on the
+generator's CSV extracts and on the corpus (`GENERATED_DIR` and
+`DOCUMENT_CORPUS_PATH`), so without the mounts the source registry rendered
+every file-backed source as missing while the worker held the data — a
+confusing failure, because nothing was broken except the API's view of the
+disk. Read-only because writing is the worker's job: ingestion and dbt run
+there, and the API is a query path that should not be able to rewrite the
+corpus it cites.
 
 `qdrant_storage`, `generated_data`, and `ingested_data` are all **rebuildable**
 (re-seed, re-index), but `pgdata` for a real deployment is not — back it up

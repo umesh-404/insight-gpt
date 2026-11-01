@@ -277,8 +277,12 @@ return all rows") are part of the text-to-SQL eval harness; see
   protected endpoint validates the token. Tokens are short-lived; the signing
   secret (`JWT_SECRET`) comes from the environment, never the codebase.
 - **Startup fails on an unusable `JWT_SECRET`.** A missing secret, a known
-  placeholder (the in-repo development fallback, the compose default) or one
-  shorter than 32 bytes raises at app construction. The insecure development
+  placeholder (the in-repo development fallback) or one shorter than 32 bytes
+  raises at app construction. Compose no longer carries a default for it either
+  — `${JWT_SECRET:?...}` makes `docker compose up` fail with a readable message
+  before a container starts, rather than booting one that then refuses to serve;
+  two layers, because the first one a careless deployment skips is the one that
+  matters. The insecure development
   fallback is *opt-in* via `APP_ENV=development|local|test`, never the default:
   a deployment that simply forgot to set the variable must not boot signing
   tokens with a value printed in a public repository, because that lets anyone

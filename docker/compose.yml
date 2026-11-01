@@ -118,9 +118,23 @@ services:
       # here let the API fall back to the config-file default while .env named a
       # different model — the mismatch surfaces only as silently missing rerank.
       RERANK_MODEL: ${RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:F16}
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-.env}
+      # No default: a placeholder here is a signing key an attacker can guess,
+      # and the API now refuses to start on one anyway, so compose should fail
+      # at `up` with a readable message instead of after the container boots.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env (openssl rand -hex 32)}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3020,http://127.0.0.1:3020}
       TODAY: ${TODAY:-2026-07-15}
+      # /sources reports on the generator's CSV extracts and the redacted
+      # document corpus, so the API needs the SAME two locations the worker
+      # writes. Without them the source registry rendered every file-backed
+      # source as missing while the worker held the data.
+      GENERATED_DIR: ${GENERATED_DIR:-/app/data/generated}
+      DOCUMENT_CORPUS_PATH: ${DOCUMENT_CORPUS_PATH:-/app/data/ingested/documents.json}
+    volumes:
+      # Read-only: the API only inspects and retrieves from these: ingestion
+      # and dbt run in the worker, which mounts the same volumes writable.
+      - generated_data:/app/data/generated:ro
+      - ingested_data:/app/data/ingested:ro
     healthcheck:
       # The API serves GET /health at the root. python (urllib) is always in the
       # image, so this is a reliable probe and lets `web` gate on api readiness.
