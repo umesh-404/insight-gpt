@@ -83,8 +83,8 @@ web/app/
       page.tsx                  # Ask / Chat (conversation list + thread)
       [conversationId]/page.tsx # a specific conversation
     dashboards/
-      page.tsx                  # dashboard list
-      [id]/page.tsx             # one dashboard
+      page.tsx                  # the governed overview (live /metrics/query)
+      [id]/page.tsx             # a seeded preview id; 404s anything else
     sources/page.tsx            # data-source admin (admin only)
     pipelines/
       page.tsx                  # run history + triggers
@@ -101,6 +101,26 @@ web/components/ui/              # shadcn/ui primitives
 Route groups separate the **unauthenticated** `(auth)` shell from the
 **guarded** `(app)` shell. The `(app)/layout.tsx` renders the persistent
 sidebar + top bar and enforces auth (§6).
+
+**Relative date ranges anchor to the data, not to the wall clock.** "Last 30
+days", "This quarter" and "Year to date" resolve against the newest period the
+warehouse actually holds, which `dashboard-view.tsx` discovers with one
+unfiltered coverage query before any other tile resolves. The naive version
+anchored to `new Date()`, and because the demo warehouse ends partway through
+the year, every relative range selected a window with no rows — the whole
+dashboard rendered "No data in range" and read as a broken app rather than as
+an empty window. Tiles stay in their loading state until coverage resolves, so
+the page never flashes a false empty; if coverage fails it falls back to the
+wall clock rather than inventing a date. The resolved window and the data's end
+date are both printed above the KPI grid, so what is on screen is never
+ambiguous about which period it describes.
+
+**Saved dashboards do not exist yet.** `/dashboards` is the shared governed
+overview, resolved live through `/metrics/query`. `[id]` keeps three seeded ids
+that render that same overview behind an explicit preview banner, and `404`s
+anything else — an unknown id previously rendered a convincing page for a
+dashboard nobody had saved, which is the kind of thing that cannot survive
+being asked "is this real?".
 
 ### 3.1 Route ↔ role
 

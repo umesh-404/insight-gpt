@@ -19,7 +19,9 @@ import {
 import { useMetricQueries, useMetricsCatalog } from '@/lib/hooks';
 import {
   comparisonLabelFor,
+  formatDay,
   grainFor,
+  latestPeriodEnd,
   previousRange,
   resolveRange,
   seriesValues,
@@ -30,6 +32,19 @@ import {
 import type { Cell, MetricFilter, MetricQuery, MetricUnit } from '@/lib/types';
 
 const TOP_N = 8;
+
+/**
+ * One unfiltered, month-grained revenue breakdown whose only job is to tell us
+ * how far the warehouse actually runs. Every relative range on this page is
+ * resolved against that date instead of the browser clock — see
+ * `latestPeriodEnd`.
+ */
+const COVERAGE_QUERY = [
+  {
+    name: 'coverage',
+    query: { metric: 'revenue', dimensions: ['date'], time_grain: 'month' } as MetricQuery,
+  },
+];
 
 /**
  * KPI tiles, in display order. `unit` is refined from the live catalog.
@@ -76,7 +91,14 @@ function dimensionValues(
   return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
-export function DashboardView({ title = 'Retail overview' }: { title?: string }) {
+export function DashboardView({
+  title = 'Retail overview',
+  note,
+}: {
+  title?: string;
+  /** Shown under the header when the page is a preview of something unbuilt. */
+  note?: string;
+}) {
   const [filters, setFilters] = React.useState<DashboardFilters>({
     range: 'ytd',
     region: ALL_VALUES,
@@ -85,7 +107,21 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
 
   const catalog = useMetricsCatalog();
 
-  const timeRange = React.useMemo(() => resolveRange(filters.range), [filters.range]);
+  // How far the data runs. Resolved before anything else, because it is the
+  // clock every other query on this page is measured against.
+  const coverage = useMetricQueries(COVERAGE_QUERY);
+  const anchor = React.useMemo(
+    () => latestPeriodEnd(coverage.byName.coverage, 'revenue'),
+    [coverage.byName.coverage],
+  );
+  const anchorKnown = !coverage.isLoading;
+
+  const timeRange = React.useMemo(
+    // `resolveRange` falls back to the wall clock when we have no anchor; that
+    // is the honest answer for an empty warehouse, not a guessed date.
+    () => resolveRange(filters.range, anchor ?? undefined),
+    [filters.range, anchor],
+  );
   const priorRange = React.useMemo(() => previousRange(timeRange), [timeRange]);
   const grain = grainFor(timeRange);
 
@@ -172,7 +208,16 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dimensionFilters, timeRange, priorRange, grain, catalog.data]);
 
-  const { byName, isLoading, isError, error, refetch } = useMetricQueries(queries);
+  const {
+    byName,
+    isLoading: queriesLoading,
+    isError,
+    error,
+    refetch,
+  } = useMetricQueries(queries, anchorKnown);
+  // Until the anchor resolves the queries above are deliberately not issued, so
+  // the page must report itself as loading rather than as empty.
+  const isLoading = !anchorKnown || queriesLoading;
 
   // Render hints, in order of authority: the result's own `meta`, then the
   // catalog definition, then the compile-time default.
@@ -224,6 +269,14 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
 
   const catalogFailed = catalog.isError;
 
+  // Spelled out so nobody has to guess what "this quarter" resolved to. The
+  // warehouse is a fixed fixture, so its last day and today's date differ.
+  const rangeNote = anchor
+    ? `Showing ${formatDay(new Date(`${timeRange.start}T00:00:00Z`))} – ${formatDay(
+        new Date(`${timeRange.end}T00:00:00Z`),
+      )} · data runs to ${formatDay(anchor)}`
+    : null;
+
   return (
     <div className="space-y-6 p-4 sm:p-6">
       <PageHeader
@@ -241,11 +294,22 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
         loading={isLoading}
       />
 
-      {isError || catalogFailed ? (
+      {note ? (
+        <p className="rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+          {note}
+        </p>
+      ) : null}
+
+      {rangeNote ? (
+        <p className="-mt-2 text-xs tabular-nums text-muted-foreground">{rangeNote}</p>
+      ) : null}
+
+      {isError || catalogFailed || coverage.isError ? (
         <ErrorState
-          error={error ?? catalog.error}
+          error={error ?? catalog.error ?? coverage.error}
           onRetry={() => {
             refetch();
+            coverage.refetch();
             void catalog.refetch();
           }}
         />
@@ -303,10 +367,12 @@ export function DashboardView({ title = 'Retail overview' }: { title?: string })
             </div>
           </section>
 
-          {/* Top products + at-risk inventory */}
+          {/* Top products + at-risk inventory. `items-start`: the at-risk table
+              is far taller than the fixed-height chart, and a stretched grid
+              row left a card-height band of dead space under the bars. */}
           <section
             aria-labelledby="dash-breakdowns"
-            className="grid grid-cols-1 gap-4 lg:grid-cols-2"
+            className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2"
           >
             <h2 id="dash-breakdowns" className="sr-only">
               Breakdowns

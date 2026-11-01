@@ -11,6 +11,19 @@ export interface DashboardFilters {
   category: string;
 }
 
+/**
+ * Lower-cased plural of a dimension label from the catalog. Naive `+ "s"`
+ * produced "All categorys" on screen; the -y rule covers every label the
+ * catalog actually ships, and anything already plural is left alone.
+ */
+function plural(label: string): string {
+  const word = label.toLowerCase();
+  if (word.endsWith('s')) return word;
+  if (/[^aeiou]y$/.test(word)) return `${word.slice(0, -1)}ies`;
+  if (/(ch|sh|x|z)$/.test(word)) return `${word}es`;
+  return `${word}s`;
+}
+
 export const ALL_VALUES = 'all';
 
 function withAll(
@@ -73,7 +86,7 @@ export function DateRangeFilter({
         <Select
           aria-label={regionLabel}
           disabled={loading || regions.length === 0}
-          options={withAll(regions, `All ${regionLabel.toLowerCase()}s`)}
+          options={withAll(regions, `All ${plural(regionLabel)}`)}
           value={value.region}
           onChange={(e) => onChange({ ...value, region: e.target.value })}
         />
@@ -82,7 +95,7 @@ export function DateRangeFilter({
         <Select
           aria-label={categoryLabel}
           disabled={loading || categories.length === 0}
-          options={withAll(categories, `All ${categoryLabel.toLowerCase()}s`)}
+          options={withAll(categories, `All ${plural(categoryLabel)}`)}
           value={value.category}
           onChange={(e) => onChange({ ...value, category: e.target.value })}
         />

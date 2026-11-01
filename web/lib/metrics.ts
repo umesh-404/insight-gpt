@@ -306,3 +306,56 @@ export function toMetricChart(
     data: data.rows,
   };
 }
+
+/* -------------------------------------------------------------------------- */
+/* Data anchor                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Last calendar day covered by a date-grouped metric result, as a UTC `Date`.
+ *
+ * Relative ranges ("last 30 days", "this quarter") are meaningless against a
+ * warehouse that stops before the wall clock: resolved from `new Date()` they
+ * select a window with no rows and the whole dashboard reads as empty. Anchor
+ * them to the newest period the warehouse actually holds instead. Returns null
+ * when the result carries no parseable period, so callers can fall back rather
+ * than invent a date.
+ */
+export function latestPeriodEnd(
+  result: MetricResult | undefined,
+  metric: string,
+): Date | null {
+  if (!result?.rows.length || result.columns.length < 2) return null;
+  // The period column is the one that is not the metric value.
+  const vi = valueIndex(result, metric);
+  const index = result.columns.findIndex((_, i) => i !== vi);
+  if (index < 0) return null;
+
+  let newest = '';
+  for (const row of result.rows) {
+    const cell = row[index];
+    if (typeof cell === 'string' && cell > newest) newest = cell;
+  }
+
+  // Period labels arrive as YYYY, YYYY-MM or YYYY-MM-DD. A partial period means
+  // "through the end of it", so widen rather than truncate to its first day.
+  const parts = /^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/.exec(newest);
+  if (!parts) return null;
+  const year = Number(parts[1]);
+  const month = parts[2] ? Number(parts[2]) : 12;
+  const day = parts[3] ? Number(parts[3]) : 0; // day 0 == last day of `month`
+  const date = parts[3]
+    ? new Date(Date.UTC(year, month - 1, day))
+    : new Date(Date.UTC(year, month, 0));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/** `30 Jun 2026` — the short, unambiguous form used in data-coverage notes. */
+export function formatDay(date: Date): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  }).format(date);
+}
