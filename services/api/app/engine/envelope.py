@@ -62,6 +62,9 @@ class Chart(BaseModel):
 
 
 class AnswerEnvelope(BaseModel):
+    # The narrative itself. Required: every other field is optional, but an
+    # envelope without prose is not an answer.
+    answer: str
     route: Route = "structured"
     sql: list[str] = Field(default_factory=list)
     tables: list[Table] = Field(default_factory=list)
