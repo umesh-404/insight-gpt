@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
+from ..auth.tokens import verify_jwt_secret
 from .deps import APP_VERSION
 from .errors import (
     APIError,
@@ -61,6 +62,10 @@ def _cors_origins() -> list[str]:
 
 def create_app() -> FastAPI:
     configure_logging()
+
+    # Fail before the first request rather than signing tokens with a secret
+    # that is published in the repository (see app/auth/tokens.py).
+    verify_jwt_secret()
 
     app = FastAPI(
         title="InsightGPT API",
