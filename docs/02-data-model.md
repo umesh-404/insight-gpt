@@ -392,8 +392,12 @@ The eight governed metrics, exactly as `config/semantic_layer.yml` defines them:
 is net of returns: a returned line contributes no revenue, no margin, no cost
 and no units. `units_sold` and `return_rate` always worked that way; `revenue`
 did not, so a dashboard could report revenue that counted ~7% of lines it was
-simultaneously reporting as returned (Q2 2026: ₹1,32,93,312 gross of returns
-against ₹1,23,62,553 net, beside a `return_rate` of 6.2%). The inconsistency
+simultaneously reporting as returned — an overstatement of roughly the same
+size as the `return_rate` shown beside it. (Absolute figures are deliberately
+not quoted here: they move with every regeneration of the demo dataset, and a
+number in a doc that silently goes stale is the class of defect this section
+exists to describe. `test_fixture_coherence.py` pins the relationship instead.)
+The inconsistency
 was the defect, so the whole order-line family now shares one convention.
 `return_rate` keeps its denominator over every line, returned included — that
 is what makes it a rate.
