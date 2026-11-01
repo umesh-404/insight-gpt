@@ -12,6 +12,7 @@ import json
 import logging
 import os
 
+from ..engine.grounding import detect_group_dims, dimension_is_grounded
 from .base import Provider
 from .fake import (
     FakeProvider,
@@ -174,30 +175,15 @@ class TypeSafeProvider(Provider):
         metric_choice = res.choices["metric"].choice
         dim_choice = res.choices["dimension"].choice
 
-        day_words = (
-            "sales day", "highest day", "best day", "worst day", "by day", "by date", "per day",
-            "over time", "trend", "monthly", "by month", "quarterly", "by quarter", "yearly",
-            "by year", "vs", "versus", "over 2 years", "over two years", "last 2 years",
-            "last two years",
-        )
-        if any(w in q_lower for w in day_words):
-            dim_choice = "date"
-
-        extremum_words = (
-            "least sale", "lowest sale", "minimum sale", "lowest selling", "worst sale",
-            "worst selling", "least revenue", "lowest revenue", "teh least sale",
-            "highest sale", "top sale", "maximum sale", "best sale", "best selling",
-            "highest selling", "highest revenue", "top revenue", "most sale",
-        )
-        if any(w in q_lower for w in extremum_words) and dim_choice == "none":
-            if any(w in q_lower for w in ("day", "date", "daily", "when")):
-                dim_choice = "date"
-            elif any(w in q_lower for w in ("category", "categories")):
-                dim_choice = "category"
-            elif any(w in q_lower for w in ("region", "regions")):
-                dim_choice = "region"
-            else:
-                dim_choice = "product"
+        # The remote model's dimension choice is advisory, not authoritative: an
+        # unstable choice flipped the headline question between a scalar answer
+        # and a per-month breakdown across identical calls. Keep it only when the
+        # question actually asks to slice by that dimension, and otherwise fall
+        # back to the deterministic, shared reading of the question — so the same
+        # input always produces the same envelope regardless of model sampling.
+        if not dimension_is_grounded(q_lower, dim_choice):
+            detected = detect_group_dims(q_lower)
+            dim_choice = detected[0] if detected else "none"
 
         if is_change and ("why" in q_lower or "cause" in q_lower or "reason" in q_lower):
             route_choice = "hybrid"

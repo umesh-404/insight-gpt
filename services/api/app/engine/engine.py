@@ -20,6 +20,7 @@ from ..semantic.query_builder import Filter, MetricSelection, build_query
 from ..warehouse.executor import DuckDBWarehouse, Warehouse
 from .attachments import AttachmentInput, process_attachments
 from .envelope import AnswerEnvelope, Chart, ChartSeries, Citation, CorrectionAttempt, Table
+from .grounding import question_years, selection_is_grounded, year_span, years_covered
 from .retrieval import FixtureRetriever, Retriever
 from .router import route
 from .selfcorrect import AbstainSignal, suggest_metrics
@@ -89,6 +90,40 @@ class InsightEngine:
                 "reliably.",
                 suggest_metrics(requested, self.catalog),
             )
+
+        # The provider picks a metric from a *closed menu* of governed metrics, so
+        # it always returns one — asked for "average employee salary" a model must
+        # still answer "revenue". The engine therefore treats the selection as a
+        # hypothesis and checks it against the question's own words before
+        # computing a number from it. Enforcing this here (not per provider) is
+        # what makes abstention a property of the engine rather than of whichever
+        # provider happens to be configured.
+        if (
+            r["route"] in ("structured", "hybrid")
+            and r.get("metric")
+            and not selection_is_grounded(question, r["metric"])
+        ):
+            if r["needs_docs"] or parsed_attachments:
+                # Documents can still answer it; just do not attach a number.
+                r["metric"] = None
+                r["time_range"] = None
+            else:
+                return self._abstain(
+                    "That question does not map to anything in the governed "
+                    "semantic layer, so answering it would mean reporting a "
+                    "different metric than the one asked for.",
+                    suggest_metrics(None, self.catalog),
+                )
+
+        # A period the question named explicitly but the resolver did not honour
+        # means the resolver fell back to its default ("last quarter"). Answering
+        # then silently reports a *different* period than the one asked about, so
+        # honour the asked period instead and let the warehouse say it has no
+        # rows for it.
+        asked_years = question_years(question)
+        if r.get("time_range") and not years_covered(r["time_range"], asked_years):
+            r["time_range"] = year_span(asked_years)
+            r["prior_time_range"] = None
 
         structured: StructuredResult | None = None
         attempts: list[CorrectionAttempt] = []
