@@ -163,6 +163,23 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         }
         return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
 
+    base_filters = [_time_filter(time_range)]
+    extra_filters: list[Filter] = []
+    entity_desc: list[str] = []
+    if route.get("entities"):
+        for dim_name, raw_vals in route["entities"].items():
+            if dim_name in catalog.dimensions and raw_vals:
+                vals = raw_vals if isinstance(raw_vals, list) else [raw_vals]
+                clean_vals: list[str | int | float] = []
+                for v in vals:
+                    if str(v).isdigit():
+                        clean_vals.append(int(v))
+                    else:
+                        clean_vals.append(v)
+                if clean_vals:
+                    extra_filters.append(Filter(dimension=dim_name, op="in", values=clean_vals))
+                    entity_desc.append(f"{dim_name} {', '.join(str(x) for x in clean_vals)}")
+
     # --- grouped question -----------------------------------------------------
     if route.get("group_dims"):
         dim = route["group_dims"][0]
@@ -173,7 +190,7 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         is_daily = dim == "date" and any(w in question.lower() for w in ("day", "daily"))
         time_grain = "day" if is_daily else None
         selection = MetricSelection(
-            metric=metric, dimensions=[dim], filters=[_time_filter(time_range)],
+            metric=metric, dimensions=[dim], filters=base_filters + extra_filters,
             time_grain=time_grain, order_by_metric=order,
         )
         out = _run_sel(corr, selection, f"grouped:{dim}", attempts, expect_rows=True)
@@ -201,7 +218,7 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
 
     # --- scalar question ------------------------------------------------------
-    selection = MetricSelection(metric=metric, dimensions=[], filters=[_time_filter(time_range)])
+    selection = MetricSelection(metric=metric, dimensions=[], filters=base_filters + extra_filters)
     out = _run_sel(corr, selection, f"scalar:{metric}", attempts, expect_rows=True)
     sql.append(out.built.sql)
     eff_metric = out.selection.metric
@@ -209,10 +226,12 @@ def run_structured(route: dict, catalog: SemanticCatalog, warehouse: Warehouse,
         return _no_data(eff_metric, time_range, sql, tables, attempts)
     value = float(out.result.rows[0][0]) if out.result.rows and out.result.rows[0][0] is not None \
         else 0.0
-    tables.append(Table(title=f"{eff_metric}", columns=[eff_metric], rows=[[value]]))
+    title_suffix = f" ({'; '.join(entity_desc)})" if entity_desc else ""
+    tables.append(Table(title=f"{eff_metric}{title_suffix}", columns=[eff_metric], rows=[[value]]))
     findings = {"kind": "scalar", "metric": eff_metric,
                 "format": _format_of(catalog, eff_metric),
-                "period": _period_label(time_range), "value": value}
+                "period": _period_label(time_range), "value": value,
+                "entities": route.get("entities", {})}
     return StructuredResult(sql=sql, tables=tables, findings=findings, attempts=attempts)
 
 

@@ -54,7 +54,7 @@ class InsightEngine:
     def ask(
         self, question: str, attachments: list[AttachmentInput] | None = None
     ) -> AnswerEnvelope:
-        parsed_attachments = process_attachments(attachments) if attachments else []
+        parsed_attachments = process_attachments(attachments, question=question) if attachments else []
         attachment_docs = [
             att.to_doc(self.today, i + 1) for i, att in enumerate(parsed_attachments)
         ]
@@ -64,7 +64,13 @@ class InsightEngine:
 
         # If files are attached, the user intends to query those files
         if parsed_attachments:
-            if r["route"] in ("conversational", "clarify"):
+            q_lower = question.lower()
+            is_file_target = (
+                r["route"] in ("conversational", "clarify", "unstructured")
+                or any(w in q_lower for w in ("file", "attached", "upload", "csv", "sheet", "record", "reason", "row", "item", "id", "order", "return reason"))
+                or bool(re.search(r"\b(?:id|#)\s*\d+\b|\border\s+\d+\b", q_lower))
+            )
+            if is_file_target:
                 r["route"] = "unstructured"
             r["needs_docs"] = True
 

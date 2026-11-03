@@ -26,7 +26,7 @@ def test_defaults_select_fixture_stack() -> None:
 
 def test_postgres_selected_only_with_dsn() -> None:
     # Selector alone without a DSN stays on the safe offline default.
-    assert build.select_warehouse(Settings(warehouse="postgres")) == "duckdb"
+    assert build.select_warehouse(Settings(warehouse="postgres", postgres_dsn="")) == "duckdb"
 
     s = Settings(warehouse="postgres", postgres_dsn="postgresql://ro@db/marts")
     assert build.select_warehouse(s) == "postgres"

@@ -156,7 +156,7 @@ def _clean_cell(val: Any) -> Any:
     return s
 
 
-def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None) -> ProcessedAttachment:
+def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None, question: str | None = None) -> ProcessedAttachment:
     """Parse CSV or TSV content into a Table, summaries, and markdown representation."""
     if delimiter is None:
         if name.lower().endswith(".tsv") or "\t" in text.split("\n", 1)[0]:
@@ -191,6 +191,26 @@ def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None) -> Pro
         for r in parsed_rows
     ]
 
+    # Target ID or entity search from question to prioritize matching rows
+    target_rows: list[list[Any]] = []
+    if question:
+        q_lower = question.lower()
+        id_matches = set(re.findall(r"\b\d+\b", question))
+        matched_col_idx = None
+        for idx, col in enumerate(headers):
+            clean_c = col.lower().replace("_", " ")
+            if clean_c in q_lower or (col.lower().endswith("id") and col.lower()[:-2].strip() in q_lower):
+                matched_col_idx = idx
+                break
+
+        if id_matches:
+            for r in normalized_rows:
+                if matched_col_idx is not None and matched_col_idx < len(r):
+                    if str(r[matched_col_idx]) in id_matches:
+                        target_rows.append(r)
+                elif any(str(cell) in id_matches for cell in r):
+                    target_rows.append(r)
+
     # Infer column data types for stats
     col_dtypes: dict[str, str] = {}
     for col_idx, col_name in enumerate(headers):
@@ -201,10 +221,12 @@ def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None) -> Pro
         ]
         col_dtypes[col_name] = sample_types[0] if sample_types else "string"
 
+    preview_rows = target_rows + [r for r in normalized_rows if r not in target_rows]
+    display_title = f"Attached: {name} ({row_count:,} total rows)"
     table = Table(
-        title=f"Attached: {name}",
+        title=display_title,
         columns=headers,
-        rows=normalized_rows[:MAX_TABLE_PREVIEW_ROWS],
+        rows=preview_rows[:MAX_TABLE_PREVIEW_ROWS],
     )
 
     # Compute quick numeric statistics for synthesis
@@ -225,7 +247,6 @@ def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None) -> Pro
                     "max": round(max(nums), 2),
                 }
 
-
     # Format markdown evidence representation
     lines = [
         f"File: {name} (CSV, {row_count} data rows, {col_count} columns)",
@@ -238,7 +259,14 @@ def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None) -> Pro
         )
         lines.append(f"Summary Statistics: {stats_str}")
 
-    lines.append("\nData Rows (first 100):")
+    if target_rows:
+        lines.append(f"\nMatching Rows for Question ({len(target_rows)} found):")
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for r in target_rows[:25]:
+            lines.append("| " + " | ".join(str(cell) for cell in r) + " |")
+
+    lines.append("\nData Rows Preview (first 50):")
     lines.append("| " + " | ".join(headers) + " |")
     lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
     for r in normalized_rows[:50]:
@@ -261,7 +289,7 @@ def _parse_csv_or_tsv(name: str, text: str, delimiter: str | None = None) -> Pro
     )
 
 
-def _parse_excel(name: str, raw_bytes: bytes) -> ProcessedAttachment:
+def _parse_excel(name: str, raw_bytes: bytes, question: str | None = None) -> ProcessedAttachment:
     """Parse Excel (.xlsx, .xls) workbook using openpyxl."""
     try:
         import openpyxl
@@ -291,7 +319,7 @@ def _parse_excel(name: str, raw_bytes: bytes) -> ProcessedAttachment:
         writer = csv.writer(csv_buffer)
         for r in all_rows:
             writer.writerow([str(c) if c is not None else "" for c in r])
-        proc = _parse_csv_or_tsv(name, csv_buffer.getvalue(), delimiter=",")
+        proc = _parse_csv_or_tsv(name, csv_buffer.getvalue(), delimiter=",", question=question)
         proc.content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         proc.summary = f"Excel spreadsheet with {proc.row_count} rows"
         return proc
@@ -534,17 +562,17 @@ def _parse_image(name: str, raw_bytes: bytes, content_type: str | None = None) -
     )
 
 
-def process_attachment(att: AttachmentInput) -> ProcessedAttachment:
+def process_attachment(att: AttachmentInput, question: str | None = None) -> ProcessedAttachment:
     """Read and parse an attachment based on its filename extension and content."""
     text, raw_bytes = _decode_content(att.content)
     lower_name = att.name.lower()
 
     if lower_name.endswith(".csv"):
-        return _parse_csv_or_tsv(att.name, text, delimiter=",")
+        return _parse_csv_or_tsv(att.name, text, delimiter=",", question=question)
     if lower_name.endswith(".tsv"):
-        return _parse_csv_or_tsv(att.name, text, delimiter="\t")
+        return _parse_csv_or_tsv(att.name, text, delimiter="\t", question=question)
     if lower_name.endswith((".xlsx", ".xls")):
-        return _parse_excel(att.name, raw_bytes)
+        return _parse_excel(att.name, raw_bytes, question=question)
     if lower_name.endswith(".pdf"):
         return _parse_pdf(att.name, raw_bytes)
     if lower_name.endswith(".docx"):
@@ -567,14 +595,16 @@ def process_attachment(att: AttachmentInput) -> ProcessedAttachment:
     )
 
 
-def process_attachments(attachments: list[AttachmentInput] | None) -> list[ProcessedAttachment]:
+def process_attachments(
+    attachments: list[AttachmentInput] | None, question: str | None = None
+) -> list[ProcessedAttachment]:
     """Parse all attachments safely, logging any errors without failing the request."""
     if not attachments:
         return []
     results: list[ProcessedAttachment] = []
     for att in attachments:
         try:
-            results.append(process_attachment(att))
+            results.append(process_attachment(att, question=question))
         except Exception as exc:
             log.exception("Error processing attachment %s: %s", att.name, exc)
             results.append(

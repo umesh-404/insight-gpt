@@ -18,7 +18,7 @@ from ..formatting import format_value
 from .base import Provider
 
 _METRIC_KEYWORDS = [
-    (("restock", "inventory", "stock", "on hand", "on-hand"), "units_on_hand"),
+    (("restock", "inventory", "stock", "on hand", "on-hand", "on hands", "on-hands", "units on hand", "units on hands"), "units_on_hand"),
     (("margin",), "gross_margin"),
     (("return",), "return_rate"),
     (("average order", "aov", "basket", "average sale", "avg sale"), "avg_order_value"),
@@ -184,8 +184,15 @@ class FakeProvider(Provider):
             return {"answer": answer, "confidence": "high", "caveats": []}
 
         if kind == "scalar":
+            ents = f.get("entities", {})
+            ent_parts = []
+            for k, vs in ents.items():
+                if vs:
+                    v_str = ", ".join(str(x) for x in vs) if isinstance(vs, list) else str(vs)
+                    ent_parts.append(f"{k} {v_str}")
+            ent_msg = f" for {', '.join(ent_parts)}" if ent_parts else ""
             return {
-                "answer": f"{_label(f['metric'])} for {f['period']} was "
+                "answer": f"{_label(f['metric'])}{ent_msg} for {f['period']} was "
                           f"{_num(f['value'], f.get('format', 'number'))}.",
                 "confidence": "high", "caveats": f.get("caveats", []),
             }
@@ -250,7 +257,36 @@ class FakeProvider(Provider):
         if att_items:
             first_att = att_items[0]
             title = first_att.get("title", "the attached file")
-            body_preview = first_att.get("body", "")[:250].replace("\n", " ").strip()
+            body_text = first_att.get("body", "")
+            q_lower = str(p.get("question", "")).lower()
+
+            # Specific row and value extraction (e.g., "order id 8", "product 4", "return reason")
+            m_order = re.search(r"order\s+(?:id\s+|#)?(\d+)", q_lower)
+            matched_line = None
+            if m_order:
+                target_id = m_order.group(1)
+                for line in body_text.splitlines():
+                    cells = [c.strip() for c in line.split("|")]
+                    if target_id in cells or f"| {target_id} |" in line or f",{target_id}," in line:
+                        matched_line = line
+                        break
+
+            if matched_line and "return" in q_lower and "reason" in q_lower:
+                for common_reason in ("wrong size", "defective", "damaged", "late arrival", "not as pictured", "changed mind", "unwanted"):
+                    if common_reason in matched_line.lower():
+                        return {
+                            "answer": f"For order ID {m_order.group(1)}, the return reason is **{common_reason}** [1].",
+                            "confidence": "high",
+                            "caveats": [],
+                        }
+            if matched_line and m_order:
+                return {
+                    "answer": f"For order ID {m_order.group(1)}, the record in {title} is:\n\n{matched_line} [1].",
+                    "confidence": "high",
+                    "caveats": [],
+                }
+
+            body_preview = body_text[:250].replace("\n", " ").strip()
             return {
                 "answer": (
                     f"Based on {title} [1], here are the key insights answering your query: "
@@ -345,13 +381,21 @@ def _detect_group_dims(q: str) -> list[str]:
 
 
 def _detect_entities(q: str) -> dict:
-    ents: dict[str, list[str]] = {}
+    ents: dict[str, list[Any]] = {}
     for region in ("north", "south", "east", "west"):
         if region in q:
             ents.setdefault("region", []).append(region.capitalize())
     for cat in ("electronics", "apparel", "home", "beauty", "sports"):
         if cat in q:
             ents.setdefault("category", []).append(cat.capitalize())
+    # Detect product entities: e.g. "product number 18", "product 4", "product #18"
+    pm = re.search(r"product\s+(?:number\s+|#|id\s+)?(\d+)", q, re.I)
+    if pm:
+        ents.setdefault("product", []).append(int(pm.group(1)))
+    # Detect store entities: e.g. "store number 2", "store 1"
+    sm = re.search(r"store\s+(?:number\s+|#|id\s+)?(\d+)", q, re.I)
+    if sm:
+        ents.setdefault("store", []).append(int(sm.group(1)))
     return ents
 
 
@@ -377,6 +421,41 @@ def _prev_quarter(year: int, q: int) -> tuple[int, int]:
 
 
 def _resolve_time(q: str, today: date, need_prior: bool) -> tuple[dict, dict | None]:
+    # 1. Matches M/D/YYYY or MM/DD/YYYY or YYYY-MM-DD
+    m1 = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", q)
+    if m1:
+        m_val, d_val, y_val = int(m1.group(1)), int(m1.group(2)), int(m1.group(3))
+        ds = f"{y_val:04d}-{m_val:02d}-{d_val:02d}"
+        return {"start": ds, "end": ds}, None
+    m2 = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", q)
+    if m2:
+        y_val, m_val, d_val = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        ds = f"{y_val:04d}-{m_val:02d}-{d_val:02d}"
+        return {"start": ds, "end": ds}, None
+
+    # 2. Matches "8th july", "8 july", "july 8th", "july 8"
+    month_map = {
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8,
+        "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+    m_re = "|".join(month_map.keys())
+    m3 = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?({m_re})(?:\s+(\d{{4}}))?\b", q, re.I)
+    if m3:
+        d_val = int(m3.group(1))
+        m_val = month_map[m3.group(2).lower()]
+        y_val = int(m3.group(3)) if m3.group(3) else today.year
+        ds = f"{y_val:04d}-{m_val:02d}-{d_val:02d}"
+        return {"start": ds, "end": ds}, None
+    m4 = re.search(rf"\b({m_re})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:\s+(\d{{4}}))?\b", q, re.I)
+    if m4:
+        m_val = month_map[m4.group(1).lower()]
+        d_val = int(m4.group(2))
+        y_val = int(m4.group(3)) if m4.group(3) else today.year
+        ds = f"{y_val:04d}-{m_val:02d}-{d_val:02d}"
+        return {"start": ds, "end": ds}, None
+
     cy, cq = today.year, _quarter(today)
     if "2024" in q and "2025" in q:
         return {"start": "2024-01-01", "end": "2025-12-31"}, None

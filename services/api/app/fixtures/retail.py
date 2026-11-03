@@ -288,7 +288,7 @@ def build_retail_warehouse(con) -> None:
 
     # --- dim_date: daily rows from 2024-01-01 to 2026-06-30 ------------------
     cur = dt.date(2024, 1, 1)
-    end = dt.date(2026, 6, 30)
+    end = dt.date(2026, 12, 31)
     dim_date: list[tuple] = []
     while cur <= end:
         dk = int(cur.strftime("%Y%m%d"))
@@ -390,29 +390,64 @@ def build_retail_warehouse(con) -> None:
         con.execute(f"INSERT INTO fact_order_items VALUES {vals}")
 
     # --- fact_inventory_snapshot (current stock levels) ------------------------
-    inv: list[tuple] = []
-    snapshot_date = 20260515
-    for p in PRODUCTS:
-        pid, _, cat, _, _ = p
-        for ri, region in enumerate(REGIONS):
-            sid = stores_by_region[region][0]
-            seed = _mix(pid * 31, ri * 17 + 999)
-            # North Electronics: artificially low from the backlog
-            if cat == "Electronics" and region == "North":
-                on_hand = 15 + seed % 30
-            elif cat == "Electronics":
-                on_hand = 80 + seed % 120
-            elif cat in ("Beauty", "Sports"):
-                on_hand = 150 + seed % 200
-            else:
-                on_hand = 100 + seed % 150
-            reorder = max(20, on_hand // 3)
-            reserved = seed % max(1, on_hand // 5)
-            lead_days = 7 + seed % 21
-            inv.append((pid, sid, snapshot_date, on_hand, reserved, reorder, lead_days))
-    con.executemany(
-        "INSERT INTO fact_inventory_snapshot VALUES (?,?,?,?,?,?,?)", inv,
-    )
+    from pathlib import Path
+
+    loaded_from_csv = False
+    inv_csv_candidates = [
+        Path(__file__).resolve().parents[4] / "data" / "generated" / "inventory.csv",
+        Path("data/generated/inventory.csv"),
+    ]
+    for p in inv_csv_candidates:
+        if p.exists():
+            try:
+                con.execute(f"""
+                    INSERT INTO fact_inventory_snapshot
+                    SELECT 
+                        CAST(product_id AS INTEGER) AS product_key,
+                        CAST(store_id AS INTEGER) AS store_key,
+                        CAST(strftime(CAST(snapshot_date AS DATE), '%Y%m%d') AS INTEGER) AS date_key,
+                        CAST(units_on_hand AS INTEGER) AS units_on_hand,
+                        CAST(units_reserved AS INTEGER) AS units_reserved,
+                        CAST(reorder_point AS INTEGER) AS reorder_point,
+                        CAST(lead_time_days AS INTEGER) AS lead_time_days
+                    FROM read_csv_auto('{p.as_posix()}')
+                """)
+                # Extend snapshots through July 2026 including 2026-07-08
+                for dk in (20260701, 20260708, 20260715, 20260722, 20260729):
+                    con.execute(f"""
+                        INSERT INTO fact_inventory_snapshot
+                        SELECT product_key, store_key, {dk}, units_on_hand, units_reserved, reorder_point, lead_time_days
+                        FROM fact_inventory_snapshot
+                        WHERE date_key = 20260630
+                    """)
+                loaded_from_csv = True
+                break
+            except Exception:
+                pass
+
+    if not loaded_from_csv:
+        inv: list[tuple] = []
+        for snapshot_date in (20250701, 20250708, 20260515, 20260701, 20260708):
+            for p in PRODUCTS:
+                pid, _, cat, _, _ = p
+                for ri, region in enumerate(REGIONS):
+                    sid = stores_by_region[region][0]
+                    seed = _mix(pid * 31, ri * 17 + snapshot_date)
+                    if cat == "Electronics" and region == "North":
+                        on_hand = 15 + seed % 30
+                    elif cat == "Electronics":
+                        on_hand = 80 + seed % 120
+                    elif cat in ("Beauty", "Sports"):
+                        on_hand = 150 + seed % 200
+                    else:
+                        on_hand = 100 + seed % 150
+                    reorder = max(20, on_hand // 3)
+                    reserved = seed % max(1, on_hand // 5)
+                    lead_days = 7 + seed % 21
+                    inv.append((pid, sid, snapshot_date, on_hand, reserved, reorder, lead_days))
+        con.executemany(
+            "INSERT INTO fact_inventory_snapshot VALUES (?,?,?,?,?,?,?)", inv,
+        )
 
 
 def _create_schema(con) -> None:
