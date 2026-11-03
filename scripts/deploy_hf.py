@@ -164,6 +164,8 @@ python-multipart>=0.0.9
 openpyxl>=3.1
 pypdf>=4.0
 fpdf2>=2.7,<3
+pillow>=10.0.0
+pytesseract>=0.3.10
 """
 
 HF_DOCKERFILE = """# InsightGPT API — Hugging Face Spaces Dockerfile

@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
-import type { Cell, ColumnDtype, TableBlock } from '@/lib/types';
+import type { Cell, ColumnDtype, ColumnSpec, TableBlock } from '@/lib/types';
 
 const NUMERIC: ColumnDtype[] = ['currency', 'number', 'ratio'];
 const DEFAULT_PAGE_SIZE = 10;

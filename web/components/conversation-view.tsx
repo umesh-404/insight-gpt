@@ -292,7 +292,7 @@ export function ConversationView({
             type="file"
             multiple
             className="hidden"
-            accept=".csv,.tsv,.txt,.md,.markdown,.json,.pdf,.docx,.doc,.log,.sql,.py,.yaml,.yml,.xlsx,.xls"
+            accept=".csv,.tsv,.txt,.md,.markdown,.json,.pdf,.docx,.doc,.log,.sql,.py,.yaml,.yml,.xlsx,.xls,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff"
             onChange={handleFileChange}
           />
           <div
@@ -349,7 +349,7 @@ export function ConversationView({
                 size="icon"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={busy}
-                title="Attach file (CSV, Excel, PDF, Word, JSON, TXT)"
+                title="Attach file (CSV, Excel, PDF, Image, Word, JSON, TXT)"
                 aria-label="Attach file"
                 className="size-9 shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
               >

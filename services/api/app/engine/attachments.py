@@ -467,6 +467,73 @@ def _parse_json(name: str, text: str) -> ProcessedAttachment:
     )
 
 
+def _parse_image(name: str, raw_bytes: bytes, content_type: str | None = None) -> ProcessedAttachment:
+    """Extract text or tabular structure from image files (OCR / visual inspection)."""
+    extracted_text = ""
+    width, height = 0, 0
+    format_name = "Image"
+
+    # 1. Inspect image dimensions and metadata via PIL if available
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw_bytes))
+        width, height = img.size
+        format_name = img.format or "Image"
+
+        # 2. Perform OCR text extraction if pytesseract / tesseract engine is available
+        try:
+            import pytesseract
+            ocr_res = pytesseract.image_to_string(img)
+            if ocr_res and ocr_res.strip():
+                extracted_text = ocr_res.strip()
+        except Exception as ocr_err:
+            log.debug("pytesseract OCR skipped for %s: %s", name, ocr_err)
+    except Exception as img_err:
+        log.warning("Could not open image %s: %s", name, img_err)
+
+    if not extracted_text:
+        lines = [
+            f"File: {name} ({format_name}, {width}x{height}px, {len(raw_bytes)} bytes)",
+            "Visual image document attached. Image metadata and dimensions captured.",
+        ]
+        text_content = "\n".join(lines)
+        summary = f"{format_name} image {name} ({width}x{height}px)"
+    else:
+        # Check if OCR extracted tabular lines
+        ocr_lines = extracted_text.splitlines()
+        summary = f"{format_name} image {name} (extracted {len(ocr_lines)} lines of text)"
+        text_content = (
+            f"File: {name} ({format_name} image with extracted text):\n\n"
+            f"{extracted_text}"
+        )
+
+    # Check if text contains structured tabular data
+    table = None
+    if extracted_text and ("\t" in extracted_text or "  " in extracted_text or "|" in extracted_text):
+        non_empty = [l for l in extracted_text.splitlines() if l.strip()]
+        if len(non_empty) >= 2:
+            # Simple delimiter guess
+            first = non_empty[0]
+            delim = "\t" if "\t" in first else ("|" if "|" in first else None)
+            if delim:
+                raw_rows = [[c.strip() for c in r.split(delim) if c.strip()] for r in non_empty]
+                if raw_rows and len(raw_rows[0]) >= 2:
+                    table = Table(
+                        title=f"Attached Image Data: {name}",
+                        columns=raw_rows[0],
+                        rows=raw_rows[1:MAX_TABLE_PREVIEW_ROWS],
+                    )
+
+    return ProcessedAttachment(
+        name=name,
+        content_type=content_type or f"image/{format_name.lower()}",
+        text_content=text_content,
+        table=table,
+        summary=summary,
+        row_count=len(extracted_text.splitlines()) if extracted_text else 1,
+    )
+
+
 def process_attachment(att: AttachmentInput) -> ProcessedAttachment:
     """Read and parse an attachment based on its filename extension and content."""
     text, raw_bytes = _decode_content(att.content)
@@ -484,6 +551,10 @@ def process_attachment(att: AttachmentInput) -> ProcessedAttachment:
         return _parse_docx(att.name, raw_bytes)
     if lower_name.endswith(".json"):
         return _parse_json(att.name, text)
+    if lower_name.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff")) or (
+        att.content_type and att.content_type.startswith("image/")
+    ):
+        return _parse_image(att.name, raw_bytes, att.content_type)
 
     # Plain text, markdown, logs, code, etc.
     summary = text[:200].replace("\n", " ").strip()
