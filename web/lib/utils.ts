@@ -52,6 +52,30 @@ export function formatPercent(value: number, fractionDigits = 1): string {
   return `${(value * 100).toFixed(fractionDigits)}%`;
 }
 
+/**
+ * Smallest period-over-period move a KPI tile is willing to call a change.
+ *
+ * 0.0005 is exactly the point below which a ratio rounds to "0.0%" at the one
+ * decimal we print. Under it the tile used to render "0.0% ▲ improved" for a
+ * +0.03% drift: a verdict, an arrow and a colour, all asserted about a number
+ * that reads as zero. Below the floor the movement is reported as flat.
+ */
+export const DELTA_NOISE_FLOOR = 0.0005;
+
+/**
+ * Is this ratio a movement worth colouring, or rounding noise?
+ *
+ * Returns false for null/NaN too, so a caller can use it as the single test for
+ * "do we have a change to talk about".
+ */
+export function isMaterialChange(ratio: number | null | undefined): boolean {
+  return (
+    typeof ratio === 'number' &&
+    Number.isFinite(ratio) &&
+    Math.abs(ratio) >= DELTA_NOISE_FLOOR
+  );
+}
+
 /** Human-readable duration from milliseconds (e.g. "1m 12s", "820ms"). */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null) return '—';

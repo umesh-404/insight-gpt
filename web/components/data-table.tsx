@@ -12,6 +12,8 @@ import type { Cell, ColumnDtype, TableBlock } from '@/lib/types';
 const NUMERIC: ColumnDtype[] = ['currency', 'number', 'ratio'];
 
 function fmtCell(value: Cell, dtype: ColumnDtype): React.ReactNode {
+  // An absent value prints as an em dash, never as a confident 0 — the result
+  // set is evidence, and inventing a zero would misreport it.
   if (value == null) return <span className="text-muted-foreground">—</span>;
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'number') {
@@ -31,7 +33,14 @@ function fmtCell(value: Cell, dtype: ColumnDtype): React.ReactNode {
   return value;
 }
 
-/** Renders a result `TableBlock` from the answer envelope. */
+/**
+ * Renders a result `TableBlock` from the answer envelope.
+ *
+ * This is the query's actual output, so the row count is stated: a reader who
+ * can see "12 rows" knows whether the visible rows are the whole result or the
+ * top of a scroll. The header sticks for the same reason — a long result stays
+ * readable without losing which column is which.
+ */
 export function DataTable({ block }: { block: TableBlock }) {
   const columns = block.columns ?? [];
   const rows = block.rows ?? [];
@@ -39,11 +48,16 @@ export function DataTable({ block }: { block: TableBlock }) {
   if (!columns.length) return null;
 
   return (
-    <div>
-      {block.name ? (
-        <p className="mb-2 text-sm font-medium text-foreground">{block.name}</p>
-      ) : null}
-      <div className="scrollbar-thin overflow-x-auto rounded-lg border">
+    <section>
+      <div className="mb-1.5 flex flex-wrap items-baseline gap-x-2.5">
+        {block.name ? (
+          <h4 className="text-sm font-medium text-foreground">{block.name}</h4>
+        ) : null}
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {rows.length === 1 ? '1 row' : `${rows.length} rows`}
+        </span>
+      </div>
+      <div className="scrollbar-thin max-h-[26rem] overflow-auto rounded-lg border">
         <Table>
           <TableHeader>
             <TableRow>
@@ -51,7 +65,11 @@ export function DataTable({ block }: { block: TableBlock }) {
                 <TableHead
                   key={`${col.name}-${i}`}
                   scope="col"
-                  className={NUMERIC.includes(col.dtype) ? 'text-right' : 'text-left'}
+                  className={cn(
+                    // Sticky so a scrolled result never loses its column names.
+                    'sticky top-0 z-10 bg-card',
+                    NUMERIC.includes(col.dtype) ? 'text-right' : 'text-left',
+                  )}
                 >
                   {col.name}
                 </TableHead>
@@ -91,6 +109,6 @@ export function DataTable({ block }: { block: TableBlock }) {
           </TableBody>
         </Table>
       </div>
-    </div>
+    </section>
   );
 }

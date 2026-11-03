@@ -39,6 +39,14 @@ interface ChartRendererProps {
   spec: ChartSpec;
   height?: number;
   className?: string;
+  /**
+   * Visible caption, overriding `spec.title`.
+   *
+   * Lets a caller own the panel heading here instead of stacking a card header
+   * above the figure — one title, one hairline, one row that also carries the
+   * chart/table switch.
+   */
+  title?: string;
 }
 
 type Row = Record<string, CellValue>;
@@ -64,6 +72,16 @@ const AXIS_TICK = {
 /** Solid hairline, not a dash pattern: dashes shimmer and alias when projected. */
 const GRID_STROKE = 'hsl(var(--border))';
 const AXIS_LINE = 'hsl(var(--border))';
+
+/**
+ * Re-exported so every chart in the app — including the forecast panel, which
+ * builds its own ComposedChart — wears the same axis ink and the same solid
+ * hairline grid. A second chart with its own lighter ticks and a dashed grid
+ * reads as a different product on the same screen.
+ */
+export const CHART_AXIS_TICK = AXIS_TICK;
+export const CHART_GRID_STROKE = GRID_STROKE;
+export const CHART_AXIS_LINE = AXIS_LINE;
 
 /**
  * Dash patterns paired with the series colours.
@@ -105,6 +123,108 @@ function formatAxisCategory(value: unknown): string {
 function truncateCategory(value: unknown): string {
   const text = formatAxisCategory(value);
   return text.length > 16 ? `${text.slice(0, 15)}…` : text;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Ranked-bar category labels                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rough advance width of one glyph of the axis face at 12px.
+ *
+ * Used only to budget the category gutter and the characters that fit in it.
+ * Over-estimating is the safe direction: it wraps a line early rather than
+ * letting it run under the plot.
+ */
+const TICK_CHAR_PX = 6.5;
+
+/** Hard ceiling on the category gutter — past this the bars lose their room. */
+const MAX_CATEGORY_GUTTER = 164;
+const TICK_LINE_HEIGHT = 13;
+
+/**
+ * Lay a category label out over at most two lines, breaking on words.
+ *
+ * The ranked bar chart's reason to exist is that each bar is *identified*, and
+ * a single-line tick could not do that: "iPhone 15 Pro Max" arrived as
+ * "iPhone 15 Pro Ma…", which is the same label as every other Pro Max variant.
+ * Two lines hold every product name the catalog ships; the ellipsis is kept
+ * only for the pathological case of one unbreakable word.
+ */
+function wrapCategory(text: string, charsPerLine: number, maxLines = 2): string[] {
+  const clip = (line: string) =>
+    line.length > charsPerLine ? `${line.slice(0, Math.max(1, charsPerLine - 1))}…` : line;
+
+  const words = text.split(/\s+/).filter(Boolean);
+  if (!words.length) return [text];
+
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= charsPerLine) {
+      current = candidate;
+    } else {
+      if (current) lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+
+  if (lines.length <= maxLines) return lines.map(clip);
+  // Everything that did not fit collapses into the last allowed line, so the
+  // ellipsis lands at the end of the name rather than mid-way through it.
+  const kept = lines.slice(0, maxLines - 1).map(clip);
+  kept.push(clip(lines.slice(maxLines - 1).join(' ')));
+  return kept;
+}
+
+/**
+ * Category tick for the horizontal (ranked) bar chart.
+ *
+ * Recharts' own word-wrap puts a two-line tick on a collision course with its
+ * neighbours, so the lines are centred on the band here and the whole label
+ * carries an SVG `<title>` — the full name is readable without hunting for the
+ * tooltip.
+ */
+function CategoryTick({
+  x,
+  y,
+  payload,
+  charsPerLine,
+}: {
+  x?: number;
+  y?: number;
+  payload?: { value?: unknown };
+  charsPerLine?: number;
+}) {
+  const full = formatAxisCategory(payload?.value);
+  const lines = wrapCategory(full, charsPerLine ?? 18);
+  const anchorX = x ?? 0;
+  const top = (y ?? 0) - ((lines.length - 1) * TICK_LINE_HEIGHT) / 2;
+  return (
+    <text
+      x={anchorX}
+      y={top}
+      textAnchor="end"
+      dominantBaseline="central"
+      fill={AXIS_TICK.fill}
+      fontSize={AXIS_TICK.fontSize}
+    >
+      <title>{full}</title>
+      {lines.map((line, i) => (
+        <tspan key={i} x={anchorX} dy={i === 0 ? 0 : TICK_LINE_HEIGHT}>
+          {line}
+        </tspan>
+      ))}
+    </text>
+  );
+}
+
+/** `order_date` → `Order date`. Column names are identifiers, headers are prose. */
+function humanizeKey(key: string): string {
+  const words = key.replace(/[_-]+/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : key;
 }
 
 function formatValue(value: unknown, dtype?: ColumnDtype): string {
@@ -163,7 +283,13 @@ function ChartTooltip({
  * every series color from the `--chart-*` tokens. Offers an accessible data-table
  * alternative so charts never rely on color alone (docs/07 §5, §7).
  */
-export function ChartRenderer({ spec, height = 280, className }: ChartRendererProps) {
+export function ChartRenderer({
+  spec,
+  height = 280,
+  className,
+  title,
+}: ChartRendererProps) {
+  const heading = title ?? spec.title;
   const [view, setView] = React.useState<'chart' | 'table'>(
     spec.kind === 'table' ? 'table' : 'chart',
   );
@@ -206,29 +332,33 @@ export function ChartRenderer({ spec, height = 280, className }: ChartRendererPr
   // beneath "Revenue" — a second heading that names the widget instead of the
   // data, and competes with the real one. Nothing is lost by dropping it.
   const caption =
-    spec.title || `${spec.kind[0]?.toUpperCase() ?? ''}${spec.kind.slice(1)} chart`;
+    heading || `${spec.kind[0]?.toUpperCase() ?? ''}${spec.kind.slice(1)} chart`;
 
   return (
     <figure className={className}>
-      <figcaption className="mb-2 flex min-h-7 items-center justify-between gap-2">
-        {spec.title ? (
-          <span className="text-sm font-medium text-foreground">{spec.title}</span>
+      <figcaption className="mb-3 flex min-h-8 items-center justify-between gap-3">
+        {heading ? (
+          <span className="text-base font-semibold leading-none tracking-tight text-foreground">
+            {heading}
+          </span>
         ) : (
           <span aria-hidden />
         )}
+        {/* ≥40px tall so the switch is a real touch target, and labelled in
+            words — an icon alone would not say what it switches to. */}
         <button
           type="button"
           onClick={() => setView((v) => (v === 'chart' ? 'table' : 'chart'))}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="-mr-1 inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-8"
           aria-pressed={view === 'table'}
         >
           {view === 'chart' ? (
             <>
-              <TableIcon className="size-3.5" /> Data table
+              <TableIcon className="size-3.5" aria-hidden /> Data table
             </>
           ) : (
             <>
-              <BarChart3 className="size-3.5" /> Chart
+              <BarChart3 className="size-3.5" aria-hidden /> Chart
             </>
           )}
         </button>
@@ -372,12 +502,20 @@ function renderChart(
 
       if (horizontal) {
         const s = series[0]!;
+        // The gutter is sized to the labels actually present, capped so the
+        // bars keep the majority of the width; whatever still does not fit is
+        // wrapped onto a second line rather than cut.
+        const gutter = Math.min(
+          MAX_CATEGORY_GUTTER,
+          Math.max(96, Math.ceil(longestCategory * TICK_CHAR_PX) + 14),
+        );
+        const charsPerLine = Math.max(10, Math.floor((gutter - 14) / TICK_CHAR_PX));
         return (
           <BarChart
             data={data}
             layout="vertical"
-            margin={{ top: 4, right: 16, bottom: 4, left: 4 }}
-            barCategoryGap="22%"
+            margin={{ top: 4, right: 16, bottom: 4, left: 0 }}
+            barCategoryGap="26%"
           >
             <CartesianGrid stroke={GRID_STROKE} strokeOpacity={0.7} horizontal={false} />
             <XAxis
@@ -390,18 +528,11 @@ function renderChart(
             <YAxis
               type="category"
               dataKey={xKey}
-              tick={AXIS_TICK}
               tickLine={false}
               axisLine={false}
-              width={132}
+              width={gutter}
               interval={0}
-              tickFormatter={(v: unknown) => {
-                const text = formatAxisCategory(v);
-                // Kept under the 132px gutter at 12px: Recharts word-wraps a
-                // tick that overflows, and a two-line tick collides with its
-                // neighbours. The tooltip carries the full name.
-                return text.length > 17 ? `${text.slice(0, 16)}…` : text;
-              }}
+              tick={<CategoryTick charsPerLine={charsPerLine} />}
             />
             {tooltip}
             <Bar
@@ -409,6 +540,7 @@ function renderChart(
               name={s.label ?? s.y}
               fill={seriesColor(0)}
               radius={[0, 4, 4, 0]}
+              maxBarSize={28}
             />
           </BarChart>
         );
@@ -531,10 +663,13 @@ function DataTableView({
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>{categoryKey}</TableHead>
+          {/* `product`, `date`, `order_date` — raw column names reach this view
+              straight off the wire, and a header reading "order_date" tells the
+              reader they are looking at a database rather than a report. */}
+          <TableHead>{humanizeKey(categoryKey)}</TableHead>
           {columns.map((c) => (
             <TableHead key={c} className="text-right">
-              {spec.series.find((s) => s.y === c)?.label ?? c}
+              {spec.series.find((s) => s.y === c)?.label ?? humanizeKey(c)}
             </TableHead>
           ))}
         </TableRow>

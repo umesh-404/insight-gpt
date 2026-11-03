@@ -2,7 +2,7 @@
 
 import * as React from 'react';
 import { useRouter } from 'next/navigation';
-import { CornerDownLeft, Paperclip, Square, X } from 'lucide-react';
+import { Check, CornerDownLeft, Paperclip, Square, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { InsightCard } from '@/components/insight-card';
 import { PromptChips } from '@/components/prompt-chips';
@@ -15,9 +15,126 @@ import {
   emptyEnvelope,
   type AnswerEnvelope,
   type ApiErrorBody,
+  type AskStreamEvent,
   type AttachmentInput,
   type ConversationTurn,
+  type Route,
 } from '@/lib/types';
+
+/* -------------------------------------------------------------------------- */
+/* Streaming progress                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Where the engine is, not merely that it is busy.
+ *
+ * The SSE frames arrive in a fixed order, so the stream itself tells us the
+ * phase without any new API: nothing yet means the router is still classifying;
+ * a `route` frame means the path is chosen; a `sql` / `tables` / `citations`
+ * frame means evidence is being gathered; the first `token` means synthesis has
+ * started. Index is monotonic — a late `citations` frame must never drag the
+ * indicator backwards once prose is already arriving.
+ */
+type StageIndex = 0 | 1 | 2 | 3;
+
+function stageFromEvent(event: AskStreamEvent): StageIndex | null {
+  switch (event.type) {
+    case 'route':
+    case 'clarify':
+    case 'abstain':
+      return 1;
+    case 'sql':
+    case 'tables':
+    case 'citations':
+      return 2;
+    case 'token':
+      return 3;
+    default:
+      return null;
+  }
+}
+
+/** Phase names per routed path — an unstructured answer compiles no SQL. */
+function stageLabels(route: Route | undefined): [string, string, string, string] {
+  if (route === 'unstructured') {
+    return [
+      'Routing the question',
+      'Planning retrieval',
+      'Searching documents',
+      'Writing the answer',
+    ];
+  }
+  if (route === 'hybrid') {
+    return [
+      'Routing the question',
+      'Selecting governed metrics',
+      'Querying and searching',
+      'Writing the answer',
+    ];
+  }
+  return [
+    'Routing the question',
+    'Selecting a governed metric',
+    'Querying the warehouse',
+    'Writing the answer',
+  ];
+}
+
+/**
+ * Four-phase progress rail shown under the answer that is still streaming.
+ *
+ * A spinner says "wait"; this says where the wait is going, which is the whole
+ * point when the pipeline has four distinct stages and the SQL stage is the one
+ * an evaluator cares about. Completed phases collapse to a tick so the rail
+ * never grows into a wall of text, and the only motion is the existing `sweep`
+ * on the active segment — the reduced-motion rule in globals.css stops it, and
+ * the segment stays filled, so the state is still readable without it.
+ */
+function StageRail({
+  stage,
+  route,
+}: {
+  stage: StageIndex;
+  route: Route | undefined;
+}) {
+  const labels = stageLabels(route);
+  return (
+    <div className="mt-2 pl-1">
+      <div className="flex items-center gap-2" aria-hidden>
+        {labels.map((label, i) => (
+          <span
+            key={label}
+            className={cn(
+              'h-0.5 flex-1 overflow-hidden rounded-full transition-colors duration-150 ease-out',
+              i < stage ? 'bg-primary/50' : i === stage ? 'bg-primary/15' : 'bg-border',
+            )}
+          >
+            {i === stage ? (
+              <span className="block h-full w-1/3 animate-sweep rounded-full bg-primary" />
+            ) : null}
+          </span>
+        ))}
+      </div>
+      <p
+        role="status"
+        aria-live="polite"
+        className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+      >
+        <span className="font-medium text-foreground">{labels[stage]}</span>
+        {stage > 0 ? (
+          <span className="inline-flex items-center gap-1.5">
+            <Check className="size-3 text-success" aria-hidden />
+            {labels.slice(0, stage).join(' · ')}
+          </span>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Thread                                                                     */
+/* -------------------------------------------------------------------------- */
 
 interface ThreadTurn {
   id: string;
@@ -25,6 +142,8 @@ interface ThreadTurn {
   attachments?: { name: string; size?: number }[];
   envelope: AnswerEnvelope;
   streaming: boolean;
+  /** Which of the four pipeline phases the stream has reached. */
+  stage: StageIndex;
   feedback: 'up' | 'down' | null;
   /** Set when the stream failed part-way; rendered inside the card. */
   error?: ApiErrorBody | null;
@@ -50,6 +169,7 @@ export function ConversationView({
       attachments: t.attachments,
       envelope: t.envelope,
       streaming: false,
+      stage: 3,
       feedback: t.feedback ?? null,
       error: null,
     })),
@@ -60,12 +180,33 @@ export function ConversationView({
   const [isDragging, setIsDragging] = React.useState(false);
 
   const abortRef = React.useRef<AbortController | null>(null);
+  const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const bottomRef = React.useRef<HTMLDivElement | null>(null);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
+  const turnCountRef = React.useRef(turns.length);
 
+  /**
+   * Follow the stream, but never fight the reader.
+   *
+   * The previous version smooth-scrolled on every state patch, which meant once
+   * per token: the thread jittered, and scrolling up to re-read an earlier
+   * answer was yanked back within a frame. Now a *new turn* jumps to the
+   * bottom, and an in-flight answer only keeps the view pinned while the reader
+   * is already near the bottom.
+   */
   React.useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const isNewTurn = turns.length !== turnCountRef.current;
+    turnCountRef.current = turns.length;
+    const distanceFromBottom =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (isNewTurn) {
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+    } else if (distanceFromBottom < 140) {
+      scroller.scrollTop = scroller.scrollHeight;
+    }
   }, [turns]);
 
   // Grow the composer with its content up to the CSS max-height, then scroll.
@@ -151,6 +292,7 @@ export function ConversationView({
           attachments: turnAttachments,
           envelope: emptyEnvelope(),
           streaming: true,
+          stage: 0,
           feedback: null,
           error: null,
         },
@@ -169,10 +311,17 @@ export function ConversationView({
           signal: controller.signal,
           onEvent: (event) => {
             const envelope = acc.apply(event);
+            const reached = stageFromEvent(event);
             patchLast((t) => ({
               ...t,
               envelope,
               id: acc.messageId ?? t.id,
+              // Monotonic: a `citations` frame arriving after the prose started
+              // must not walk the indicator back to "gathering evidence".
+              stage:
+                reached !== null && reached > t.stage
+                  ? reached
+                  : t.stage,
               // An `error` frame ends the turn — never leave the caret spinning.
               streaming: !acc.done,
               error: acc.error,
@@ -258,26 +407,33 @@ export function ConversationView({
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="scrollbar-thin min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+      <div
+        ref={scrollRef}
+        className="scrollbar-thin min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6"
+      >
         {turns.length === 0 ? (
-          <div className="bg-grid flex h-full items-center justify-center rounded-xl">
+          <div className="flex min-h-full items-center">
             <PromptChips onSelect={(p) => void ask(p)} />
           </div>
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-6 lg:max-w-4xl xl:max-w-5xl">
             {turns.map((turn) => (
-              <InsightCard
-                key={turn.id}
-                question={turn.question}
-                attachments={turn.attachments}
-                envelope={turn.envelope}
-                streaming={turn.streaming}
-                error={turn.error}
-                messageId={turn.id}
-                feedback={turn.feedback}
-                onFeedback={(rating) => onFeedback(turn.id, rating)}
-                onAsk={(q) => void ask(q)}
-              />
+              <div key={turn.id}>
+                <InsightCard
+                  question={turn.question}
+                  attachments={turn.attachments}
+                  envelope={turn.envelope}
+                  streaming={turn.streaming}
+                  error={turn.error}
+                  messageId={turn.id}
+                  feedback={turn.feedback}
+                  onFeedback={(rating) => onFeedback(turn.id, rating)}
+                  onAsk={(q) => void ask(q)}
+                />
+                {turn.streaming ? (
+                  <StageRail stage={turn.stage} route={turn.envelope.route} />
+                ) : null}
+              </div>
             ))}
             <div ref={bottomRef} />
           </div>
@@ -309,8 +465,8 @@ export function ConversationView({
               }
             }}
             className={cn(
-              'flex flex-col gap-2 rounded-xl border bg-card p-2 shadow-soft transition-all focus-within:border-primary/40 focus-within:shadow-raised focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background',
-              isDragging && 'border-primary bg-primary/5 ring-2 ring-primary/30',
+              'flex flex-col gap-2 rounded-xl border bg-card p-2 transition-colors duration-150 ease-out focus-within:border-primary/50',
+              isDragging && 'border-primary bg-primary/5',
             )}
           >
             {/* Attached file chips */}
@@ -319,23 +475,23 @@ export function ConversationView({
                 {attachedFiles.map((file, idx) => (
                   <span
                     key={`${file.name}-${idx}`}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-border/80 bg-muted/70 px-2 py-1 text-xs text-foreground transition-colors hover:bg-muted"
+                    className="inline-flex items-center gap-1.5 rounded-lg border bg-muted/70 px-2 py-1 text-xs text-foreground"
                   >
-                    <Paperclip className="size-3 text-primary" />
+                    <Paperclip className="size-3 text-primary" aria-hidden />
                     <span className="max-w-[200px] truncate font-medium">{file.name}</span>
-                    <span className="text-2xs text-muted-foreground">
-                      ({file.size > 1024 * 1024
+                    <span className="text-2xs tabular-nums text-muted-foreground">
+                      {file.size > 1024 * 1024
                         ? `${(file.size / (1024 * 1024)).toFixed(1)} MB`
-                        : `${Math.round(file.size / 1024)} KB`})
+                        : `${Math.round(file.size / 1024)} KB`}
                     </span>
                     <button
                       type="button"
                       onClick={() => removeAttachment(idx)}
                       disabled={busy}
                       aria-label={`Remove ${file.name}`}
-                      className="ml-0.5 rounded p-0.5 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      className="ml-0.5 rounded p-0.5 text-muted-foreground transition-colors duration-150 ease-out hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      <X className="size-3" />
+                      <X className="size-3" aria-hidden />
                     </button>
                   </span>
                 ))}
@@ -349,11 +505,11 @@ export function ConversationView({
                 size="icon"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={busy}
-                title="Attach file (CSV, Excel, PDF, Word, JSON, TXT)"
-                aria-label="Attach file"
-                className="size-9 shrink-0 text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Attach a file (CSV, Excel, PDF, Word, JSON, TXT)"
+                aria-label="Attach a file"
+                className="size-10 shrink-0 text-muted-foreground hover:text-foreground"
               >
-                <Paperclip className="size-4" />
+                <Paperclip className="size-4" aria-hidden />
               </Button>
 
               <label htmlFor="ask-input" className="sr-only">
@@ -377,7 +533,7 @@ export function ConversationView({
                     ? `Ask anything about ${attachedFiles.map((f) => f.name).join(', ')}…`
                     : 'Ask about revenue, inventory, customers, or attach a file…'
                 }
-                className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent px-2 py-1.5 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:opacity-60"
+                className="max-h-40 min-h-[40px] flex-1 resize-none bg-transparent px-2 py-2 text-base leading-relaxed outline-none placeholder:text-muted-foreground disabled:opacity-60"
               />
               {busy ? (
                 <Button
@@ -385,10 +541,11 @@ export function ConversationView({
                   variant="secondary"
                   size="icon"
                   onClick={stop}
-                  aria-label="Stop generating"
-                  title="Stop generating"
+                  aria-label="Stop answering"
+                  title="Stop answering"
+                  className="size-10 shrink-0"
                 >
-                  <Square className="size-4" />
+                  <Square className="size-4" aria-hidden />
                 </Button>
               ) : (
                 <Button
@@ -396,25 +553,24 @@ export function ConversationView({
                   size="icon"
                   disabled={!input.trim() && attachedFiles.length === 0}
                   aria-label="Send question"
+                  className="size-10 shrink-0"
                 >
-                  <CornerDownLeft className="size-4" />
+                  <CornerDownLeft className="size-4" aria-hidden />
                 </Button>
               )}
             </div>
           </div>
-          <p className="mt-1.5 px-1 text-xs text-muted-foreground">
+          {/* Fixed height so the thread above does not shift when this swaps. */}
+          <p className="mt-1.5 flex min-h-5 items-center px-1 text-xs text-muted-foreground">
             {busy ? (
-              <span className="inline-flex items-center gap-1.5">
-                <span className="size-1.5 animate-pulse rounded-full bg-primary" />
-                Answering — press Stop to cancel
-              </span>
+              'Answering — press Stop to cancel. Partial results stay on screen.'
             ) : (
-              <>
+              <span className="truncate">
                 <kbd className="rounded border bg-muted px-1 font-sans">Enter</kbd> to
                 send · <kbd className="rounded border bg-muted px-1 font-sans">Shift</kbd>
                 +<kbd className="rounded border bg-muted px-1 font-sans">Enter</kbd> for
-                a new line · <Paperclip className="inline size-3" /> Attach files or drag & drop (CSV, PDF, Excel, JSON, TXT)
-              </>
+                a new line · drag a file in to ask about it
+              </span>
             )}
           </p>
         </form>

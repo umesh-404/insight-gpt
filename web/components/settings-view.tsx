@@ -1,17 +1,10 @@
 'use client';
 
 import * as React from 'react';
-import { Monitor, Moon, Sun } from 'lucide-react';
+import { Lock, Moon, Sun } from 'lucide-react';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusBadge } from '@/components/status-badge';
 import { ErrorState } from '@/components/states';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/lib/auth';
@@ -24,6 +17,39 @@ const THEME_OPTIONS = [
   { value: 'light', label: 'Light', icon: Sun },
   { value: 'dark', label: 'Dark', icon: Moon },
 ] as const;
+
+/**
+ * One titled band per concern, separated by a hairline rather than wrapped in a
+ * card. Settings is a short read-only page: four bordered boxes stacked down a
+ * narrow column spent most of their pixels on their own edges.
+ */
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children?: React.ReactNode;
+}) {
+  const headingId = React.useId();
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="border-t pt-6 first:border-t-0 first:pt-0"
+    >
+      <h2 id={headingId} className="text-base font-semibold tracking-tight">
+        {title}
+      </h2>
+      {description ? (
+        <p className="mt-1 max-w-prose text-sm leading-relaxed text-muted-foreground">
+          {description}
+        </p>
+      ) : null}
+      {children ? <div className="mt-4">{children}</div> : null}
+    </section>
+  );
+}
 
 export function SettingsView() {
   const { user, hasRole } = useAuth();
@@ -39,7 +65,25 @@ export function SettingsView() {
     THEME_OPTIONS.findIndex((option) => option.value === theme),
   );
 
+  const selectThemeAt = (index: number) => {
+    const option = THEME_OPTIONS[index];
+    if (!option) return;
+    setTheme(option.value);
+    optionRefs.current[index]?.focus();
+  };
+
   const onThemeKeyDown = (event: React.KeyboardEvent) => {
+    // Home/End are part of the radiogroup pattern too, not just the arrows.
+    if (event.key === 'Home') {
+      event.preventDefault();
+      selectThemeAt(0);
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      selectThemeAt(THEME_OPTIONS.length - 1);
+      return;
+    }
     const delta =
       event.key === 'ArrowRight' || event.key === 'ArrowDown'
         ? 1
@@ -48,12 +92,7 @@ export function SettingsView() {
           : 0;
     if (!delta) return;
     event.preventDefault();
-    const next =
-      (selectedIndex + delta + THEME_OPTIONS.length) % THEME_OPTIONS.length;
-    const option = THEME_OPTIONS[next];
-    if (!option) return;
-    setTheme(option.value);
-    optionRefs.current[next]?.focus();
+    selectThemeAt((selectedIndex + delta + THEME_OPTIONS.length) % THEME_OPTIONS.length);
   };
 
   return (
@@ -62,32 +101,33 @@ export function SettingsView() {
         title="Settings"
         description={
           isAdmin
-            ? 'Manage your profile and appearance, and review live service status.'
-            : 'Manage your profile and appearance for this account.'
+            ? 'Your profile and appearance, plus live health for every backing service.'
+            : 'Your profile and appearance for this account.'
         }
       />
 
-      {/* Profile */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Profile</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
+      <div className="space-y-6">
+        <Section title="Profile">
           {user ? (
-            <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="min-w-0">
+            <dl className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-3">
+              <div className="min-w-0 bg-card p-4">
                 <dt className="text-xs text-muted-foreground">Name</dt>
-                <dd className="truncate text-sm font-medium">{displayName(user)}</dd>
+                <dd className="mt-1 truncate text-sm font-medium">
+                  {displayName(user)}
+                </dd>
               </div>
-              <div className="min-w-0">
+              <div className="min-w-0 bg-card p-4">
                 <dt className="text-xs text-muted-foreground">Email</dt>
-                <dd className="truncate text-sm font-medium" title={user.email || undefined}>
+                <dd
+                  className="mt-1 truncate text-sm font-medium"
+                  title={user.email || undefined}
+                >
                   {user.email || '—'}
                 </dd>
               </div>
-              <div>
+              <div className="bg-card p-4">
                 <dt className="text-xs text-muted-foreground">Role</dt>
-                <dd>
+                <dd className="mt-1">
                   <Badge variant="muted" className="capitalize">
                     {user.role}
                   </Badge>
@@ -95,23 +135,19 @@ export function SettingsView() {
               </div>
             </dl>
           ) : (
-            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-20 w-full" />
           )}
-        </CardContent>
-      </Card>
+        </Section>
 
-      {/* Appearance */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Appearance</CardTitle>
-          <CardDescription>Theme preference is saved to this device.</CardDescription>
-        </CardHeader>
-        <CardContent>
+        <Section
+          title="Appearance"
+          description="Saved to this device only — it does not follow your account to another browser."
+        >
           <div
             role="radiogroup"
             aria-label="Theme"
             onKeyDown={onThemeKeyDown}
-            className="inline-flex rounded-lg border bg-muted/40 p-1"
+            className="inline-flex gap-1 rounded-lg border bg-muted/40 p-1"
           >
             {THEME_OPTIONS.map(({ value, label, icon: Icon }, index) => (
               <button
@@ -125,7 +161,9 @@ export function SettingsView() {
                 tabIndex={index === selectedIndex ? 0 : -1}
                 onClick={() => setTheme(value)}
                 className={cn(
-                  'inline-flex min-h-11 items-center gap-2 rounded-md px-4 py-1.5 text-sm font-medium transition-colors',
+                  // min-h-11/min-w-[7rem] keeps the hit target over 40px in both
+                  // axes on a touch screen.
+                  'inline-flex min-h-11 min-w-[7rem] items-center justify-center gap-2 rounded-md px-4 text-sm font-medium transition-colors',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                   theme === value
                     ? 'bg-background text-foreground shadow-sm'
@@ -137,100 +175,102 @@ export function SettingsView() {
               </button>
             ))}
           </div>
-        </CardContent>
-      </Card>
+        </Section>
 
-      {/* Service status (admin only). Mounted conditionally so a non-admin
-          never fires the admin-only /status probe and collects a 403. */}
-      {isAdmin ? (
-        <SystemStatusCard />
-      ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Monitor className="size-4" aria-hidden /> System status
-            </CardTitle>
-            <CardDescription>
-              Warehouse, index, and model-provider health are available to
-              administrators. Ask an administrator if you need the current status.
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      )}
+        {/* Service status (admin only). Mounted conditionally so a non-admin
+            never fires the admin-only /status probe and collects a 403. */}
+        {isAdmin ? (
+          <SystemStatusSection />
+        ) : (
+          <Section
+            title="System status"
+            description="Warehouse, index and model-provider health are available to administrators. Ask an administrator if you need the current status."
+          >
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Lock className="size-4 shrink-0" aria-hidden />
+              Your role does not include service health.
+            </p>
+          </Section>
+        )}
+      </div>
     </div>
   );
 }
 
-function SystemStatusCard() {
+function SystemStatusSection() {
   const status = useStatus();
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Monitor className="size-4" aria-hidden /> System status
-        </CardTitle>
-        <CardDescription>
-          Active provider and dependency health from <code>/status</code>.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        {status.isLoading ? (
-          <Skeleton className="h-40 w-full" />
-        ) : status.isError ? (
-          <ErrorState error={status.error} onRetry={() => void status.refetch()} />
-        ) : status.data ? (
-          <>
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="min-w-0 rounded-md border bg-muted/30 px-3 py-2">
-                <p className="text-xs text-muted-foreground">Model provider</p>
-                <p className="truncate text-sm font-medium">
-                  {status.data.llm.provider}
-                  {status.data.llm.model ? ` · ${status.data.llm.model}` : ''}
-                </p>
-              </div>
+    <Section
+      title="System status"
+      description="Live from the API’s own health probe: the active model provider and every dependency it talks to."
+    >
+      {status.isLoading ? (
+        <Skeleton className="h-48 w-full" />
+      ) : status.isError ? (
+        <ErrorState error={status.error} onRetry={() => void status.refetch()} />
+      ) : status.data ? (
+        <div className="space-y-5">
+          {/* Overall verdict and provider identity read first — they are the
+              two facts an evaluator asks about from the back of the room. */}
+          <div className="rounded-lg border p-4">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
               <StatusBadge status={status.data.status} />
               {status.data.version ? (
                 <Badge variant="muted">v{status.data.version}</Badge>
               ) : null}
+            </div>
+            <dl className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Model provider</dt>
+                <dd className="mt-0.5 truncate text-sm font-medium">
+                  {status.data.llm.provider}
+                  {status.data.llm.model ? ` · ${status.data.llm.model}` : ''}
+                </dd>
+              </div>
               {typeof status.data.uptime_s === 'number' ? (
-                <span className="text-xs text-muted-foreground">
-                  Up {formatUptime(status.data.uptime_s)}
-                </span>
-              ) : null}
-            </div>
-
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {Object.entries(status.data.services).map(([name, svc]) => (
-                <div
-                  key={name}
-                  className="flex items-center justify-between gap-3 rounded-md border p-3"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">{serviceLabel(name)}</p>
-                    {svc.detail ? (
-                      <p className="truncate text-xs text-muted-foreground" title={svc.detail}>
-                        {svc.detail}
-                      </p>
-                    ) : typeof svc.latency_ms === 'number' ? (
-                      <p className="text-xs text-muted-foreground">{svc.latency_ms}ms</p>
-                    ) : null}
-                  </div>
-                  <StatusBadge status={svc.status} />
+                <div>
+                  <dt className="text-xs text-muted-foreground">Uptime</dt>
+                  <dd className="mt-0.5 text-sm font-medium tabular-nums">
+                    {formatUptime(status.data.uptime_s)}
+                  </dd>
                 </div>
-              ))}
-            </div>
+              ) : null}
+            </dl>
+          </div>
 
-            {/* The warehouse/index payloads differ per deployment mode, so
-                they are rendered as whatever labelled facts arrive. */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <FactList title="Warehouse" facts={status.data.warehouse} />
-              <FactList title="Document index" facts={status.data.index} />
-            </div>
-          </>
-        ) : null}
-      </CardContent>
-    </Card>
+          <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-2">
+            {Object.entries(status.data.services).map(([name, svc]) => (
+              <div
+                key={name}
+                className="flex items-center justify-between gap-3 bg-card p-4"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{serviceLabel(name)}</p>
+                  {svc.detail ? (
+                    <p className="truncate text-xs text-muted-foreground" title={svc.detail}>
+                      {svc.detail}
+                    </p>
+                  ) : typeof svc.latency_ms === 'number' ? (
+                    <p className="text-xs tabular-nums text-muted-foreground">
+                      {svc.latency_ms}ms
+                    </p>
+                  ) : null}
+                </div>
+                <StatusBadge status={svc.status} />
+              </div>
+            ))}
+          </div>
+
+          {/* The warehouse/index payloads differ per deployment mode, so
+              they are rendered as whatever labelled facts arrive. */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <FactList title="Warehouse" facts={status.data.warehouse} />
+            <FactList title="Document index" facts={status.data.index} />
+          </div>
+        </div>
+      ) : null}
+    </Section>
   );
 }
 
@@ -276,6 +316,14 @@ function factValue(value: string): string {
   return value;
 }
 
+/**
+ * Fact labels arrive as backend keys (`row_count`, `collection_name`). Left raw
+ * they read as field names rather than as a reading an evaluator can follow.
+ */
+function factLabel(label: string): string {
+  return label.replace(/[_-]+/g, ' ').replace(/^./, (c) => c.toUpperCase());
+}
+
 function FactList({
   title,
   facts,
@@ -284,25 +332,33 @@ function FactList({
   facts: Array<{ label: string; value: string }>;
 }) {
   return (
-    <div className="rounded-md border p-3">
-      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="rounded-lg border p-4">
+      <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
         {title}
       </p>
       {facts.length ? (
-        <dl className="mt-2 space-y-1.5">
+        <dl className="mt-3 divide-y">
           {facts.map((fact) => (
-            <div key={fact.label} className="flex items-baseline justify-between gap-3">
-              <dt className="min-w-0 truncate text-xs text-muted-foreground">
-                {fact.label}
+            <div
+              key={fact.label}
+              className="flex items-baseline justify-between gap-3 py-1.5 first:pt-0 last:pb-0"
+            >
+              <dt
+                className="min-w-0 truncate text-xs text-muted-foreground"
+                title={fact.label}
+              >
+                {factLabel(fact.label)}
               </dt>
-              <dd className="text-sm font-medium tabular-nums">
+              <dd className="shrink-0 text-sm font-medium tabular-nums">
                 {factValue(fact.value)}
               </dd>
             </div>
           ))}
         </dl>
       ) : (
-        <p className="mt-2 text-sm text-muted-foreground">No statistics reported.</p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          This deployment reported no statistics.
+        </p>
       )}
     </div>
   );

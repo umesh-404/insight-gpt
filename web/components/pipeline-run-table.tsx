@@ -45,41 +45,83 @@ function totalRows(run: PipelineRun): number {
   );
 }
 
+/**
+ * A run that has not finished has moved an unknown number of rows so far, and a
+ * queued run has moved none *yet*. Printing a confident `0` in the Rows column
+ * for either reads as a finished run that did nothing.
+ */
+function rowsCell(run: PipelineRun): string {
+  if (run.status === 'queued') return '—';
+  if (run.status === 'running' && !Object.keys(run.row_counts ?? {}).length) return '—';
+  return formatNumber(totalRows(run));
+}
+
 /** Run-history table from GET /pipeline-runs (docs/07 §4.3). */
 export function PipelineRunTable({ runs }: { runs: PipelineRun[] }) {
   if (!runs.length) {
     return (
-      <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
-        No pipeline runs yet.
+      <div className="rounded-lg border border-dashed px-6 py-12 text-center">
+        <p className="text-sm font-medium">No runs recorded yet</p>
+        <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+          A run appears here as soon as a schedule fires or someone triggers a
+          pipeline manually.
+        </p>
       </div>
     );
   }
   return (
-    <div className="rounded-lg border">
+    <div className="overflow-hidden rounded-lg border">
       <Table>
+        <caption className="sr-only">
+          Pipeline runs, most recent first. Each row links to that run’s stage
+          detail.
+        </caption>
         <TableHeader>
           <TableRow>
-            <TableHead>Pipeline</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Trigger</TableHead>
-            <TableHead>Started</TableHead>
-            <TableHead className="text-right">Duration</TableHead>
-            <TableHead className="text-right">Rows</TableHead>
-            <TableHead className="w-8" />
+            <TableHead scope="col" className="min-w-[200px]">
+              Pipeline
+            </TableHead>
+            <TableHead scope="col" className="w-[120px]">
+              Status
+            </TableHead>
+            <TableHead scope="col" className="w-[110px]">
+              Trigger
+            </TableHead>
+            <TableHead scope="col" className="w-[140px]">
+              Started
+            </TableHead>
+            <TableHead scope="col" className="w-[110px] text-right">
+              Duration
+            </TableHead>
+            <TableHead scope="col" className="w-[100px] text-right">
+              Rows
+            </TableHead>
+            <TableHead scope="col" className="w-10">
+              <span className="sr-only">Open</span>
+            </TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {runs.map((run) => (
             <TableRow key={run.id} className="group">
-              <TableCell className="font-medium">
+              <TableCell className="min-w-0">
+                {/* One link per row. The chevron used to be a second link to
+                    the same place, which doubled the tab stops in a table that
+                    can run to fifty rows. */}
                 <Link
                   href={`/pipelines/runs/${run.id}`}
-                  className="hover:text-primary hover:underline"
+                  className="font-medium hover:text-primary hover:underline"
                 >
                   {run.pipeline}
                 </Link>
+                <p
+                  className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
+                  title={run.id}
+                >
+                  {run.id}
+                </p>
                 {run.error ? (
-                  <p className="mt-0.5 max-w-xs truncate text-xs text-destructive">
+                  <p className="mt-1 max-w-sm truncate text-xs text-destructive" title={run.error}>
                     {run.error}
                   </p>
                 ) : null}
@@ -88,25 +130,24 @@ export function PipelineRunTable({ runs }: { runs: PipelineRun[] }) {
                 <StatusBadge status={run.status} />
               </TableCell>
               <TableCell>
-                <Badge variant="outline">{run.trigger}</Badge>
+                <Badge variant="outline" className="capitalize">
+                  {run.trigger}
+                </Badge>
               </TableCell>
-              <TableCell className="text-muted-foreground">
+              <TableCell className="whitespace-nowrap text-muted-foreground">
                 <RelativeTime iso={run.started_at} />
               </TableCell>
-              <TableCell className="text-right tabular-nums text-muted-foreground">
+              <TableCell className="whitespace-nowrap text-right tabular-nums text-muted-foreground">
                 {formatDuration(runDuration(run))}
               </TableCell>
-              <TableCell className="text-right tabular-nums">
-                {formatNumber(totalRows(run))}
+              <TableCell className="text-right font-medium tabular-nums">
+                {rowsCell(run)}
               </TableCell>
-              <TableCell>
-                <Link
-                  href={`/pipelines/runs/${run.id}`}
-                  aria-label={`View run ${run.id}`}
-                  className="flex justify-end text-muted-foreground transition-colors group-hover:text-foreground"
-                >
-                  <ChevronRight className="size-4" />
-                </Link>
+              <TableCell className="text-right text-muted-foreground">
+                <ChevronRight
+                  className="ml-auto size-4 transition-colors group-hover:text-foreground"
+                  aria-hidden
+                />
               </TableCell>
             </TableRow>
           ))}

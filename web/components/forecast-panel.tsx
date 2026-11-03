@@ -6,6 +6,7 @@ import {
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -19,6 +20,10 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/states';
+import {
+  CHART_AXIS_TICK,
+  CHART_GRID_STROKE,
+} from '@/components/chart-renderer';
 import { useForecast, useForecastMetrics } from '@/lib/hooks';
 import type { ForecastPoint, ForecastResult, MetricFormat } from '@/lib/types';
 import {
@@ -150,9 +155,81 @@ function ForecastTooltip({
   );
 }
 
+/**
+ * Which part of the picture is measured and which is guessed.
+ *
+ * A projection shares the line, the hue and the axis with the history it
+ * extends, so the distinction has to be stated rather than implied: a shaded
+ * band behind the forecast periods, a dashed stroke, and this key naming all
+ * three marks. Recharts' own `<Legend>` cannot describe the interval band —
+ * it is two stacked areas, one of them invisible — so the key is plain HTML.
+ */
+function ForecastKey({
+  projected,
+  intervalLevel,
+}: {
+  projected: boolean;
+  intervalLevel: number;
+}) {
+  return (
+    <ul className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
+      <li className="inline-flex items-center gap-2">
+        <svg width="22" height="8" aria-hidden className="shrink-0">
+          <line
+            x1="0"
+            y1="4"
+            x2="22"
+            y2="4"
+            stroke="hsl(var(--chart-1))"
+            strokeWidth="2"
+          />
+        </svg>
+        Observed
+      </li>
+      {projected ? (
+        <>
+          <li className="inline-flex items-center gap-2">
+            <svg width="22" height="8" aria-hidden className="shrink-0">
+              <line
+                x1="0"
+                y1="4"
+                x2="22"
+                y2="4"
+                stroke="hsl(var(--chart-1))"
+                strokeWidth="2"
+                strokeDasharray="5 4"
+              />
+            </svg>
+            Projected
+          </li>
+          <li className="inline-flex items-center gap-2">
+            <svg width="22" height="10" aria-hidden className="shrink-0">
+              <rect
+                x="0"
+                y="0"
+                width="22"
+                height="10"
+                rx="2"
+                fill="hsl(var(--chart-1))"
+                fillOpacity="0.22"
+                stroke="hsl(var(--chart-1))"
+                strokeOpacity="0.45"
+                strokeWidth="1"
+              />
+            </svg>
+            {Math.round(intervalLevel * 100)}% interval
+          </li>
+        </>
+      ) : null}
+    </ul>
+  );
+}
+
 function ForecastChart({ result }: { result: ForecastResult }) {
   const rows = React.useMemo(() => toRows(result), [result]);
   const seam = result.history[result.history.length - 1]?.period;
+  const lastProjected = result.forecast[result.forecast.length - 1]?.period;
+  const hasProjection = result.forecast.length > 0;
 
   // Same contract as every other chart: one unit across the axis, picked from
   // the largest value plotted. Per-tick compaction happened to look right here
@@ -176,86 +253,114 @@ function ForecastChart({ result }: { result: ForecastResult }) {
   );
 
   return (
-    <div className="h-[280px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={rows} margin={{ top: 8, right: 12, bottom: 4, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-          <XAxis
-            dataKey="period"
-            tickLine={false}
-            axisLine={false}
-            tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
-          />
-          <YAxis
-            tickLine={false}
-            axisLine={false}
-            width={72}
-            tick={{ fontSize: 12, fill: 'hsl(var(--muted-foreground))' }}
-            tickFormatter={yTickFormatter}
-          />
-          <Tooltip
-            content={
-              <ForecastTooltip
-                format={result.format}
-                intervalLevel={result.interval_level}
-              />
-            }
-          />
-          {/* Invisible base so the visible band starts at `lower`. */}
-          <Area
-            dataKey={(row: ChartRow) => row.band?.[0] ?? null}
-            stackId="interval"
-            stroke="none"
-            fill="none"
-            isAnimationActive={false}
-            legendType="none"
-          />
-          <Area
-            dataKey={(row: ChartRow) => row.band?.[1] ?? null}
-            stackId="interval"
-            stroke="none"
-            fill="hsl(var(--chart-1))"
-            fillOpacity={0.16}
-            isAnimationActive={false}
-            legendType="none"
-          />
-          {seam ? (
-            <ReferenceLine
-              x={seam}
-              stroke="hsl(var(--muted-foreground))"
-              strokeDasharray="2 4"
-              label={{
-                value: 'now',
-                position: 'top',
-                fontSize: 11,
-                fill: 'hsl(var(--muted-foreground))',
-              }}
+    <div>
+      <div className="h-[280px] w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={rows} margin={{ top: 16, right: 12, bottom: 4, left: 4 }}>
+            {/* Solid hairline, matching every other chart: a dashed grid reads as
+                a threshold or a projection, and this is the one chart where that
+                would actively mislead. */}
+            <CartesianGrid stroke={CHART_GRID_STROKE} strokeOpacity={0.7} vertical={false} />
+            <XAxis
+              dataKey="period"
+              tickLine={false}
+              axisLine={false}
+              tick={CHART_AXIS_TICK}
             />
-          ) : null}
-          <Line
-            type="monotone"
-            dataKey="actual"
-            stroke="hsl(var(--chart-1))"
-            strokeWidth={2}
-            dot={{ r: 2.5 }}
-            connectNulls={false}
-            isAnimationActive={false}
-            name="Observed"
-          />
-          {/* Dashed, so a projection is never mistaken for a measurement. */}
-          <Line
-            type="monotone"
-            dataKey="projected"
-            stroke="hsl(var(--chart-1))"
-            strokeWidth={2}
-            strokeDasharray="5 4"
-            dot={{ r: 2.5 }}
-            connectNulls={false}
-            isAnimationActive={false}
-            name="Projected"
-          />
-        </ComposedChart>
-      </ResponsiveContainer>
+            <YAxis
+              tickLine={false}
+              axisLine={false}
+              width={72}
+              tick={CHART_AXIS_TICK}
+              tickFormatter={yTickFormatter}
+            />
+            {/* The projected span is shaded before anything is drawn in it, so
+                "past here it is a guess" is readable from the chart's shape. */}
+            {hasProjection && seam && lastProjected ? (
+              <ReferenceArea
+                x1={seam}
+                x2={lastProjected}
+                fill="hsl(var(--muted-foreground))"
+                fillOpacity={0.07}
+                stroke="none"
+              />
+            ) : null}
+            <Tooltip
+              content={
+                <ForecastTooltip
+                  format={result.format}
+                  intervalLevel={result.interval_level}
+                />
+              }
+            />
+            {/* Invisible base so the visible band starts at `lower`. */}
+            <Area
+              dataKey={(row: ChartRow) => row.band?.[0] ?? null}
+              stackId="interval"
+              stroke="none"
+              fill="none"
+              isAnimationActive={false}
+              legendType="none"
+            />
+            {/* The band is tinted *and* outlined. Fill alone at 16% sat behind
+                the dashed line it belongs to and read as a rendering artefact;
+                the hairline edge gives the interval a visible boundary. */}
+            <Area
+              dataKey={(row: ChartRow) => row.band?.[1] ?? null}
+              stackId="interval"
+              stroke="hsl(var(--chart-1))"
+              strokeOpacity={0.45}
+              strokeWidth={1}
+              fill="hsl(var(--chart-1))"
+              fillOpacity={0.22}
+              isAnimationActive={false}
+              legendType="none"
+            />
+            {seam ? (
+              <ReferenceLine
+                x={seam}
+                stroke="hsl(var(--muted-foreground))"
+                strokeDasharray="2 4"
+                label={{
+                  // Not "now": the warehouse stops well before the wall clock, so
+                  // a seam labelled "now" dates the data to today and invites the
+                  // reader to treat months of projection as the recent past.
+                  value: 'last actual',
+                  position: 'top',
+                  fontSize: 11,
+                  fill: 'hsl(var(--muted-foreground))',
+                }}
+              />
+            ) : null}
+            <Line
+              type="monotone"
+              dataKey="actual"
+              stroke="hsl(var(--chart-1))"
+              strokeWidth={2}
+              dot={{ r: 2.5 }}
+              connectNulls={false}
+              isAnimationActive={false}
+              name="Observed"
+            />
+            {/* Dashed, so a projection is never mistaken for a measurement. */}
+            <Line
+              type="monotone"
+              dataKey="projected"
+              stroke="hsl(var(--chart-1))"
+              strokeWidth={2}
+              strokeDasharray="5 4"
+              dot={{ r: 2.5 }}
+              connectNulls={false}
+              isAnimationActive={false}
+              name="Projected"
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <ForecastKey
+        projected={hasProjection}
+        intervalLevel={result.interval_level}
+      />
     </div>
   );
 }

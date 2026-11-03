@@ -29,7 +29,14 @@ import {
   toMetricChart,
   unitOf,
 } from '@/lib/metrics';
-import type { Cell, MetricFilter, MetricQuery, MetricUnit } from '@/lib/types';
+import type {
+  Cell,
+  MetricFilter,
+  MetricQuery,
+  MetricResult,
+  MetricSummary,
+  MetricUnit,
+} from '@/lib/types';
 
 const TOP_N = 8;
 
@@ -59,6 +66,9 @@ const KPIS: Array<{
   unit: MetricUnit;
   goodDirection: GoodDirection;
 }> = [
+  // Revenue is first and rendered as the hero figure: it is the question this
+  // page exists to answer, and four tiles at identical weight leave the reader
+  // to decide which one that is.
   { metric: 'revenue', label: 'Revenue', unit: 'currency', goodDirection: 'up' },
   { metric: 'orders', label: 'Orders', unit: 'count', goodDirection: 'up' },
   {
@@ -89,6 +99,28 @@ function dimensionValues(
     if (typeof value === 'string' && value.trim()) seen.add(value);
   }
   return [...seen].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Suppress a zero that is an artefact of the aggregate rather than a measurement.
+ *
+ * The two shapes of "nothing happened in this window" do not come back the same
+ * way: a `SUM` over no rows is SQL NULL, so `summarize` already returns null and
+ * the tile prints "—"; a `COUNT` over no rows is the number 0, so the Orders
+ * tile printed a confident "0" beside three "—" neighbours and claimed to have
+ * counted something. The per-period breakdown for the identical window is the
+ * evidence: no periods at all means the warehouse holds nothing here, and the
+ * zero is reported as unknown. A real zero inside a window that *does* have rows
+ * still shows as 0 — that one is a measurement.
+ */
+function honestSummary(
+  summary: MetricSummary | null,
+  trend: MetricResult | undefined,
+  settled: boolean,
+): MetricSummary | null {
+  if (!summary || !settled) return summary;
+  const hasPeriods = (trend?.rows.length ?? 0) > 0;
+  return summary.value === 0 && !hasPeriods ? null : summary;
 }
 
 export function DashboardView({
@@ -292,16 +324,13 @@ export function DashboardView({
         regionLabel={dimensionLabel('region', 'Region')}
         categoryLabel={dimensionLabel('category', 'Category')}
         loading={isLoading}
+        resolvedNote={rangeNote}
       />
 
       {note ? (
         <p className="rounded-md border border-dashed border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           {note}
         </p>
-      ) : null}
-
-      {rangeNote ? (
-        <p className="-mt-2 text-xs tabular-nums text-muted-foreground">{rangeNote}</p>
       ) : null}
 
       {isError || catalogFailed || coverage.isError ? (
@@ -315,32 +344,48 @@ export function DashboardView({
         />
       ) : (
         <>
-          {/* KPI tiles */}
+          {/* KPI band. Five columns with a double-width hero: the figure the
+              page is about gets the display size, the three supporting metrics
+              share one scan line beside it. */}
           <section
             aria-labelledby="dash-kpis"
-            className="stagger grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
+            // Five columns wait for `xl`, not `lg`. With the sidebar taking
+            // 256px, a five-column band at 1024px leaves a supporting column
+            // ~86px wide, which is narrower than a seven-glyph currency
+            // figure can be drawn at any size that still reads as a KPI.
+            // Between `lg` and `xl` the band stays two-up and keeps the
+            // figures whole.
+            className="stagger grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5 xl:gap-4"
           >
             <h2 id="dash-kpis" className="sr-only">
               Key metrics
             </h2>
-            {KPIS.filter((kpi) => has(kpi.metric)).map((kpi) => {
+            {KPIS.filter((kpi) => has(kpi.metric)).map((kpi, i) => {
               const current = byName[kpi.metric];
+              const trend = byName[`${kpi.metric}__trend`];
+              const hero = i === 0;
               return (
-                <StatTile
-                  key={kpi.metric}
-                  label={kpi.label}
-                  summary={summarize(
-                    kpi.metric,
-                    unitFor(kpi.metric, kpi.unit),
-                    current,
-                    byName[`${kpi.metric}__prev`],
-                    additiveFor(kpi.metric),
-                  )}
-                  points={seriesValues(byName[`${kpi.metric}__trend`], kpi.metric)}
-                  comparisonLabel={comparisonLabelFor(filters.range)}
-                  loading={isLoading && !current}
-                  goodDirection={kpi.goodDirection}
-                />
+                <div key={kpi.metric} className={hero ? 'sm:col-span-2' : undefined}>
+                  <StatTile
+                    label={kpi.label}
+                    emphasis={hero ? 'hero' : 'default'}
+                    summary={honestSummary(
+                      summarize(
+                        kpi.metric,
+                        unitFor(kpi.metric, kpi.unit),
+                        current,
+                        byName[`${kpi.metric}__prev`],
+                        additiveFor(kpi.metric),
+                      ),
+                      trend,
+                      !isLoading,
+                    )}
+                    points={seriesValues(trend, kpi.metric)}
+                    comparisonLabel={comparisonLabelFor(filters.range)}
+                    loading={isLoading && !current}
+                    goodDirection={kpi.goodDirection}
+                  />
+                </div>
               );
             })}
           </section>
@@ -349,7 +394,7 @@ export function DashboardView({
           <section aria-labelledby="dash-trends" className="space-y-3">
             <h2
               id="dash-trends"
-              className="text-2xs font-medium uppercase tracking-wider text-muted-foreground"
+              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
             >
               Trend over the selected range
             </h2>
@@ -378,25 +423,41 @@ export function DashboardView({
               Breakdowns
             </h2>
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-base">Top products by revenue</CardTitle>
-              </CardHeader>
-              <CardContent>
+              {/* No CardHeader: the figure's own caption row carries the title
+                  and the chart/table switch, so a header above it would print
+                  the same words twice. */}
+              <CardContent className="p-4 sm:p-5">
                 {isLoading && !byName.top_products ? (
-                  <Skeleton className="h-[260px] w-full" />
+                  <>
+                    <Skeleton className="h-5 w-48" />
+                    <Skeleton className="mt-3 h-[300px] w-full" />
+                  </>
                 ) : topProducts ? (
-                  <ChartRenderer spec={topProducts} height={260} />
-                ) : (
-                  <EmptyState
-                    title="No revenue in this window"
-                    description="Widen the date range or clear a filter."
+                  // 300px over eight bands leaves room for a label that wraps
+                  // to a second line without the two colliding.
+                  <ChartRenderer
+                    spec={topProducts}
+                    title="Top products by revenue"
+                    height={300}
                   />
+                ) : (
+                  <>
+                    <p className="text-base font-semibold leading-none tracking-tight text-foreground">
+                      Top products by revenue
+                    </p>
+                    <div className="mt-3">
+                      <EmptyState
+                        title="No revenue in this window"
+                        description="Widen the date range or clear a filter."
+                      />
+                    </div>
+                  </>
                 )}
               </CardContent>
             </Card>
 
             <Card>
-              <CardHeader className="flex-row items-center gap-2 pb-2">
+              <CardHeader className="flex-row items-center gap-2 pb-3">
                 <PackageX className="size-4 text-warning" aria-hidden />
                 <CardTitle className="text-base">Inventory at risk</CardTitle>
               </CardHeader>

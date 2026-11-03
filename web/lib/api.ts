@@ -745,8 +745,20 @@ export const api = {
   async listReports(): Promise<ReportSummary[]> {
     if (USE_MOCK) return delay(mock.MOCK_REPORTS);
     try {
-      const raw = await request<ReportSummary[] | Paginated<ReportSummary>>('/reports');
-      const items = Array.isArray(raw) ? raw : (raw?.items ?? []);
+      const raw = await request<unknown>('/reports');
+      const envelope = Array.isArray(raw)
+        ? raw
+        : ((raw as Paginated<unknown> | null)?.items ?? []);
+      // `GET /reports` answers with full reports, so the rows went through no
+      // normalisation at all while being typed as summaries. `fromReport` is
+      // what coerces `status` to the three values the UI switches on; without
+      // it an unrecognised status fell through to the badge's default branch
+      // and a report of unknown state was announced as "Ready". Summarising a
+      // raw row is not enough - `reportSummary` only narrows the shape, it
+      // does not validate, so the two have to compose in this order.
+      const items = envelope.map((row, i) =>
+        wire.reportSummary(wire.fromReport(row, `rep_unknown_${i}`)),
+      );
       for (const item of items) rememberReportId(item.id);
       return items;
     } catch (err) {

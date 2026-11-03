@@ -6,17 +6,24 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatNumber } from '@/lib/utils';
+import { cn, formatNumber } from '@/lib/utils';
 import type { MetricResult } from '@/lib/types';
 
 type Severity = 'high' | 'medium' | 'low';
 
-const SEVERITY: Record<Severity, BadgeProps['variant']> = {
-  high: 'destructive',
-  medium: 'warning',
-  low: 'muted',
+/**
+ * A dot plus the word, not a filled capsule per row.
+ *
+ * Eight rows of solid red and amber pills made the panel the loudest thing on
+ * the dashboard regardless of what the numbers said, and the severity here is a
+ * *relative* heuristic — it does not deserve more ink than the revenue trend.
+ * Hue still distinguishes the levels, and the word is always beside it.
+ */
+const SEVERITY_DOT: Record<Severity, string> = {
+  high: 'bg-destructive',
+  medium: 'bg-warning',
+  low: 'bg-muted-foreground/45',
 };
 
 interface AtRiskRow {
@@ -65,6 +72,10 @@ export function InventoryAtRiskTable({
   if (loading) return <Skeleton className="h-64 w-full" />;
 
   const rows = result ? toRows(result) : [];
+  // Shared denominator for the inline bars: depletion is only meaningful against
+  // the deepest stock in the returned set, which is the same basis the severity
+  // heuristic uses.
+  const max = rows.reduce((acc, r) => Math.max(acc, r.units), 0);
   if (!rows.length) {
     return (
       <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
@@ -87,13 +98,32 @@ export function InventoryAtRiskTable({
           {rows.map((row) => (
             <TableRow key={row.product}>
               <TableCell className="font-medium">{row.product}</TableCell>
-              <TableCell className="text-right tabular-nums">
-                {formatNumber(row.units)}
+              <TableCell className="text-right">
+                <span className="tabular-nums">{formatNumber(row.units)}</span>
+                {/* One bar per row, one colour: the ranking is already in the
+                    sort order, and the bar makes *how much* shallower each SKU
+                    is readable from across a room. Aria-hidden — the number
+                    beside it is the accessible value. */}
+                <span
+                  className="mt-1 block h-[3px] w-full overflow-hidden rounded-full bg-muted"
+                  aria-hidden
+                >
+                  <span
+                    className="block h-full rounded-full bg-chart-1"
+                    style={{
+                      width: `${max > 0 ? Math.max(2, (row.units / max) * 100) : 0}%`,
+                    }}
+                  />
+                </span>
               </TableCell>
               <TableCell>
-                <Badge variant={SEVERITY[row.severity]} className="capitalize">
-                  {row.severity}
-                </Badge>
+                <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <span
+                    className={cn('size-2 shrink-0 rounded-full', SEVERITY_DOT[row.severity])}
+                    aria-hidden
+                  />
+                  <span className="capitalize">{row.severity}</span>
+                </span>
               </TableCell>
             </TableRow>
           ))}

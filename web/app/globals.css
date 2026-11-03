@@ -16,6 +16,27 @@
  *    single flat dark background makes tables and charts lose their structure.
  *    Dark chart hues are lifted in lightness and pulled down in saturation so
  *    they stay AA-legible on a dark canvas instead of vibrating.
+ *
+ * ── Projector pass ───────────────────────────────────────────────────────────
+ * This app is demonstrated from a projector in a lit room, which costs roughly
+ * a third of the measured contrast and swallows hairlines outright. Every
+ * foreground/background pair below was computed, not eyeballed (WCAG 2.1
+ * relative luminance). The three changes that mattered:
+ *
+ *  1. `--muted-foreground` moved from 40% → 32% L (light) and 68% → 74% L
+ *     (dark). It was 6.1:1 on a card — legally AA, but it is the token that
+ *     carries labels, units, timestamps and coverage notes, i.e. exactly the
+ *     text an evaluator squints at. It is now 8.4:1 / 9.0:1, comfortably AAA.
+ *  2. `--border` was 1.28:1 against a card. A 1px hairline at that ratio does
+ *     not survive projection at all, and this design leans on hairlines
+ *     instead of nested boxes — so the dividers simply vanished. Now 1.6:1
+ *     (light) / 2.1:1 (dark), with `--border-strong` for rules that carry
+ *     structural meaning (table head, section break).
+ *  3. `--input` is a *meaningful* UI boundary, so WCAG 1.4.11 asks for 3:1 and
+ *     it was at 1.41:1 — a field you could not see the edge of. Now 3.2:1.
+ *
+ * `--primary` also dropped 48% → 45% L, which buys AAA (7.3:1) for both the
+ * accent as text and white-on-primary inside a filled button.
  */
 @layer base {
   :root {
@@ -34,57 +55,120 @@
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
 
-    --primary: 224 76% 48%;
-    --primary-foreground: 210 40% 98%;
+    /* 7.3:1 on a card — AAA as text, and AAA again for its own foreground
+       inside a filled button, so the one accent never needs a size caveat. */
+    --primary: 224 76% 45%;
+    --primary-foreground: 0 0% 100%;
 
     --secondary: 214 32% 95%;
     --secondary-foreground: 222 47% 15%;
 
     --muted: 214 32% 95%;
-    --muted-foreground: 215 18% 40%;
+    --muted-foreground: 215 22% 32%;
 
     --accent: 214 32% 92%;
     --accent-foreground: 222 47% 15%;
 
-    --success: 152 62% 32%;
+    --success: 152 64% 30%;
     --success-foreground: 210 40% 98%;
 
-    --warning: 32 90% 42%;
+    --warning: 30 96% 33%;
     --warning-foreground: 40 100% 97%;
 
-    --destructive: 0 68% 47%;
+    --destructive: 0 72% 45%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 216 28% 90%;
-    --input: 216 24% 86%;
-    --ring: 224 76% 48%;
+    /* `border` is the decorative hairline; `border-strong` is the one that
+       means something (a table head rule, a section break) and has to read
+       across a room. `input` is a real UI boundary, so it clears 3:1. */
+    --border: 215 18% 80%;
+    --border-strong: 215 16% 66%;
+    --input: 216 18% 58%;
+    --ring: 224 76% 45%;
 
-    /* Ordered categorical series palette — AA against both backgrounds and
-       distinguishable under common color-vision deficiencies. */
-    --chart-1: 224 76% 48%;
-    --chart-2: 174 62% 33%;
-    --chart-3: 28 84% 45%;
-    --chart-4: 265 62% 55%;
-    --chart-5: 335 68% 46%;
-    --chart-6: 199 82% 36%;
+    /* Tinted surfaces for selection and status. These exist so a component
+       stops guessing with `bg-primary/10`: an alpha tint changes value
+       depending on whether it lands on `card`, `elevated` or `muted`, and the
+       text on top then drifts in and out of AA. These are opaque and measured
+       against the matching foreground token (all ≥ 4.45:1). */
+    --primary-subtle: 222 60% 96%;
+    --primary-subtle-foreground: 224 76% 45%;
+    --success-subtle: 150 48% 96%;
+    --warning-subtle: 38 92% 96%;
+    --destructive-subtle: 0 76% 96%;
+
+    /*
+     * Ordered categorical series palette — AA against both backgrounds and
+     * distinguishable under common color-vision deficiencies. The first three
+     * (blue · green-teal · amber) are the deuteranopia-safe core, so a chart
+     * with three or fewer series is separable without reading the legend.
+     *
+     * Two values here are set by measurement rather than by eye, both checked
+     * against the full six-slot ramp (OKLCH chroma, plus OKLab ΔE under a
+     * Machado 2009 protan/deutan/tritan simulation at severity 1.0, all pairs
+     * — not just adjacent ones):
+     *
+     *  - `--chart-2` sat at OKLCH chroma 0.084, under the 0.10 floor below
+     *    which a hue stops reading as a colour and starts reading as grey.
+     *    sRGB has very little chroma available at 174° and this lightness, so
+     *    the fix is hue, not saturation: 168° yields 0.105. It was tempting to
+     *    keep going toward green (150° reaches 0.140) but that collapses the
+     *    green-vs-amber pair under protanopia from ΔE 11.0 to 7.5 — and
+     *    chart-2/chart-3 are *adjacent*, i.e. the likeliest pair to co-occur.
+     *    168° holds protan at 11.0 and improves tritan from 6.0 to 9.0.
+     *  - `--chart-4` is lighter than its hue wants to be. At 52% L a protanope
+     *    saw chart-1 and chart-4 ΔE 1.0 apart — the same colour. Separation
+     *    for a protanope has to come from lightness, because the blue/violet
+     *    hue difference is precisely what is lost; 60% L moves the worst
+     *    protan pair to ΔE 3.2.
+     *
+     * Still short of the ΔE 6 CVD floor and the ΔE 15 normal-vision floor on
+     * the widest pairs (chart-2/chart-6 at 12.1). Six categorical hues cannot
+     * clear those in sRGB without trading hue variety for a lightness ladder.
+     * It is discharged the way the guidance allows — secondary encoding: every
+     * chart carries direct series labels and a data-table twin (docs/07 §5).
+     */
+    --chart-1: 224 76% 45%;
+    --chart-2: 168 88% 28%;
+    --chart-3: 28 88% 38%;
+    --chart-4: 265 58% 60%;
+    --chart-5: 335 70% 42%;
+    --chart-6: 199 84% 32%;
 
     /* Directional (not categorical) — deltas, contributions, sparklines. */
-    --chart-positive: 152 62% 32%;
-    --chart-negative: 0 68% 47%;
+    --chart-positive: 152 64% 30%;
+    --chart-negative: 0 72% 45%;
 
-    --radius: 0.625rem;
+    /* Chart chrome. A gridline is reference, not data: it sits below the
+       hairline so it never competes with a series, while the axis rule that
+       anchors the plot is allowed to be seen. */
+    --chart-grid: 215 20% 88%;
+    --chart-axis: 215 16% 66%;
+
+    /* 8px. Tight enough to read as an instrument rather than a consumer app,
+       which is where the previous 10px was drifting (docs/07 §2.2). */
+    --radius: 0.5rem;
 
     --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 
-    /* Elevation. Light uses soft, tinted shadows; dark trades shadow for a
-       lighter surface plus a hairline, because shadows are invisible there. */
+    /* Elevation. Light stacks several near-transparent neutral layers rather
+       than one blurry drop, so an edge stays crisp under projection; dark
+       trades shadow for a lighter surface plus a hairline, because a shadow on
+       a dark canvas is invisible no matter how it is tuned. */
     --shadow-soft:
-      0 1px 2px 0 hsl(222 47% 11% / 0.04), 0 1px 3px 0 hsl(222 47% 11% / 0.03);
+      0 1px 1px -0.5px hsl(222 47% 11% / 0.04),
+      0 2px 3px -1.5px hsl(222 47% 11% / 0.05);
     --shadow-raised:
-      0 1px 2px 0 hsl(222 47% 11% / 0.05), 0 8px 24px -8px hsl(222 47% 11% / 0.12);
+      0 1px 1px -0.5px hsl(222 47% 11% / 0.05),
+      0 3px 4px -2px hsl(222 47% 11% / 0.05),
+      0 8px 12px -6px hsl(222 47% 11% / 0.06),
+      0 18px 24px -14px hsl(222 47% 11% / 0.08);
     --shadow-overlay:
-      0 12px 32px -8px hsl(222 47% 11% / 0.18), 0 2px 8px -2px hsl(222 47% 11% / 0.08);
+      0 1px 1px -0.5px hsl(222 47% 11% / 0.06),
+      0 6px 10px -4px hsl(222 47% 11% / 0.08),
+      0 16px 28px -12px hsl(222 47% 11% / 0.12),
+      0 36px 56px -24px hsl(222 47% 11% / 0.16);
   }
 
   .dark {
@@ -108,7 +192,7 @@
     --secondary-foreground: 213 31% 94%;
 
     --muted: 219 27% 17%;
-    --muted-foreground: 215 20% 68%;
+    --muted-foreground: 215 22% 74%;
 
     --accent: 218 27% 22%;
     --accent-foreground: 213 31% 96%;
@@ -119,22 +203,34 @@
     --warning: 38 94% 60%;
     --warning-foreground: 224 45% 10%;
 
-    --destructive: 0 78% 66%;
+    --destructive: 0 82% 70%;
     --destructive-foreground: 224 45% 10%;
 
-    --border: 218 24% 21%;
-    --input: 218 24% 26%;
+    --border: 218 20% 32%;
+    --border-strong: 218 18% 42%;
+    --input: 218 18% 46%;
     --ring: 214 95% 68%;
+
+    --primary-subtle: 221 42% 18%;
+    --primary-subtle-foreground: 214 95% 76%;
+    --success-subtle: 152 36% 16%;
+    --warning-subtle: 34 50% 17%;
+    --destructive-subtle: 0 36% 18%;
 
     --chart-1: 214 95% 68%;
     --chart-2: 172 62% 52%;
     --chart-3: 32 94% 63%;
-    --chart-4: 264 84% 74%;
-    --chart-5: 334 82% 68%;
+    /* Same protanopia fix as light, measured in dark: 76% L put chart-4 at
+       ΔE 2.5 from chart-1, 66% moves the worst protan pair to ΔE 4.8. */
+    --chart-4: 266 70% 66%;
+    --chart-5: 334 84% 70%;
     --chart-6: 194 88% 60%;
 
     --chart-positive: 150 58% 52%;
-    --chart-negative: 0 78% 66%;
+    --chart-negative: 0 82% 70%;
+
+    --chart-grid: 219 22% 22%;
+    --chart-axis: 218 18% 42%;
 
     --shadow-soft: 0 1px 2px 0 hsl(224 60% 3% / 0.6);
     --shadow-raised:
@@ -189,20 +285,69 @@
   ::selection {
     @apply bg-primary/20;
   }
+
+  /*
+   * Native modal dialogs.
+   *
+   * Every modal surface in the app (the mobile nav drawer, the command
+   * palette) is a `<dialog>` opened with `showModal()`, because the browser
+   * then owns the parts that hand-rolled overlays get wrong: the rest of the
+   * document goes inert, Tab cannot walk out, Escape closes, and focus returns
+   * to whatever opened it. Nothing here re-implements a focus trap.
+   *
+   * The element is reset to a full-viewport, transparent *container* so the
+   * panel inside it can position itself with ordinary flexbox, and so a click
+   * landing on the dialog itself unambiguously means "outside the panel".
+   */
+  dialog {
+    /* `position`/`inset` are set explicitly: the UA sheet caps a modal with
+       `max-width: calc(100% - 6px - 2em)` and friends, and clearing those
+       without pinning the box leaves it sized by content instead of filling
+       the viewport. */
+    position: fixed;
+    inset: 0;
+    max-width: none;
+    max-height: none;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    /* `overscroll-behavior` is honoured on non-scrollable scroll containers in
+       newer engines, which is what stops a wheel gesture over the dim area
+       from scrolling the page behind. Deliberately NOT `overflow: hidden` on
+       html/body: that drops the root scrollbar and shifts the whole layout. */
+    overscroll-behavior: contain;
+  }
+
+  dialog::backdrop {
+    /* ::backdrop defaults to `overflow: visible`, which is not a scroll
+       container, so it would ignore overscroll-behavior entirely. */
+    overflow: hidden;
+    overscroll-behavior: contain;
+    background-color: hsl(222 47% 11% / 0.5);
+    backdrop-filter: blur(2px);
+  }
+
+  .dark dialog::backdrop {
+    background-color: hsl(224 60% 3% / 0.66);
+  }
 }
 
 @layer utilities {
   /* Thin, theme-aware scrollbars for panels and code viewers. */
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: hsl(var(--border)) transparent;
+    scrollbar-color: hsl(var(--border-strong)) transparent;
   }
   .scrollbar-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: hsl(var(--border));
+    background-color: hsl(var(--border-strong));
     border-radius: 9999px;
   }
   .scrollbar-thin::-webkit-scrollbar-track {
@@ -234,6 +379,12 @@
       linear-gradient(to bottom, hsl(var(--border) / 0.5) 1px, transparent 1px);
     background-size: 32px 32px;
   }
+
+  /* Slide-in used by the nav drawer. Separate from `fade-in` because a drawer
+     that fades without moving reads as a glitch rather than as an entrance. */
+  .animate-drawer-in {
+    animation: drawer-in 0.18s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
 }
 
 @keyframes fade-up {
@@ -244,6 +395,15 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes drawer-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
   }
 }
 

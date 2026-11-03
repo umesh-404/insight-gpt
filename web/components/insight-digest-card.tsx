@@ -22,7 +22,13 @@ import { ChartRenderer } from '@/components/chart-renderer';
 import { CitationList } from '@/components/citation-list';
 import { InsightSeverityBadge } from '@/components/insight-severity-badge';
 import { goodDirectionFor } from '@/lib/metrics';
-import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
+import {
+  cn,
+  formatCurrency,
+  formatNumber,
+  formatPercent,
+  isMaterialChange,
+} from '@/lib/utils';
 import type {
   ChartSpec,
   Citation,
@@ -79,7 +85,9 @@ function trendSpec(insight: Insight): ChartSpec | null {
  */
 function verdictOf(insight: Insight): 'good' | 'bad' | 'neutral' {
   const good = goodDirectionFor(insight.metric);
-  if (good === 'neutral' || insight.change_pct === 0) return 'neutral';
+  // A move that rounds to 0.0% at the precision we print has no direction to
+  // judge, so it is reported without a verdict rather than coloured.
+  if (good === 'neutral' || !isMaterialChange(insight.change_pct)) return 'neutral';
   const rose = insight.direction === 'up';
   return (good === 'up') === rose ? 'good' : 'bad';
 }
@@ -168,24 +176,29 @@ export function InsightDigestCard({ insight }: { insight: Insight }) {
       )}
     >
       <CardContent className="p-5 pl-6">
-        <div className="flex flex-wrap items-center gap-2">
-          <InsightSeverityBadge severity={insight.severity} />
-          <Badge variant="secondary">{insight.metric_label}</Badge>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {insight.period} vs {insight.prior_period}
-          </span>
+        {/* The finding leads, with its size beside it. The metadata that used to
+            sit above — three badges and a period range — said what *kind* of
+            card this is before it said anything about the business, so the
+            reader had to get past a row of chrome to reach the sentence. */}
+        <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-2">
+          <h3 className="min-w-[16rem] max-w-[62ch] flex-1 text-pretty text-lg font-semibold leading-snug tracking-tight text-foreground">
+            {insight.headline}
+          </h3>
+          {/* Colour on the glyph and the figure, not a filled capsule: with ten
+              cards stacked, ten tinted pills read as one alarm rather than a
+              ranked list. */}
           <span
             className={cn(
-              'ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-base font-semibold tabular-nums',
-              verdict === 'bad' && 'bg-destructive/12 text-destructive',
-              verdict === 'good' && 'bg-success/12 text-success',
-              verdict === 'neutral' && 'bg-muted text-muted-foreground',
+              'inline-flex shrink-0 items-center gap-1 text-2xl font-semibold leading-none tracking-tight',
+              verdict === 'bad' && 'text-destructive',
+              verdict === 'good' && 'text-success',
+              verdict === 'neutral' && 'text-foreground',
             )}
           >
             {down ? (
-              <ArrowDownRight className="size-3.5" aria-hidden />
+              <ArrowDownRight className="size-5" aria-hidden />
             ) : (
-              <ArrowUpRight className="size-3.5" aria-hidden />
+              <ArrowUpRight className="size-5" aria-hidden />
             )}
             {formatPercent(insight.change_pct)}
             <span className="sr-only">
@@ -196,9 +209,16 @@ export function InsightDigestCard({ insight }: { insight: Insight }) {
           </span>
         </div>
 
-        <h3 className="mt-3 max-w-[70ch] text-lg font-semibold leading-snug tracking-tight text-foreground">
-          {insight.headline}
-        </h3>
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+          <InsightSeverityBadge severity={insight.severity} />
+          <span aria-hidden className="text-border">
+            |
+          </span>
+          <span className="font-medium text-foreground">{insight.metric_label}</span>
+          <span className="tabular-nums">
+            {insight.period} vs {insight.prior_period}
+          </span>
+        </div>
 
         {/* At-a-glance row: sparkline · figures · root cause · evidence count */}
         <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -267,12 +287,11 @@ export function InsightDigestCard({ insight }: { insight: Insight }) {
             </p>
 
             {spec ? (
-              <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">
-                  {insight.metric_label} trend
-                </p>
-                <ChartRenderer spec={spec} height={200} />
-              </div>
+              <ChartRenderer
+                spec={spec}
+                title={`${insight.metric_label} trend`}
+                height={200}
+              />
             ) : null}
 
             {insight.contributions.length > 0 ? (

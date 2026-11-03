@@ -3,7 +3,7 @@
 import * as React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Plus, MessageSquare, Pencil, Trash2, Check, X } from 'lucide-react';
+import { Plus, Pencil, Search, Trash2, Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/components/ui/toast';
@@ -28,41 +28,93 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+/** A filter only earns its space once scanning the list stops being trivial. */
+const FILTER_THRESHOLD = 8;
+
 export function ConversationList() {
   const pathname = usePathname();
-  const { data, isLoading, isError } = useConversations();
+  const { data, isLoading, isError, refetch } = useConversations();
   const items = data?.items ?? [];
+  const [filter, setFilter] = React.useState('');
+  // Two instances of this list are mounted at once — the md+ column and the
+  // small-screen disclosure — so every id has to be instance-scoped or the
+  // labels bind to whichever copy the browser happened to see first.
+  const filterId = `conversation-filter-${React.useId()}`;
+
+  const needle = filter.trim().toLowerCase();
+  const shown = needle
+    ? items.filter((c) => (c.title || '').toLowerCase().includes(needle))
+    : items;
 
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col">
-      <div className="p-3">
+      <div className="space-y-2 border-b p-3">
         <Button asChild variant="outline" className="w-full justify-start gap-2">
           <Link href="/ask">
-            <Plus className="size-4" /> New conversation
+            <Plus className="size-4" aria-hidden /> New question
           </Link>
         </Button>
+        {items.length >= FILTER_THRESHOLD ? (
+          <div className="relative">
+            <label htmlFor={filterId} className="sr-only">
+              Filter conversations by title
+            </label>
+            <Search
+              className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
+              aria-hidden
+            />
+            <input
+              id={filterId}
+              type="search"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="Filter"
+              className="h-9 w-full rounded-md border border-input bg-background pl-8 pr-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            />
+          </div>
+        ) : null}
       </div>
-      <div className="scrollbar-thin min-h-0 min-w-0 flex-1 overflow-y-auto px-2 pb-3">
-        <p className="px-2 py-1.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Recent
-        </p>
+      <div className="scrollbar-thin min-h-0 min-w-0 flex-1 overflow-y-auto pb-3">
+        <h2 className="flex items-baseline gap-1.5 px-3 pb-1 pt-3 text-2xs font-medium uppercase tracking-[0.12em] text-muted-foreground">
+          History
+          {!isLoading && !isError && items.length > 0 ? (
+            <span className="tabular-nums normal-case tracking-normal">
+              {needle ? `${shown.length} of ${items.length}` : items.length}
+            </span>
+          ) : null}
+        </h2>
         {isLoading ? (
-          <div className="space-y-1 px-1">
+          <div className="space-y-1 px-3 pt-1">
             {Array.from({ length: 4 }).map((_, i) => (
-              <Skeleton key={i} className="h-12 w-full" />
+              <Skeleton key={i} className="h-11 w-full" />
             ))}
           </div>
         ) : isError ? (
-          <p className="px-2 py-3 text-xs text-muted-foreground">
-            History is unavailable right now.
-          </p>
+          // Loading history is a plain GET: a transient failure is genuinely
+          // retryable, so offer the retry rather than a dead sentence.
+          <div className="px-3 py-3">
+            <p className="text-xs text-muted-foreground">
+              History could not be loaded.
+            </p>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              className="mt-1.5 text-xs font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Try again
+            </button>
+          </div>
         ) : items.length === 0 ? (
-          <p className="px-2 py-3 text-xs text-muted-foreground">
-            No conversations yet. Ask a question to start one.
+          <p className="px-3 py-3 text-xs text-muted-foreground">
+            No questions yet. Ask one and it is saved here.
+          </p>
+        ) : shown.length === 0 ? (
+          <p className="px-3 py-3 text-xs text-muted-foreground">
+            No conversation title matches “{filter.trim()}”.
           </p>
         ) : (
-          <ul className="space-y-0.5">
-            {items.map((conversation) => (
+          <ul className="divide-y">
+            {shown.map((conversation) => (
               <ConversationRow
                 key={conversation.id}
                 conversation={conversation}
@@ -94,6 +146,7 @@ function ConversationRow({
   const rename = useRenameConversation();
   const remove = useDeleteConversation();
 
+  const renameId = `rename-${React.useId()}`;
   const [mode, setMode] = React.useState<RowMode>('idle');
   const [draft, setDraft] = React.useState(conversation.title);
   const [error, setError] = React.useState<string | null>(null);
@@ -168,22 +221,22 @@ function ConversationRow({
     return (
       <li>
         <form
-          className="flex items-center gap-1 rounded-md bg-accent/60 px-1.5 py-1.5"
+          className="flex items-center gap-1 border-l-2 border-primary bg-accent/50 px-2 py-2"
           onSubmit={(event) => {
             event.preventDefault();
             commitRename();
           }}
         >
-          <label className="sr-only" htmlFor={`rename-${conversation.id}`}>
+          <label className="sr-only" htmlFor={renameId}>
             Conversation title
           </label>
           <input
-            id={`rename-${conversation.id}`}
+            id={renameId}
             ref={inputRef}
             value={draft}
             maxLength={TITLE_MAX_CHARS}
             aria-invalid={error ? true : undefined}
-            aria-describedby={error ? `rename-error-${conversation.id}` : undefined}
+            aria-describedby={error ? `${renameId}-error` : undefined}
             onChange={(event) => {
               setDraft(event.target.value);
               if (error) setError(null);
@@ -201,7 +254,7 @@ function ConversationRow({
             type="submit"
             aria-label="Save title"
             title="Save"
-            className="rounded-sm p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="rounded-md p-2 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <Check className="size-3.5" aria-hidden />
           </button>
@@ -213,14 +266,14 @@ function ConversationRow({
               setMode('idle');
               setError(null);
             }}
-            className="rounded-sm p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="rounded-md p-2 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <X className="size-3.5" aria-hidden />
           </button>
         </form>
         {error ? (
           <p
-            id={`rename-error-${conversation.id}`}
+            id={`${renameId}-error`}
             role="alert"
             className="px-2 pb-1 pt-0.5 text-xs text-destructive"
           >
@@ -237,16 +290,19 @@ function ConversationRow({
         <div
           role="group"
           aria-label={`Delete ${title}?`}
-          className="rounded-md bg-destructive/10 px-2 py-2"
+          className="border-l-2 border-destructive bg-destructive/[0.06] px-3 py-2.5"
         >
-          <p className="truncate text-xs text-foreground">Delete “{title}”?</p>
-          <div className="mt-1.5 flex gap-1.5">
+          <p className="truncate text-sm text-foreground">Delete “{title}”?</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            The transcript and its answers go with it.
+          </p>
+          <div className="mt-2 flex gap-1.5">
             <button
               type="button"
               autoFocus
               disabled={remove.isPending}
               onClick={confirmDelete}
-              className="rounded-sm bg-destructive px-2 py-1 text-xs font-medium text-destructive-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+              className="min-h-8 rounded-md bg-destructive px-2.5 text-xs font-medium text-destructive-foreground transition-opacity duration-150 ease-out hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
             >
               {remove.isPending ? 'Deleting…' : 'Delete'}
             </button>
@@ -254,7 +310,7 @@ function ConversationRow({
               type="button"
               disabled={remove.isPending}
               onClick={() => setMode('idle')}
-              className="rounded-sm border border-input px-2 py-1 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+              className="min-h-8 rounded-md border border-input px-2.5 text-xs transition-colors duration-150 ease-out hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
             >
               Cancel
             </button>
@@ -273,41 +329,38 @@ function ConversationRow({
           // Right padding reserves space for the action buttons, which are
           // siblings rather than children: a button inside an anchor is invalid
           // markup and swallows the row's own click target.
-          'flex flex-col gap-0.5 rounded-md py-2 pl-2 pr-14 transition-colors',
-          active ? 'bg-primary/10' : 'hover:bg-accent',
+          // A left rule marks the open thread instead of a filled pill: this is
+          // a navigable index of saved work, not a chat roster.
+          'flex flex-col gap-0.5 border-l-2 py-2.5 pl-3 pr-14 transition-colors duration-150 ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+          active
+            ? 'border-primary bg-primary/[0.06]'
+            : 'border-transparent hover:bg-accent',
         )}
       >
-        <span className="flex items-center gap-2">
-          <MessageSquare
-            className={cn(
-              'size-3.5 shrink-0',
-              active ? 'text-primary' : 'text-muted-foreground',
-            )}
-            aria-hidden
-          />
-          <span
-            className={cn(
-              'truncate text-sm font-medium',
-              active ? 'text-primary' : 'text-foreground',
-            )}
-          >
-            {title}
-          </span>
+        <span
+          className={cn(
+            'truncate text-sm font-medium',
+            active ? 'text-primary' : 'text-foreground',
+          )}
+        >
+          {title}
         </span>
         <RelativeTime
           iso={conversation.updated_at}
-          className="pl-5 text-xs text-muted-foreground"
+          className="text-xs tabular-nums text-muted-foreground"
         />
       </Link>
-      {/* Hidden until hover or keyboard focus, but always in the tab order. */}
-      <div className="absolute right-1 top-1.5 flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+      {/* On a pointer device: hidden until hover or keyboard focus, but always
+          in the tab order. On touch there is no hover, so they stay visible —
+          otherwise rename and delete would simply be unreachable. */}
+      <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 transition-opacity duration-150 ease-out focus-within:opacity-100 group-hover:opacity-100 md:opacity-0">
         <button
           type="button"
           disabled={busy}
           aria-label={`Rename ${title}`}
           title="Rename"
           onClick={startRename}
-          className="rounded-sm p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          className="rounded-md p-2 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           <Pencil className="size-3.5" aria-hidden />
         </button>
@@ -320,7 +373,7 @@ function ConversationRow({
             setError(null);
             setMode('confirming-delete');
           }}
-          className="rounded-sm p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          className="rounded-md p-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           <Trash2 className="size-3.5" aria-hidden />
         </button>

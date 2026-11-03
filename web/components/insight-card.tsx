@@ -5,7 +5,6 @@ import {
   BarChart3,
   Code2,
   FileText,
-  HelpCircle,
   Paperclip,
   Sparkles,
   ThumbsDown,
@@ -23,6 +22,7 @@ import { CaveatNote } from '@/components/caveat-note';
 import { DataTable } from '@/components/data-table';
 import {
   AbstainPanel,
+  ClarifyPanel,
   NoDataPanel,
   SelfCorrectedNote,
 } from '@/components/answer-states';
@@ -49,10 +49,18 @@ const ROUTE_LABEL: Record<Route, string> = {
   conversational: 'General discussion',
 };
 
-const CONFIDENCE_CLASS: Record<Confidence, string> = {
-  high: 'bg-success/10 text-success',
-  medium: 'bg-muted text-muted-foreground',
-  low: 'bg-warning/10 text-warning',
+/**
+ * Confidence is a marker plus a word, not a tinted capsule.
+ *
+ * A thread of answers each wearing a filled green or amber chip reads as a row
+ * of alarms, and the state it reports is secondary to the answer itself. The dot
+ * keeps the hue (never the only signal — the word sits beside it) while the text
+ * stays in ordinary muted ink.
+ */
+const CONFIDENCE_DOT: Record<Confidence, string> = {
+  high: 'bg-success',
+  medium: 'bg-muted-foreground/45',
+  low: 'bg-warning',
 };
 
 /* -------------------------------------------------------------------------- */
@@ -290,9 +298,17 @@ export function InsightCard({
       // Scoped to this card: a thread renders many answers, so several cards
       // can each carry a `citation-1`. A document-wide lookup would jump to
       // the first one on the page — usually an earlier, unrelated answer.
-      cardRef.current
-        ?.querySelector<HTMLElement>(`[id="citation-${n}"]`)
-        ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      const row = cardRef.current?.querySelector<HTMLElement>(
+        `[id="citation-${n}"]`,
+      );
+      row?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      // Scrolling alone never highlighted the row. The citation carried a
+      // `target:` style, and `scrollIntoView` does not change the URL
+      // fragment, so that rule could not fire - clicking `[3]` moved the
+      // panel and then left the reader to find row three by eye. The row is
+      // `tabIndex={-1}` precisely so it can take focus here, which both
+      // paints the focus style and tells a screen reader where it landed.
+      row?.focus({ preventScroll: true });
     });
   }, []);
 
@@ -365,13 +381,17 @@ export function InsightCard({
                 ) : null}
                 {envelope.confidence ? (
                   <span
-                    className={cn(
-                      'rounded-full px-2 py-0.5 text-2xs font-medium capitalize',
-                      CONFIDENCE_CLASS[envelope.confidence],
-                    )}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground"
                     title="How much the engine trusts this answer, given its grounding"
                   >
-                    {envelope.confidence} confidence
+                    <span
+                      className={cn(
+                        'size-2 shrink-0 rounded-full',
+                        CONFIDENCE_DOT[envelope.confidence],
+                      )}
+                      aria-hidden
+                    />
+                    <span className="capitalize">{envelope.confidence}</span> confidence
                   </span>
                 ) : null}
               </div>
@@ -460,14 +480,19 @@ export function InsightCard({
                 {/* Valid query, zero rows. */}
                 {noData ? <NoDataPanel /> : null}
 
+                {/*
+                 * A clarifying question is an outcome, not a notice. Rendered
+                 * as a static tinted box it read as something that had gone
+                 * mildly wrong; it shares the abstention's shape instead,
+                 * because both are the engine declining to guess, and it
+                 * carries the question back as a one-click re-ask so the
+                 * reader has somewhere to go.
+                 */}
                 {envelope.clarifying_question ? (
-                  <div className="mt-4 flex gap-2.5 rounded-lg border border-primary/25 bg-primary/[0.04] p-3 text-sm">
-                    <HelpCircle
-                      className="mt-0.5 size-4 shrink-0 text-primary"
-                      aria-hidden
-                    />
-                    <p className="text-foreground">{envelope.clarifying_question}</p>
-                  </div>
+                  <ClarifyPanel
+                    question={envelope.clarifying_question}
+                    onAsk={onAsk}
+                  />
                 ) : null}
 
                 {error ? (

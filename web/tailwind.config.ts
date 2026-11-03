@@ -22,7 +22,12 @@ const config: Config = {
     },
     extend: {
       colors: {
-        border: 'hsl(var(--border))',
+        /* `border-border` stays the decorative hairline; `border-border-strong`
+           is the rule that carries structure and has to survive a projector. */
+        border: {
+          DEFAULT: 'hsl(var(--border))',
+          strong: 'hsl(var(--border-strong))',
+        },
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
         background: 'hsl(var(--background))',
@@ -30,6 +35,11 @@ const config: Config = {
         primary: {
           DEFAULT: 'hsl(var(--primary))',
           foreground: 'hsl(var(--primary-foreground))',
+          /* Opaque selection tint. Prefer it over `bg-primary/10`, whose
+             rendered value (and therefore its contrast) depends on whichever
+             surface happens to be underneath. */
+          subtle: 'hsl(var(--primary-subtle))',
+          'subtle-foreground': 'hsl(var(--primary-subtle-foreground))',
         },
         secondary: {
           DEFAULT: 'hsl(var(--secondary))',
@@ -53,17 +63,22 @@ const config: Config = {
           DEFAULT: 'hsl(var(--popover))',
           foreground: 'hsl(var(--popover-foreground))',
         },
+        /* `*-subtle` is the status *surface*; the base token is the status text
+           that sits on it. Both directions were contrast-checked. */
         success: {
           DEFAULT: 'hsl(var(--success))',
           foreground: 'hsl(var(--success-foreground))',
+          subtle: 'hsl(var(--success-subtle))',
         },
         warning: {
           DEFAULT: 'hsl(var(--warning))',
           foreground: 'hsl(var(--warning-foreground))',
+          subtle: 'hsl(var(--warning-subtle))',
         },
         destructive: {
           DEFAULT: 'hsl(var(--destructive))',
           foreground: 'hsl(var(--destructive-foreground))',
+          subtle: 'hsl(var(--destructive-subtle))',
         },
         chart: {
           1: 'hsl(var(--chart-1))',
@@ -74,6 +89,10 @@ const config: Config = {
           6: 'hsl(var(--chart-6))',
           positive: 'hsl(var(--chart-positive))',
           negative: 'hsl(var(--chart-negative))',
+          /* Chart chrome, so a Recharts <CartesianGrid>/<XAxis> never has to
+             reach for a generic `border` and end up invisible on a projector. */
+          grid: 'hsl(var(--chart-grid))',
+          axis: 'hsl(var(--chart-axis))',
         },
       },
       borderRadius: {
@@ -83,17 +102,29 @@ const config: Config = {
         sm: 'calc(var(--radius) - 4px)',
       },
       fontSize: {
-        /* A 1.20 scale anchored at 14px body — dense enough for an analytics
-           tool, with a display step reserved for page titles and KPI values. */
-        '2xs': ['0.6875rem', { lineHeight: '1rem', letterSpacing: '0.01em' }],
-        xs: ['0.75rem', { lineHeight: '1.125rem' }],
-        sm: ['0.8125rem', { lineHeight: '1.375rem' }],
-        base: ['0.875rem', { lineHeight: '1.5rem' }],
-        lg: ['1rem', { lineHeight: '1.625rem' }],
-        xl: ['1.125rem', { lineHeight: '1.75rem' }],
-        '2xl': ['1.375rem', { lineHeight: '1.875rem', letterSpacing: '-0.012em' }],
-        '3xl': ['1.75rem', { lineHeight: '2.125rem', letterSpacing: '-0.018em' }],
-        '4xl': ['2.125rem', { lineHeight: '2.5rem', letterSpacing: '-0.022em' }],
+        /*
+         * A ~1.20 scale, now anchored at 15px body (was 14px).
+         *
+         * Every step moved up by one notch. The old scale was tuned for a
+         * laptop at arm's length, and this app is also read off a projector
+         * across a room, where 13px secondary text (`text-sm`, which carries
+         * most of the labels, units and table cells here) stops being read and
+         * starts being guessed at. The whole ladder moved together so the
+         * ratios — and therefore the hierarchy — are unchanged; nothing
+         * shrank, and no key was added or removed.
+         *
+         * Density is protected the way the design direction says to protect
+         * it: by deleting chrome, not by shrinking type.
+         */
+        '2xs': ['0.75rem', { lineHeight: '1.0625rem', letterSpacing: '0.01em' }],
+        xs: ['0.8125rem', { lineHeight: '1.1875rem' }],
+        sm: ['0.875rem', { lineHeight: '1.4375rem' }],
+        base: ['0.9375rem', { lineHeight: '1.5625rem' }],
+        lg: ['1.0625rem', { lineHeight: '1.6875rem' }],
+        xl: ['1.1875rem', { lineHeight: '1.8125rem' }],
+        '2xl': ['1.5rem', { lineHeight: '2rem', letterSpacing: '-0.014em' }],
+        '3xl': ['1.875rem', { lineHeight: '2.25rem', letterSpacing: '-0.019em' }],
+        '4xl': ['2.25rem', { lineHeight: '2.625rem', letterSpacing: '-0.022em' }],
       },
       fontFamily: {
         sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', 'sans-serif'],
