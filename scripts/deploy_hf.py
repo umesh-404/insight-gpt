@@ -47,9 +47,13 @@ Grounded, cited conversational analytics and document/file Q&A powered by FastAP
 
 ### Environment Variables & Secrets
 Configure these in **Settings -> Variables and secrets**:
+- `APP_ENV` (Variable): `production` — refuses to boot on a config that
+  cannot serve users (no key, or the offline template provider).
 - `GEMINI_API_KEY` (Secret): Your Google AI Studio API key.
 - `LLM_PROVIDER` (Variable): `gemini`
-- `LLM_MODEL` (Variable): `gemini-2.5-flash`
+- `LLM_MODEL` (Variable): `gemini-2.5-flash` — pin it; provider catalogues
+  are retired on a schedule, and `GET /system/status` reports a model that has
+  stopped existing.
 - `JWT_SECRET` (Secret): A secure random string for JWT signatures.
 - `COOKIE_SECURE` (Variable): `true`
 - `COOKIE_SAMESITE` (Variable): `none`
@@ -114,7 +118,6 @@ pyyaml>=6.0
 sqlglot>=25.0
 httpx>=0.27
 duckdb>=1.0
-typesafe-sdk>=0.7.1
 pyjwt>=2.9
 python-multipart>=0.0.9
 openpyxl>=3.1
@@ -293,6 +296,7 @@ def push_to_space(bundle_dir: Path, space_name: str, token: str | None = None) -
         print(f"  Space URL:      https://huggingface.co/spaces/{user}/{space}")
         print(f"  Live API URL:   {api_url}")
         print("\nNext, open Space Settings -> 'Variables and secrets' and set:")
+        print("  - APP_ENV             production")
         print("  - GEMINI_API_KEY      (Secret)")
         print("  - LLM_PROVIDER        gemini")
         print("  - LLM_MODEL           gemini-2.5-flash")

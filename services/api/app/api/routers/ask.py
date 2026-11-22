@@ -36,9 +36,15 @@ from ...engine.attachments import AttachmentInput
 from ...engine.engine import InsightEngine
 from ...engine.envelope import AnswerEnvelope
 from ...engine.guardrails import GuardrailError
+from ...providers.base import ProviderError
 from .. import conversations as store
 from ..deps import get_engine, rate_limit
-from ..errors import APIError, BadRequestError, NotFoundError
+from ..errors import (
+    APIError,
+    BadRequestError,
+    DependencyUnavailableError,
+    NotFoundError,
+)
 from ..observability import record_llm_call
 
 router = APIRouter(tags=["ask"])
@@ -61,6 +67,17 @@ class AskError(Exception):
         self.code = code
         self.message = message
         self.status_code = status_code
+
+
+def _as_api_error(exc: AskError) -> APIError:
+    """Carry an :class:`AskError`'s status onto the typed error envelope."""
+    if exc.status_code == 400:
+        return BadRequestError(exc.message)
+    if exc.status_code == 503:
+        return DependencyUnavailableError(
+            exc.message, details={"retryable": True}, headers={"Retry-After": "10"}
+        )
+    return APIError(exc.message)
 
 
 def _dialect() -> str:
@@ -115,6 +132,18 @@ async def _run(
             "That question could not be answered within the governed data boundary.",
             status_code=400,
         ) from None
+    except ProviderError as exc:
+        # An upstream outage is not our bug, and saying "Failed to answer the
+        # question" for it strands everyone: the reader cannot tell a broken
+        # deployment from a hard question, and the operator gets no cause. The
+        # provider's own diagnosis is already redacted of anything
+        # credential-shaped before it reaches here.
+        log.warning("ask failed: reasoning provider unavailable: %s", exc)
+        raise AskError(
+            "dependency_unavailable",
+            f"The reasoning engine is unavailable: {exc}",
+            status_code=503,
+        ) from None
     except Exception:
         log.exception("ask failed")
         raise AskError("internal_error", "Failed to answer the question.") from None
@@ -156,9 +185,12 @@ async def ask(
         try:
             env = await _run(engine, body.question, body.attachments)
         except AskError as exc:
-            if exc.status_code == 400:
-                raise BadRequestError(exc.message) from None
-            raise APIError(exc.message) from None
+            # The status the engine decided has to survive the hop. Mapping
+            # everything that is not a 400 onto a bare APIError flattened an
+            # upstream outage into "internal error", which is both the wrong
+            # code and the wrong story: a 503 tells the client to retry and
+            # tells the operator to look at the provider, not at us.
+            raise _as_api_error(exc) from None
         _trace(request, engine, started, env)
         _persist(claims, conversation_id, body.question, message_id, env)
         # The SSE path carries these in its `meta` event; JSON clients get them

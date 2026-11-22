@@ -15,11 +15,9 @@ Both are tested through stubs, so they hold for *any* provider.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 from app.engine.engine import InsightEngine
 from app.providers.fake import FakeProvider, _task_of
-from app.providers.typesafe_provider import TypeSafeProvider
 
 PERIOD = {"start": "2026-04-01", "end": "2026-06-30"}
 
@@ -96,35 +94,34 @@ def test_grounded_questions_still_answer():
 
 
 # --- determinism ------------------------------------------------------------
-class _FlipFlopClient:
-    """A remote model whose dimension choice is unstable across identical calls."""
+class _FlipFlopProvider(FakeProvider):
+    """A model whose breakdown dimension is unstable across identical calls.
+
+    Every sampling provider behaves like this to some degree; this one just
+    does it on every other call so the property is testable. The engine must
+    not let that instability reach the envelope, because a question answered
+    with one figure and then with a twelve-row table is a question the user
+    cannot trust - and a demo that contradicts itself on a re-run.
+    """
 
     def __init__(self):
+        super().__init__()
         self.calls = 0
 
-    def system_one(self, *, state, questions, model=None, **kw):
+    def complete(self, prompt: str, **opts) -> str:
+        raw = super().complete(prompt, **opts)
+        if _task_of(prompt) != "route":
+            return raw
         self.calls += 1
-        dim = "date" if self.calls % 2 else "none"
-        return SimpleNamespace(
-            choices={
-                "route": SimpleNamespace(choice="structured"),
-                "metric": SimpleNamespace(choice="revenue"),
-                "dimension": SimpleNamespace(choice=dim),
-            },
-            nouls={"is_change": SimpleNamespace(noul=0.0)},
-        )
-
-
-def _typesafe_with_stub() -> TypeSafeProvider:
-    provider = TypeSafeProvider(api_key="")
-    provider._client = _FlipFlopClient()
-    return provider
+        obj = json.loads(raw)
+        obj["group_dims"] = ["date"] if self.calls % 2 else []
+        return json.dumps(obj)
 
 
 def test_unstable_dimension_choice_does_not_change_the_envelope():
     question = "what was revenue last quarter"
     envelopes = [
-        _engine(_typesafe_with_stub()).ask(question).model_dump() for _ in range(4)
+        _engine(_FlipFlopProvider()).ask(question).model_dump() for _ in range(4)
     ]
     # Two of those four calls saw the model answer "date" instead of "none".
     first = envelopes[0]
@@ -134,6 +131,6 @@ def test_unstable_dimension_choice_does_not_change_the_envelope():
 
 
 def test_an_explicit_breakdown_is_still_honoured():
-    env = _engine(_typesafe_with_stub()).ask("what was revenue by month last quarter")
+    env = _engine(_FlipFlopProvider()).ask("what was revenue by month last quarter")
     assert env.chart is not None
     assert env.tables[0].title.endswith("by date")

@@ -302,10 +302,22 @@ Implementations, selected by config + env:
 
 | Provider | Role | Selection |
 |---|---|---|
-| **Ollama** | Default — local, private, CPU-viable | default; no key needed |
-| **OpenAI** | Optional cloud — higher reasoning quality | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
-| **Gemini** | Optional cloud | `LLM_PROVIDER=gemini` + key |
-| **Groq** | Optional cloud — low latency | `LLM_PROVIDER=groq` + key |
+| **Gemini** | **Production default** — OpenAI-compatible endpoint | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` |
+| **OpenAI** | Cloud alternative | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
+| **Groq** | Cloud alternative — low latency | `LLM_PROVIDER=groq` + `GROQ_API_KEY` |
+| **Ollama** | Local, private, CPU-viable | `LLM_PROVIDER=ollama`; no key |
+| **Fake** | Tests and offline runs only | `LLM_PROVIDER=fake`; refused in production |
+
+The three cloud options share one implementation, because all three speak the
+OpenAI `/chat/completions` schema.
+
+**Model ids are configuration, not constants.** The id baked into the factory
+is a starting point that will rot: catalogues are retired on a published
+schedule (Groq shut down `llama-3.1-8b-instant` on 2026-08-16), so a pinned-in
+-code default becomes a 404 on a date nobody is watching. Set `LLM_MODEL` per
+deployment. `GET /system/status` calls the provider's own `/models` list and
+reports a configured model that has stopped existing, rather than reporting
+"ok" because a key happens to be present.
 
 Provider and model are chosen in `config/*.yaml` with secrets in env — never in
 the repo. On a CPU-only machine, pointing `LLM_PROVIDER` at a cloud key is the
@@ -322,6 +334,29 @@ on Ollama (see [`04-retrieval-rag.md`](04-retrieval-rag.md)).
   ([`06-api.md`](06-api.md)) and cost accounting.
 - **Graceful capability differences.** Streaming and JSON-mode are negotiated
   per provider; a provider lacking a feature falls back to a supported path.
+  JSON mode is requested but never *assumed*: Google's compatibility layer
+  does not document `response_format` for chat completions, so the router
+  parses tolerantly (fenced blocks, prose-wrapped objects) rather than
+  trusting the flag it set.
+
+### 7.3 What happens when the model is unreachable
+
+**It fails, loudly.** A provider outage raises `ProviderError`, which the API
+returns as a `503 dependency_unavailable` naming the provider. It never
+degrades to a templated answer.
+
+That is a deliberate trade of availability for honesty, and it is the only
+choice consistent with the rest of this document. Every surface frames an
+answer as traceable — the SQL that produced a figure, the document behind a
+claim. Prose assembled from a template while the model was down would wear
+that same framing while being something else entirely, and nothing on screen
+would tell the two apart. A system whose claim is "you can check this" cannot
+quietly serve output that cannot be checked.
+
+Transient faults are retried before giving up: a 429 or 5xx gets exponential
+backoff with full jitter, honouring `Retry-After`. A 401 or a 400 is not
+retried — a refusal will be a refusal the second time, and retrying only
+spends latency to be told twice.
 
 ---
 

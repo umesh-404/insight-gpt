@@ -184,11 +184,15 @@ EMBED_MODEL=nomic-embed-text
 RERANK_MODEL=dengcao/Qwen3-Reranker-0.6B:F16
 
 # --- LLM provider (chat/reasoning step only) ---
-LLM_PROVIDER=ollama                # ollama (default) | openai | groq | typesafe | gemini*
-LLM_MODEL=llama3.1:8b
+APP_ENV=production                 # refuses a config that cannot serve users
+LLM_PROVIDER=gemini                # gemini | openai | groq (cloud) | ollama | fake
+LLM_MODEL=gemini-2.5-flash         # pin it: provider catalogues get retired
+GEMINI_API_KEY=                    # only if LLM_PROVIDER=gemini
 # OPENAI_API_KEY=                  # only if LLM_PROVIDER=openai
 # GROQ_API_KEY=                    # only if LLM_PROVIDER=groq
-# TYPESAFE_API_KEY=                # only if LLM_PROVIDER=typesafe
+LLM_MAX_OUTPUT_TOKENS=2048         # cost ceiling for one reasoning call
+LLM_TIMEOUT_S=60
+LLM_MAX_RETRIES=3
 
 # --- Pipeline ---
 REINDEX_SOURCE=ingested            # ingested | samples | <path>
@@ -222,6 +226,50 @@ allow-list rejects anything outside `marts` (see
 always use local Ollama models regardless of `LLM_PROVIDER`; only the
 chat/reasoning step follows it. `gemini` is declared but not implemented — the
 provider factory raises on it rather than pretending.
+
+### 2.1 Production mode (`APP_ENV=production`)
+
+Setting `APP_ENV=production` turns three soft defaults into hard contracts.
+All three exist because the alternative is a deployment that *looks* healthy
+and is not.
+
+**The API refuses to boot on a configuration that cannot serve users.** A
+cloud provider with no key, or `LLM_PROVIDER=fake`, raises at startup naming
+the variable to set. Without this, a deployment that forgot `GEMINI_API_KEY`
+passes its health check, serves the UI, and fails on the first real question —
+usually in front of whoever is being shown the system.
+
+**An unreachable model is a `503`, never a templated answer.** See
+[`05-insight-engine.md`](05-insight-engine.md) §7.3 for why this product in
+particular cannot degrade quietly.
+
+**A single reasoning call is bounded.** `LLM_MAX_OUTPUT_TOKENS` (default 2048)
+caps the bill per answer, `LLM_TIMEOUT_S` (60) caps the wait, and
+`LLM_MAX_RETRIES` (3) caps the amplification of a provider outage. An
+unbounded completion against a metered API is an unbounded invoice.
+
+| Variable | Default | Why it matters |
+|---|---|---|
+| `APP_ENV` | unset | `production` enables the three contracts above |
+| `LLM_PROVIDER` | `ollama` | `gemini` \| `openai` \| `groq` \| `ollama` \| `fake` |
+| `LLM_MODEL` | per provider | **Pin it.** Catalogues are retired on a schedule |
+| `GEMINI_API_KEY` | — | Required when `LLM_PROVIDER=gemini` |
+| `LLM_MAX_OUTPUT_TOKENS` | `2048` | Cost ceiling for one answer |
+| `LLM_TIMEOUT_S` | `60` | Latency ceiling |
+| `LLM_MAX_RETRIES` | `3` | Retries on 429/5xx only, with jittered backoff |
+| `LLM_MAX_TOKENS_FIELD` | `max_tokens` | `max_completion_tokens` for OpenAI reasoning models |
+
+> **One ceiling, one field name.** Gemini answers `400 max_tokens and
+> max_completion_tokens cannot both be set`, so sending both spellings to
+> "cover either" fails every call. Verified against the live endpoint.
+
+**Checking it is actually working.** `GET /system/status` (admin) asks the
+provider for its `/models` list and reports whether the configured model is
+still in it. This is the check that catches the failure mode a key-presence
+check cannot: a model id that was valid on the day you deployed and has since
+been retired.
+
+---
 
 ## 3. One-command bring-up & first-run bootstrap
 

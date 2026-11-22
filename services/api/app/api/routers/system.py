@@ -209,15 +209,33 @@ def _probe_llm(engine: InsightEngine, settings: Settings) -> tuple[LlmStatus, Se
 
     key_env = _PROVIDER_KEY_ENV.get(provider)
     configured = bool(os.getenv(key_env)) if key_env else None
-    # No network call for a metered cloud provider; report configuration only.
+    if not configured:
+        return (
+            LlmStatus(
+                provider=provider, model=model, reachable=False,
+                credential_configured=False, detail="no credential configured",
+            ),
+            ServiceHealth(status="down", detail=f"provider={provider}"),
+        )
+
+    # A key being *present* says nothing about whether a question would
+    # succeed. Reporting "ok" on that basis is a false green: it stays green
+    # through a revoked key and through a model id the provider has since
+    # retired, which is the failure this layer is most exposed to. `/models`
+    # is unmetered on all three services, and this endpoint is admin-only and
+    # not on a hot path, so the call is affordable.
+    check = getattr(engine.provider, "health_check", None)
+    if callable(check):
+        reachable, detail = check(_PROBE_TIMEOUT_S)
+    else:
+        reachable, detail = True, "credential configured"
     return (
         LlmStatus(
-            provider=provider, model=model, reachable=bool(configured),
-            credential_configured=configured,
-            detail="credential configured" if configured else "no credential configured",
+            provider=provider, model=model, reachable=reachable,
+            credential_configured=True, detail=detail,
         ),
         ServiceHealth(
-            status="ok" if configured else "degraded", detail=f"provider={provider}"
+            status="ok" if reachable else "degraded", detail=f"provider={provider}"
         ),
     )
 

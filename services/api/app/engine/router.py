@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from ..providers.base import Provider, extract_json
 from ..semantic.catalog import SemanticCatalog
+from .grounding import detect_group_dims, dimension_is_grounded
 from .prompts import route_prompt
 
 _VALID_ROUTES = {"structured", "unstructured", "hybrid", "conversational"}
@@ -21,10 +22,10 @@ def route(question: str, catalog: SemanticCatalog, provider: Provider, today: st
     prompt = route_prompt(question, today, catalog.metric_names(), catalog.dimension_names())
     raw = provider.complete(prompt, json=True, temperature=0.0)
     obj = extract_json(raw)
-    return _normalize(obj, catalog)
+    return _normalize(obj, catalog, question)
 
 
-def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
+def _normalize(obj: dict, catalog: SemanticCatalog, question: str = "") -> dict:
     if obj.get("clarify"):
         return {"route": "clarify", "clarify": str(obj["clarify"]), "metric": None,
                 "requested_metric": None, "metric_unresolved": False,
@@ -67,8 +68,26 @@ def _normalize(obj: dict, catalog: SemanticCatalog) -> dict:
     if r in ("structured", "hybrid") and metric is None and not metric_unresolved:
         metric = "revenue"  # safe governed default
 
-    # Validate group dims against the catalog.
+    # Validate group dims against the catalog, then against the question.
+    #
+    # Membership in the catalog is not enough. A breakdown dimension is a
+    # *choice* the model makes, and a sampling model does not make the same
+    # choice twice: asked "what was revenue last quarter", one call answered
+    # "none" and the next "date", which flips the reply between a single
+    # figure and a twelve-row per-month table for identical input. So the
+    # model's choice is treated as a hypothesis and kept only where the
+    # question actually asks to slice by it; otherwise the deterministic
+    # reading of the question decides, and the same input yields the same
+    # envelope whatever the model sampled.
+    #
+    # This lived in one provider until the cloud providers made it load
+    # bearing for all of them. It belongs here, where every provider passes.
     group_dims = [d for d in obj.get("group_dims", []) if d in catalog.dimensions]
+    if question:
+        grounded = [d for d in group_dims if dimension_is_grounded(question, d)]
+        if not grounded:
+            grounded = [d for d in detect_group_dims(question.lower()) if d in catalog.dimensions]
+        group_dims = grounded
 
     tr = obj.get("time_range")
     if not (isinstance(tr, dict) and tr.get("start") and tr.get("end")):
