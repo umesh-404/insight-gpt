@@ -46,7 +46,10 @@ def build_filter(filters: dict[str, Any] | None) -> models.Filter | None:
 
     Scalars match exactly (``MatchValue``); lists match any element
     (``MatchAny``); ``date_range`` becomes a ``created_at`` range so a recency
-    word in the question is a HARD bound before ranking, not a soft hope. The
+    word in the question is a HARD bound before ranking, not a soft hope -
+    except for uploaded datasets, whose ``created_at`` is an upload timestamp
+    rather than a content date and so is not the thing the question is asking
+    about. The
     filter is attached to BOTH prefetch branches so the candidate budget is
     spent only on in-scope documents (docs/04 §6).
     """
@@ -59,10 +62,29 @@ def build_filter(filters: dict[str, Any] | None) -> models.Filter | None:
         if key == "date_range":
             start, end = value.get("start"), value.get("end")
             if start or end:
+                # Uploaded datasets are exempt, and not as a concession to the
+                # demo clock. For a corpus document `created_at` is when the
+                # ticket was raised or the review written - a content date, so
+                # bounding it by the question's period is exactly right. For an
+                # upload it is when the file was handed over, which says
+                # nothing about the period the file covers. Filtering one
+                # against the other compares two different things, and it did
+                # so with total success: the router attaches a resolved window
+                # to every document search, uploads carry today's date, and so
+                # every uploaded chunk was excluded from every question. The
+                # feature retrieved nothing, silently.
                 conditions.append(
-                    models.FieldCondition(
-                        key="created_at",
-                        range=models.DatetimeRange(gte=start, lte=end),
+                    models.Filter(
+                        should=[
+                            models.FieldCondition(
+                                key="created_at",
+                                range=models.DatetimeRange(gte=start, lte=end),
+                            ),
+                            models.FieldCondition(
+                                key="source_type",
+                                match=models.MatchValue(value="dataset"),
+                            ),
+                        ]
                     )
                 )
         elif isinstance(value, list):
@@ -88,6 +110,27 @@ class Searcher:
         from .rerank import Reranker
 
         self.reranker = Reranker(config)
+        self._collection_ready = False
+
+    def _collection_present(self) -> bool:
+        """Whether the collection exists, cached once it does.
+
+        Before anything is indexed the collection is simply absent, and
+        querying a missing collection raises — which would surface as a 500 on
+        a question the honest answer to which is "there is nothing indexed".
+        So an empty index returns an empty result list. It must never return a
+        placeholder or a fixture result dressed up as a search (contract §6.3).
+        Cached only in the True direction, so a collection created after this
+        process started is picked up on the next query.
+        """
+        if self._collection_ready:
+            return True
+        try:
+            self._collection_ready = self.client.collection_exists(self.collection)
+        except Exception as exc:  # noqa: BLE001 - unreachable Qdrant is the caller's problem
+            print(f"qdrant unreachable: {exc}", file=sys.stderr)
+            raise
+        return self._collection_ready
 
     def search(
         self,
@@ -97,6 +140,14 @@ class Searcher:
         k: int = 5,
         rerank: bool = True,
     ) -> list[SearchHit]:
+        if not self._collection_present():
+            print(
+                f"collection '{self.collection}' does not exist yet: nothing is "
+                f"indexed, returning no results",
+                file=sys.stderr,
+            )
+            return []
+
         # Pre-retrieval rewrite: embed and lexically match on the improved query,
         # but keep the ORIGINAL for reranking (answerhood is judged against what
         # the user actually asked). Deterministic and offline-safe by default.

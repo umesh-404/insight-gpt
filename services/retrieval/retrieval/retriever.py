@@ -23,6 +23,12 @@ from .search import Searcher
 class QdrantRetriever:
     """Hybrid Qdrant retrieval behind the engine's ``Retriever`` protocol."""
 
+    # This retriever reads the live collection, so a document the user uploaded
+    # through the datasets API is genuinely retrievable here. The API's upload
+    # path checks this (via ``app.engine.build.datasets_are_searchable``) before
+    # accepting a file, so it never indexes an upload that nothing will search.
+    searches_uploaded_datasets = True
+
     def __init__(self, config: RetrievalConfig | None = None) -> None:
         self.cfg = config or get_config()
         self.searcher = Searcher(self.cfg)
@@ -49,7 +55,14 @@ class QdrantRetriever:
                     metadata={
                         key: h.payload.get(key)
                         for key in ("region", "category", "product_ref",
-                                    "order_ref", "author_role", "channel", "heading_path")
+                                    "order_ref", "author_role", "channel", "heading_path",
+                                    # Provenance for an uploaded dataset: which
+                                    # dataset this chunk came from, by id and by
+                                    # name. The citation's title is already the
+                                    # dataset's name (see retrieval.datasets), so
+                                    # an answer can never cite an upload without
+                                    # naming it (contract §6.2).
+                                    "dataset_id", "dataset_name")
                         if h.payload.get(key) is not None
                     },
                 )

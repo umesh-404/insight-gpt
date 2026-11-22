@@ -14,10 +14,17 @@
 
 schema_version: 1
 
-# Collection name in Qdrant. A SINGLE `documents` collection holds tickets,
-# reviews, reports and emails; the document type is the `source_type` payload
-# field, not a separate collection (see docs/04-retrieval-rag.md §7).
-collection: documents
+# Collection name in Qdrant. A SINGLE collection holds tickets, reviews,
+# reports, emails and uploaded datasets; the document type is the `source_type`
+# payload field, not a separate collection (see docs/04-retrieval-rag.md §7).
+#
+# The `insightgpt_` prefix is load-bearing, not decoration. Qdrant is commonly
+# run as one shared instance on a developer box, so this deployment must never
+# be able to address — let alone delete — a collection that belongs to another
+# project. `retrieval.store.assert_insightgpt_collection` refuses any delete
+# against a collection whose name lacks this prefix. Override with
+# QDRANT_COLLECTION, keeping the prefix.
+collection: insightgpt_documents
 
 embedding:
   # Local Ollama embedding model. CPU-viable and private — no data leaves the

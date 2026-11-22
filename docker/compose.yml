@@ -23,6 +23,29 @@
 #
 # Every value is interpolated from the root .env with a safe in-file default, so
 # the stack also comes up on a bare checkout with no .env present.
+#
+# WHICH ENDPOINTS BELONG TO WHICH TOPOLOGY
+# ----------------------------------------
+# Inside this network the stores answer to their SERVICE NAMES:
+#
+#   qdrant   ->  http://qdrant:6333
+#   ollama   ->  http://ollama:11434
+#   postgres ->  postgres:5432       (and WAREHOUSE=postgres)
+#
+# Those names are correct HERE and wrong anywhere else: a host-run API resolves
+# none of them, and the root `.env` is therefore written for the host run
+# (127.0.0.1 and WAREHOUSE=duckdb — see .env.example). To let one .env serve
+# both, the three variables that differ by topology are NOT interpolated from
+# the host-run names below. They read `STACK_`-prefixed overrides instead and
+# otherwise keep the service-name default:
+#
+#   STACK_QDRANT_URL    -> QDRANT_URL   (default http://qdrant:6333)
+#   STACK_OLLAMA_HOST   -> OLLAMA_HOST  (default http://ollama:11434)
+#   STACK_WAREHOUSE     -> WAREHOUSE    (default postgres)
+#
+# So: set QDRANT_URL in .env to move the HOST run; set STACK_QDRANT_URL to move
+# the CONTAINERISED run (at a managed Qdrant, say). Every other variable means
+# the same thing in both and is interpolated normally. docs/09-deployment.md §2.0.
 
 name: insightgpt
 
@@ -99,7 +122,8 @@ services:
       APP_ENV: ${APP_ENV:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      # Service name, not the host-run loopback in .env — see the header.
+      OLLAMA_HOST: ${STACK_OLLAMA_HOST:-http://ollama:11434}
       # Cloud keys for the OpenAI-compatible providers. Blank unless
       # LLM_PROVIDER names one; without the matching key the API now fails at
       # STARTUP naming the variable, rather than at a user's first question.
@@ -110,13 +134,22 @@ services:
       LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-2048}
       LLM_TIMEOUT_S: ${LLM_TIMEOUT_S:-60}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
-      WAREHOUSE: ${WAREHOUSE:-postgres}
+      # This stack always has a Postgres sibling, so it does not inherit the
+      # host run's duckdb fixture setting — see the header.
+      WAREHOUSE: ${STACK_WAREHOUSE:-postgres}
       # The API queries as the SELECT-only role (created in initdb), so a
       # failure of the SQL guardrails still cannot mutate the warehouse.
       # The worker below keeps the owner DSN because dbt must create tables.
       POSTGRES_DSN: ${APP_POSTGRES_DSN:-postgresql://insight_app:insight@postgres:5432/insight}
       RETRIEVER: ${RETRIEVER:-qdrant}
-      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      # Service name, not the host-run loopback in .env — see the header.
+      QDRANT_URL: ${STACK_QDRANT_URL:-http://qdrant:6333}
+      # The ONE collection InsightGPT owns. Shared between topologies on
+      # purpose: the name is the same wherever the instance lives, and the
+      # indexer, the API and the dataset router must all read it from here
+      # rather than repeat a literal. Nothing in this repo drops, resets or
+      # prunes a collection whose name does not start with `insightgpt_`.
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-insightgpt_documents}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       # Embedding backend. The compose stack runs an Ollama sibling, so the
       # default needs nothing. EMBED_PROVIDER=openai switches to a cloud
@@ -176,8 +209,9 @@ services:
     environment:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
-      WAREHOUSE: ${WAREHOUSE:-postgres}
+      # Service names, not the host-run values in .env — see the header.
+      OLLAMA_HOST: ${STACK_OLLAMA_HOST:-http://ollama:11434}
+      WAREHOUSE: ${STACK_WAREHOUSE:-postgres}
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://insight:insight@postgres:5432/insight}
       # dbt / seed.py read the discrete POSTGRES_* vars (profiles.yml, seed guard).
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
@@ -186,7 +220,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-insight}
       POSTGRES_DB: ${POSTGRES_DB:-insight}
       RETRIEVER: ${RETRIEVER:-qdrant}
-      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_URL: ${STACK_QDRANT_URL:-http://qdrant:6333}
+      # Same single collection as the api service; never a literal in two places.
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-insightgpt_documents}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
       # Embedding backend. The compose stack runs an Ollama sibling, so the
       # default needs nothing. EMBED_PROVIDER=openai switches to a cloud

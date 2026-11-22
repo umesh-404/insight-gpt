@@ -1,6 +1,7 @@
 # InsightGPT — one-command developer workflow.
 #
 #   make setup       # FIRST RUN: set up everything from a fresh clone
+#   make preflight   # before a demo: is the configured local stack ready?
 #   make doctor      # diagnose an existing install (changes nothing)
 #   make repair      # clean rebuild + recreate, then re-verify
 #   make up          # build + start the whole stack (docker compose up --build)
@@ -22,7 +23,7 @@
 COMPOSE := docker compose --env-file .env -f docker/compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help setup doctor repair env up down restart bootstrap logs ps seed reindex test lint eval ci-local clean
+.PHONY: help setup preflight doctor repair env up down restart bootstrap logs ps seed reindex test lint eval ci-local clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -30,6 +31,9 @@ help: ## Show this help
 
 setup: ## FIRST RUN: check prerequisites, configure, build, start, seed and verify
 	python scripts/setup.py
+
+preflight: ## Check the configured local stack is ready to demo (read-only)
+	python scripts/setup.py --preflight
 
 doctor: ## Diagnose the install and name what is broken (changes nothing)
 	python scripts/setup.py --doctor

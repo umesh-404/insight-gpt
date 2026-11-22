@@ -19,13 +19,21 @@ Steps
 3. Build the warehouse: generate -> load raw + publish the redacted document
    corpus -> dbt seed/run/test (delegates to scripts/seed.py, run with
    --require-postgres because step 1 already proved the database is up).
-4. Create the Qdrant `documents` collection (skipped if it exists).
+4. Create the Qdrant collection named by ``QDRANT_COLLECTION`` (skipped if it
+   exists).
 5. Index the corpus step 3 published — changed-only, so a re-run re-embeds
    nothing when nothing changed.
+
+A Qdrant instance is frequently **shared** with other projects, so this script
+refuses to touch a collection it does not own: ``QDRANT_COLLECTION`` must start
+with ``insightgpt_``, enforced below rather than trusted. It also never deletes
+anything — steps 4 and 5 create and upsert, and no code path here issues a
+collection drop, reset or prune.
 
 Env (all have compose defaults):
     POSTGRES_DSN / POSTGRES_HOST ...  Postgres connection
     QDRANT_URL                        e.g. http://qdrant:6333
+    QDRANT_COLLECTION                 insightgpt_documents
     OLLAMA_HOST                       e.g. http://ollama:11434
     LLM_PROVIDER, LLM_MODEL           chat model (pulled only for ollama)
     EMBED_MODEL, RERANK_MODEL         embedding + reranker models
@@ -51,7 +59,14 @@ TOTAL_STEPS = 5
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333").rstrip("/")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434").rstrip("/")
-COLLECTION = os.environ.get("QDRANT_COLLECTION", "documents")
+COLLECTION = os.environ.get("QDRANT_COLLECTION", "insightgpt_documents")
+
+# Every collection this project may create, write to or read belongs to this
+# namespace. The prefix is not decoration: the same Qdrant often hosts other
+# projects' collections, and indexing into one of those would overwrite their
+# points with ours. Checked at import, so a typo in .env stops the run before
+# a single vector is written.
+COLLECTION_PREFIX = "insightgpt_"
 
 
 def _step(n: int, title: str) -> None:
@@ -61,6 +76,24 @@ def _step(n: int, title: str) -> None:
 def _fail(msg: str) -> None:
     print(f"\nBOOTSTRAP FAILED: {msg}", file=sys.stderr, flush=True)
     raise SystemExit(1)
+
+
+def _assert_owned_collection() -> None:
+    """Refuse to operate on a collection outside our namespace.
+
+    A shared Qdrant is the normal case, not an edge case. ``QDRANT_COLLECTION``
+    pointing at someone else's collection would not error anywhere downstream —
+    it would quietly upsert our points over their data — so the name is checked
+    here, before step 4 creates anything and before step 5 writes anything.
+    """
+    if not COLLECTION.startswith(COLLECTION_PREFIX):
+        _fail(
+            f"QDRANT_COLLECTION={COLLECTION!r} is outside the {COLLECTION_PREFIX!r} "
+            "namespace this project owns.\n"
+            "Indexing into a collection another project created would overwrite "
+            "its points, so this is refused rather than attempted.\n"
+            f"Set QDRANT_COLLECTION={COLLECTION_PREFIX}documents in .env."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -274,6 +307,7 @@ def _collection_count() -> int | None:
 
 def step_collection() -> None:
     _step(4, f"Create Qdrant '{COLLECTION}' collection")
+    _assert_owned_collection()
     count = _collection_count()
     if count is None:
         _fail(f"cannot reach Qdrant at {QDRANT_URL} to check for '{COLLECTION}'.")
@@ -308,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     print("InsightGPT bootstrap — idempotent, safe to re-run.")
+    _assert_owned_collection()
     step_wait()
     step_models(args.skip_models)
     if not args.skip_warehouse:

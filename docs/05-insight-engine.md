@@ -410,7 +410,7 @@ a feature.
 |---|---|---|---|
 | NL → data | **Semantic-layer-grounded selection** | Free-form text-to-SQL | Grounding lifts accuracy ~70–85% → ~90%+ and removes hallucinated joins/aggregations |
 | SQL generation | **Deterministic builder from validated selection** | LLM emits raw SQL string | Correct joins/grain come from governed definitions, not model guesswork |
-| Provider | **Pluggable (Ollama default, cloud optional)** | Single hardcoded vendor | Runs anywhere; upgrade with a key; no lock-in; keeps the repo vendor-neutral |
+| Provider | **Pluggable (Ollama is the code default; the shipped `.env` configures Gemini)** | Single hardcoded vendor | Runs anywhere; upgrade with a key; no lock-in; keeps the repo vendor-neutral |
 | Numbers in answers | **Passed through from SQL verbatim** | LLM restates/derives numbers | An LLM must never be the source of a figure; it narrates, it doesn't compute |
 | Retrieved text | **Untrusted data, delimited** | Concatenate into the prompt as-is | Prevents prompt injection from documents influencing behavior |
 | Ambiguity | **Clarify** | Best-effort guess | A confident wrong answer is worse than a question |

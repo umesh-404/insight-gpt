@@ -37,6 +37,22 @@ def select_retriever(settings: Settings) -> str:
     return "fixture"
 
 
+def datasets_are_searchable(settings: Settings | None = None) -> bool:
+    """Whether an uploaded dataset can actually be RETRIEVED by this deployment.
+
+    Uploading indexes into Qdrant, but only the Qdrant retriever reads Qdrant.
+    Under the default ``RETRIEVER=fixture`` an upload would be indexed and then
+    never searched, while ``/ask`` answered the user's question about *their*
+    file out of the retail sample corpus — an answer that looks right and is
+    about someone else's data. So the upload path asks this first and declines
+    honestly rather than accepting a file it cannot use.
+
+    A pure decision from settings, like ``select_retriever``, so a caller can
+    check it without constructing a client or reaching the network.
+    """
+    return select_retriever(settings or get_settings()) == "qdrant"
+
+
 def _build_warehouse(kind: str, settings: Settings, catalog: SemanticCatalog) -> Warehouse:
     if kind == "postgres":
         return PostgresWarehouse(
@@ -58,11 +74,22 @@ def _build_qdrant_retriever() -> Retriever:
 
     The ``retrieval`` package is an optional extra (absent from the offline
     default image and its tests), so it is imported only on this branch. Its
-    config reads ``QDRANT_URL`` / ``OLLAMA_HOST`` / ``EMBED_MODEL`` from the
-    environment — the single source of truth for those endpoints.
+    config reads ``QDRANT_URL`` / ``QDRANT_COLLECTION`` / ``OLLAMA_HOST`` /
+    ``EMBED_MODEL`` from the environment — the single source of truth for those
+    endpoints, shared with the indexer so the two cannot point at different
+    collections.
     """
-    from retrieval.config import load_config
-    from retrieval.retriever import QdrantRetriever
+    try:
+        from retrieval.config import load_config
+        from retrieval.retriever import QdrantRetriever
+    except ImportError as exc:  # pragma: no cover - deployment error, not logic
+        # Without this the symptom is a bare ModuleNotFoundError from inside a
+        # request, which reads like a bug rather than a missing extra.
+        raise RuntimeError(
+            "RETRIEVER=qdrant needs the optional retrieval backend. "
+            "Install it with `uv sync --extra real` (it is already in the "
+            "container image), or set RETRIEVER=fixture to run offline."
+        ) from exc
 
     return QdrantRetriever(config=load_config())
 

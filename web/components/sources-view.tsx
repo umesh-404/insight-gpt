@@ -7,14 +7,15 @@ import {
   EyeOff,
   FileSpreadsheet,
   FileText,
+  FileUp,
   Loader2,
-  Lock,
   Plug,
   Plus,
   Server,
   Trash2,
   X,
 } from 'lucide-react';
+import { DatasetPanel } from '@/components/dataset-panel';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusBadge } from '@/components/status-badge';
 import { describeError, EmptyState, ErrorState } from '@/components/states';
@@ -32,6 +33,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
 import {
   useCreateSource,
@@ -157,11 +159,27 @@ function shortenLocation(location: string): string {
 }
 
 /**
- * Every `/sources` endpoint — list included — requires the admin role. The
- * fetching therefore lives in a child that is mounted only once the signed-in
- * role is known to be admin: calling `useSources()` at the top of the page meant
- * an analyst or viewer fired an admin-only request on load and took a 403 behind
- * the "Admins only" panel they were already being shown.
+ * `/sources` answers one question — where does InsightGPT's data come from? —
+ * about two different objects:
+ *
+ *  - **Datasets**: files a user hands to the browser, which are parsed,
+ *    redacted, chunked and embedded into the local index. Reading needs viewer,
+ *    uploading needs analyst.
+ *  - **Connectors**: server-side paths and connection strings an administrator
+ *    registers so the API process can read them. Every endpoint needs admin.
+ *
+ * Datasets lead, and connectors are demoted to a second tab, for three
+ * reasons. They are the only half of this page most accounts can use at all;
+ * uploading is a repeated everyday action where registering a DSN is one-time
+ * setup; and an "Admins only" panel sitting directly under the drop target
+ * would be the loudest thing on the screen for the people least able to act on
+ * it. They stay one page rather than two nav entries because they are two
+ * answers to the same question — and a tab, rather than a second section,
+ * because a file you upload and a path the server reads must never look like
+ * rows of one list.
+ *
+ * For a non-admin the tab strip is not rendered at all. A disabled tab reading
+ * "Connectors" would advertise a door this account cannot open.
  */
 export function SourcesView() {
   const { hasRole, loading } = useAuth();
@@ -170,27 +188,37 @@ export function SourcesView() {
     <div className="min-w-0 max-w-full space-y-6 overflow-hidden p-4 sm:p-6">
       <PageHeader
         title="Data sources"
-        description="Every connector this deployment reads from. Secrets are write-only — no read ever returns them."
+        description="Files you upload for retrieval, and the connectors this deployment reads from."
       />
 
       {loading ? (
-        <div
-          className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_340px]"
-          aria-busy="true"
-        >
+        // Deciding the tab strip before auth resolves flashed a one-tab layout
+        // at an administrator for a frame, then reflowed to two.
+        <div className="space-y-3" aria-busy="true">
+          <Skeleton className="h-10 w-full max-w-sm" />
           <Skeleton className="h-64 w-full" />
-          <Skeleton className="h-80 w-full" />
         </div>
       ) : hasRole('admin') ? (
-        <SourcesAdmin />
+        <Tabs defaultValue="datasets">
+          <TabsList aria-label="Data sources">
+            <TabsTrigger value="datasets">
+              <FileUp className="size-4" aria-hidden />
+              Datasets
+            </TabsTrigger>
+            <TabsTrigger value="connectors">
+              <Plug className="size-4" aria-hidden />
+              Connectors
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="datasets">
+            <DatasetPanel />
+          </TabsContent>
+          <TabsContent value="connectors">
+            <SourcesAdmin />
+          </TabsContent>
+        </Tabs>
       ) : (
-        // Deciding this before auth resolves flashed "Admins only" at an
-        // administrator for one frame.
-        <EmptyState
-          title="Data sources need the admin role"
-          description="Registering, testing and removing connectors is restricted to administrators. Ask an administrator if you need a source added."
-          icon={<Lock className="size-5" aria-hidden />}
-        />
+        <DatasetPanel />
       )}
     </div>
   );
@@ -198,9 +226,17 @@ export function SourcesView() {
 
 function SourcesAdmin() {
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
-      <SourceTable />
-      <RegisterPanel />
+    <div className="space-y-6">
+      <p className="max-w-[80ch] text-sm text-muted-foreground">
+        Connectors point the API process at data that already lives on a server —
+        a path it can read or a database it can connect to. They are not uploads:
+        nothing here sends a file from your machine. Secrets are write-only, so no
+        read ever returns them.
+      </p>
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <SourceTable />
+        <RegisterPanel />
+      </div>
     </div>
   );
 }

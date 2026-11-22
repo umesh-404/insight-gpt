@@ -82,6 +82,8 @@ Three roles, additive in capability (`viewer` ⊂ `analyst` ⊂ `admin`).
 | Run ad-hoc governed metric queries (`/metrics/query`) | — | ✅ | ✅ |
 | Generate & export executive reports | — | ✅ | ✅ |
 | View pipelines & run history | — | ✅ | ✅ |
+| List / read uploaded datasets | ✅ | ✅ | ✅ |
+| Upload / delete a dataset (`/datasets`) | — | ✅ | ✅ |
 | Trigger a pipeline run | — | — | ✅ |
 | Create / test / delete data sources | — | — | ✅ |
 | View `/status` service internals | — | — | ✅ |
@@ -313,6 +315,69 @@ verified, so `ok` is never ambiguous. Every message is scrubbed of the source's
 secrets before it leaves the process. `DELETE` is soft-delete (marks inactive,
 retains run history for audit).
 
+### 3.3.1 Uploaded datasets (viewer reads, analyst uploads)
+
+A **registered source** (§3.3) is a connector the deployment is configured to
+pull from. A **dataset** is a file a user just uploaded in the browser. They are
+separate surfaces because they have different lifecycles, different permissions
+and different failure modes.
+
+```
+POST   /datasets             multipart: files[] (1..10)   -> 202 DatasetJob
+GET    /datasets                                          -> list[Dataset]
+GET    /datasets/{id}                                     -> Dataset
+GET    /datasets/{id}/status                              -> DatasetJob   (poll)
+DELETE /datasets/{id}                                     -> 200 {"deleted": true}
+```
+
+```python
+class Dataset(BaseModel):
+    id: str                     # "ds_<hex12>"
+    name: str                   # original filename, or a user-supplied title
+    kind: Literal["document", "tabular"]
+    status: Literal["pending", "indexing", "ready", "failed"]
+    bytes: int
+    chunks: int                 # points actually written to Qdrant
+    redactions: int             # secrets/PII removed at ingestion
+    created_at: datetime
+    error: str | None = None
+
+class DatasetJob(BaseModel):
+    dataset_id: str
+    status: Literal["pending", "indexing", "ready", "failed"]
+    progress: float             # 0.0 .. 1.0
+    message: str | None = None
+```
+
+**Upload is `202`, not `200`.** Parsing, redacting, chunking and embedding a
+25 MB file is not a request-response operation, so the upload returns a job and
+the client polls `/datasets/{id}/status`. The alternative — holding the request
+open — produces a gateway timeout that is indistinguishable from a crash.
+
+**Roles.** Upload and delete require **analyst**; list and read require
+**viewer**. The gate is on the fetch, not the render: a viewer that cannot
+upload is told so, and never shown an upload control that would 403.
+
+**Rejections are specific and final.** Accepted extensions are
+`.csv .tsv .xlsx .pdf .txt .md .json .docx`; anything else is a `400` naming
+what is accepted. A single file over 25 MB, or a request over 50 MB, is a `413`.
+Neither is retryable, so neither offers a retry — a "Try again" on a permanent
+error is a lie about what will happen.
+
+**Counts are measurements.** `chunks` is the number of points actually written
+to Qdrant and `redactions` the number of secrets/PII removed before embedding —
+both read back from the work done, not estimated. A dataset whose indexing died
+is `status="failed"` with the reason in `error`; it is never left at
+`"indexing"`, which is indistinguishable from slow.
+
+**Deletion removes the vectors, by filter.** `DELETE /datasets/{id}` issues a
+filtered delete on the `dataset_id` payload field, never a collection drop —
+see [`04-retrieval-rag.md`](04-retrieval-rag.md) §7.1 for why that distinction
+is load-bearing on a shared Qdrant.
+
+Ingestion semantics, limits and the honesty constraints on answering from an
+uploaded file are in [`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1.
+
 ### 3.4 Pipelines (analyst reads, admin triggers)
 
 Thin HTTP surface over the APScheduler worker. The worker owns execution and
@@ -432,6 +497,7 @@ graph TD
         FBR["feedback.py"]
         METR["metrics.py"]
         SRCR["sources.py"]
+        DSR["datasets.py — uploads"]
         PIPER["pipelines.py"]
         REPR["reports.py"]
     end
@@ -452,6 +518,7 @@ graph TD
     METR --> ENGINE
     CONVR --> DB
     SRCR --> DB
+    DSR --> ENGINE
     PIPER --> WORKER
     REPR --> ENGINE
     V1 --> AUTHDEP

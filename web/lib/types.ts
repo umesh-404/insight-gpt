@@ -532,6 +532,109 @@ export function sourceNeedsPath(kind: SourceKind): boolean {
 }
 
 /* ----------------------------------------------------------------------------
+ * Uploaded datasets
+ *
+ * A *dataset* is a file a user handed to the browser, which the API parses,
+ * redacts, chunks and embeds into the local vector index. It is deliberately a
+ * different object from a `Source` above: a source is a server-side path or
+ * DSN an administrator registers, a dataset is a file an analyst uploads. They
+ * share a page, not a table.
+ * ------------------------------------------------------------------------- */
+
+export type DatasetKind = 'document' | 'tabular';
+
+export type DatasetStatus = 'pending' | 'indexing' | 'ready' | 'failed';
+
+export interface Dataset {
+  id: string;
+  /** Original filename, or a title supplied at upload. */
+  name: string;
+  kind: DatasetKind;
+  status: DatasetStatus;
+  bytes: number;
+  /** Points actually written to the vector store. */
+  chunks: number;
+  /** Secrets and PII removed before anything was embedded. */
+  redactions: number;
+  created_at: string;
+  error?: string | null;
+}
+
+/** Progress of one indexing run, polled from `/datasets/{id}/status`. */
+export interface DatasetJob {
+  dataset_id: string;
+  status: DatasetStatus;
+  /** 0..1. */
+  progress: number;
+  message?: string | null;
+}
+
+/**
+ * Upload limits, mirrored from the API contract.
+ *
+ * These live here rather than in the upload component because the *copy* has
+ * to state them before a file is picked, and the *validation* has to enforce
+ * them after — two call sites that must never drift apart.
+ */
+export const DATASET_EXTENSIONS = [
+  '.csv',
+  '.tsv',
+  '.xlsx',
+  '.pdf',
+  '.txt',
+  '.md',
+  '.json',
+  '.docx',
+] as const;
+
+export type DatasetExtension = (typeof DATASET_EXTENSIONS)[number];
+
+/** Value for an `<input type="file" accept>` attribute. */
+export const DATASET_ACCEPT_ATTR = DATASET_EXTENSIONS.join(',');
+
+export const DATASET_MAX_FILES = 10;
+export const DATASET_MAX_FILE_BYTES = 25 * 1024 * 1024;
+export const DATASET_MAX_BATCH_BYTES = 50 * 1024 * 1024;
+
+export function isTerminalDatasetStatus(status: DatasetStatus): boolean {
+  return status === 'ready' || status === 'failed';
+}
+
+/** Lower-cased extension including the dot, or `null` if the name has none. */
+export function datasetExtension(filename: string): string | null {
+  const dot = filename.lastIndexOf('.');
+  if (dot <= 0 || dot === filename.length - 1) return null;
+  return filename.slice(dot).toLowerCase();
+}
+
+export function isAcceptedDatasetFile(filename: string): boolean {
+  const ext = datasetExtension(filename);
+  return ext !== null && (DATASET_EXTENSIONS as readonly string[]).includes(ext);
+}
+
+/**
+ * File size in the units a person uses for files.
+ *
+ * Binary units (1 KB = 1024 B) because that is what the 25 MB cap is measured
+ * in server-side; a decimal formatter would call a 25.1 MiB file "26.3 MB" and
+ * make the rejection message look wrong.
+ */
+export function formatDatasetBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // One decimal below 10 (3.4 MB), none above it (24 MB): the second digit is
+  // noise once the first one carries the magnitude.
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/* ----------------------------------------------------------------------------
  * Reports
  * ------------------------------------------------------------------------- */
 

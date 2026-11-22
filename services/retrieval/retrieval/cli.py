@@ -1,6 +1,6 @@
 """Command-line entry point for the retrieval service.
 
-    insight-retrieval setup                 # create the `documents` collection
+    insight-retrieval setup                 # create the configured collection
     insight-retrieval index                 # index the ingestion corpus (changed only)
     insight-retrieval index --full          # re-embed everything
     insight-retrieval index --samples       # index the built-in demo documents
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="path to retrieval.yaml (default: bundled)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("setup", help="create the documents collection").set_defaults(
+    sub.add_parser("setup", help="create the configured collection").set_defaults(
         func=_cmd_setup
     )
     p_index = sub.add_parser(

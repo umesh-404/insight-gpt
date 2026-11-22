@@ -46,6 +46,13 @@ import {
   type TokenPair,
   type User,
 } from './types';
+import {
+  isTerminalDatasetStatus,
+  type Dataset,
+  type DatasetJob,
+  type DatasetKind,
+  type DatasetStatus,
+} from './types';
 import * as wire from './wire';
 import * as mock from './mock';
 
@@ -1284,3 +1291,296 @@ export function assembleEnvelope(events: AskStreamEvent[]): AnswerEnvelope {
 }
 
 export type { Cell };
+
+/* -------------------------------------------------------------------------- */
+/* Uploaded datasets                                                          */
+/*                                                                            */
+/* Appended as its own client rather than folded into `api` above so that      */
+/* nothing existing had to be touched. `POST /datasets` is the only endpoint   */
+/* in this app that needs byte-level upload progress, which `fetch` cannot     */
+/* report, so it is the only one built on XMLHttpRequest.                      */
+/* -------------------------------------------------------------------------- */
+
+const DATASET_STATUSES: DatasetStatus[] = ['pending', 'indexing', 'ready', 'failed'];
+
+function toDatasetStatus(value: unknown): DatasetStatus {
+  return DATASET_STATUSES.includes(value as DatasetStatus)
+    ? (value as DatasetStatus)
+    : // An unknown status must not render as "ready". Treating it as still
+      // working is the only safe guess: the poller keeps asking and a real
+      // terminal state replaces it.
+      'indexing';
+}
+
+function toCount(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+}
+
+function toDataset(raw: unknown): Dataset {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const kind: DatasetKind = r.kind === 'tabular' ? 'tabular' : 'document';
+  return {
+    id: String(r.id ?? ''),
+    name: String(r.name ?? 'Untitled file'),
+    kind,
+    status: toDatasetStatus(r.status),
+    bytes: toCount(r.bytes),
+    chunks: toCount(r.chunks),
+    redactions: toCount(r.redactions),
+    created_at: typeof r.created_at === 'string' ? r.created_at : '',
+    error: typeof r.error === 'string' && r.error ? r.error : null,
+  };
+}
+
+function toDatasetJob(raw: unknown, fallbackId = ''): DatasetJob {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const progress = Number(r.progress);
+  return {
+    dataset_id: String(r.dataset_id ?? fallbackId),
+    status: toDatasetStatus(r.status),
+    // Clamp rather than trust: a progress bar that overruns its track is a
+    // worse signal than one that sits at 100% a moment early.
+    progress: Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : 0,
+    message: typeof r.message === 'string' && r.message ? r.message : null,
+  };
+}
+
+/* ---- Mock datasets ------------------------------------------------------- */
+
+/**
+ * In-memory datasets for `NEXT_PUBLIC_USE_MOCK`, including a simulated
+ * indexing run. Without this the whole upload flow is unreachable offline,
+ * which is exactly the state the UI most needs to be exercised in.
+ */
+const mockDatasets: Dataset[] = [];
+const mockJobs = new Map<string, { startedAt: number; chunks: number; redactions: number }>();
+const MOCK_INDEX_MS = 6000;
+
+function mockJobFor(id: string): DatasetJob {
+  const job = mockJobs.get(id);
+  const dataset = mockDatasets.find((d) => d.id === id);
+  if (!job || !dataset) {
+    return { dataset_id: id, status: 'failed', progress: 0, message: 'Unknown dataset.' };
+  }
+  const ratio = Math.min(1, (Date.now() - job.startedAt) / MOCK_INDEX_MS);
+  if (ratio >= 1) {
+    dataset.status = 'ready';
+    dataset.chunks = job.chunks;
+    dataset.redactions = job.redactions;
+    return {
+      dataset_id: id,
+      status: 'ready',
+      progress: 1,
+      message: `Indexed ${job.chunks} chunks.`,
+    };
+  }
+  dataset.status = 'indexing';
+  return {
+    dataset_id: id,
+    status: 'indexing',
+    progress: ratio,
+    message:
+      ratio < 0.3 ? 'Parsing' : ratio < 0.55 ? 'Redacting secrets' : 'Embedding chunks',
+  };
+}
+
+function addMockDataset(file: File): DatasetJob {
+  const id = `ds_${Math.random().toString(16).slice(2, 14)}`;
+  const tabular = /\.(csv|tsv|xlsx)$/i.test(file.name);
+  mockDatasets.unshift({
+    id,
+    name: file.name,
+    kind: tabular ? 'tabular' : 'document',
+    status: 'pending',
+    bytes: file.size,
+    chunks: 0,
+    redactions: 0,
+    created_at: new Date().toISOString(),
+    error: null,
+  });
+  mockJobs.set(id, {
+    startedAt: Date.now(),
+    // Roughly one chunk per 1200 bytes, which is the order of magnitude the
+    // real chunker produces — close enough that the number never looks fake.
+    chunks: Math.max(1, Math.round(file.size / 1200)),
+    redactions: file.size % 17,
+  });
+  return { dataset_id: id, status: 'pending', progress: 0, message: 'Queued.' };
+}
+
+/* ---- Upload -------------------------------------------------------------- */
+
+function datasetUploadError(status: number, text: string): ApiError {
+  try {
+    const json = JSON.parse(text) as { error?: ApiErrorBody; detail?: unknown };
+    if (json.error?.message) return new ApiError(status, json.error);
+    if (typeof json.detail === 'string') {
+      return new ApiError(status, { code: codeForStatus(status), message: json.detail });
+    }
+  } catch {
+    /* fall through */
+  }
+  return new ApiError(status, {
+    code: codeForStatus(status),
+    message:
+      status === 413
+        ? 'That upload is larger than the server accepts.'
+        : `Upload failed (${status}).`,
+  });
+}
+
+/**
+ * Upload one file and return the job that will index it.
+ *
+ * One request per file, deliberately. The endpoint accepts up to ten files at
+ * once but answers with a single job, which cannot describe ten independent
+ * outcomes: one bad PDF in a batch of ten would have to fail — or silently not
+ * fail — the whole thing. One file per request gives every file its own
+ * progress, its own status and its own error.
+ *
+ * `Content-Type` is left unset on purpose: the browser must add the multipart
+ * boundary, and naming the type by hand produces a body the server cannot parse.
+ */
+function postDataset(
+  file: File,
+  onUploadProgress?: (fraction: number) => void,
+  signal?: AbortSignal,
+  allowRetry = true,
+): Promise<DatasetJob> {
+  return new Promise<DatasetJob>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Upload cancelled', 'AbortError'));
+      return;
+    }
+
+    const body = new FormData();
+    body.append('files', file, file.name);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_URL}/datasets`);
+    xhr.responseType = 'text';
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json');
+    const token = getAccessToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+
+    const onAbort = () => xhr.abort();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+
+    if (onUploadProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onUploadProgress(Math.min(1, event.loaded / event.total));
+        }
+      };
+    }
+
+    xhr.onerror = () => {
+      cleanup();
+      reject(
+        new ApiError(0, {
+          code: 'network_error',
+          message: 'The upload could not reach the API. Check that it is running.',
+        }),
+      );
+    };
+    xhr.onabort = () => {
+      cleanup();
+      reject(new DOMException('Upload cancelled', 'AbortError'));
+    };
+    xhr.onload = () => {
+      cleanup();
+      const text = typeof xhr.response === 'string' ? xhr.response : '';
+      if (xhr.status === 401 && allowRetry) {
+        // Mirror `rawRequest`'s transparent refresh: a long upload can outlive
+        // the access token it started with.
+        void refreshAccessToken().then((ok) => {
+          if (!ok) {
+            reject(datasetUploadError(401, text));
+            return;
+          }
+          postDataset(file, onUploadProgress, signal, false).then(resolve, reject);
+        });
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(datasetUploadError(xhr.status, text));
+        return;
+      }
+      try {
+        resolve(toDatasetJob(text ? JSON.parse(text) : {}));
+      } catch {
+        reject(
+          new ApiError(xhr.status, {
+            code: 'internal_error',
+            message: 'The API accepted the file but returned a response we could not read.',
+          }),
+        );
+      }
+    };
+
+    xhr.send(body);
+  });
+}
+
+export const datasetsApi = {
+  async list(): Promise<Dataset[]> {
+    if (USE_MOCK) {
+      for (const id of mockJobs.keys()) mockJobFor(id);
+      return delay(mockDatasets.map((d) => ({ ...d })));
+    }
+    const raw = await request<unknown>('/datasets');
+    const items = Array.isArray(raw)
+      ? raw
+      : Array.isArray((raw as { items?: unknown[] } | null)?.items)
+        ? (raw as { items: unknown[] }).items
+        : [];
+    return items.map(toDataset).filter((d) => d.id);
+  },
+
+  async get(id: string): Promise<Dataset> {
+    if (USE_MOCK) {
+      mockJobFor(id);
+      const found = mockDatasets.find((d) => d.id === id);
+      if (!found) throw new ApiError(404, { code: 'not_found', message: 'No such dataset.' });
+      return delay({ ...found });
+    }
+    return toDataset(await request<unknown>(`/datasets/${encodeURIComponent(id)}`));
+  },
+
+  async status(id: string): Promise<DatasetJob> {
+    if (USE_MOCK) return delay(mockJobFor(id), 120);
+    return toDatasetJob(
+      await request<unknown>(`/datasets/${encodeURIComponent(id)}/status`),
+      id,
+    );
+  },
+
+  async upload(
+    file: File,
+    onUploadProgress?: (fraction: number) => void,
+    signal?: AbortSignal,
+  ): Promise<DatasetJob> {
+    if (USE_MOCK) {
+      onUploadProgress?.(1);
+      return delay(addMockDataset(file), 600);
+    }
+    return postDataset(file, onUploadProgress, signal);
+  },
+
+  async remove(id: string): Promise<void> {
+    if (USE_MOCK) {
+      const at = mockDatasets.findIndex((d) => d.id === id);
+      if (at >= 0) mockDatasets.splice(at, 1);
+      mockJobs.delete(id);
+      await delay(null, 300);
+      return;
+    }
+    await request<void>(`/datasets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+
+  /** Re-exported so callers do not import the predicate from two places. */
+  isTerminal: isTerminalDatasetStatus,
+};

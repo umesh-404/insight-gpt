@@ -316,6 +316,76 @@ the corpus — so a retracted ticket stops being retrievable instead of lingerin
 forever. `insight-retrieval index --full` ignores the state and re-embeds
 everything.
 
+### 7.1 User-uploaded datasets (the second ingestion path)
+
+Everything above describes the **scheduled** path: connectors pull from
+configured sources, publish a corpus file, and a job indexes it. There is a
+second, **interactive** path — a user drags a file into the browser and asks
+questions about it — and the two differ in triggering, not in guarantees.
+
+**The flow.**
+
+```mermaid
+graph LR
+    UP["POST /datasets<br/>multipart, 1..10 files"] --> VAL["validate<br/>type + size"]
+    VAL --> PARSE["parse to text<br/>csv/tsv/xlsx/pdf/txt/md/json/docx"]
+    PARSE --> RED["redact<br/>secrets + PII"]
+    RED --> CHUNK["chunk"]
+    CHUNK --> EMB["embed locally<br/>Ollama nomic-embed-text"]
+    EMB --> UPS["upsert into insightgpt_documents<br/>every point tagged dataset_id"]
+    UPS --> READY["status: ready<br/>chunks + redactions counted"]
+```
+
+Upload returns `202` with a job id immediately; the client polls
+`GET /datasets/{id}/status` while the work runs in the background, because
+embedding a 25 MB PDF is not a request-response operation. Shapes and roles are
+in [`06-api.md`](06-api.md).
+
+**What is the same as the scheduled path**, deliberately:
+
+- **Redaction runs before embedding, always.** The same redactor, on the same
+  side of the boundary. A secret in an uploaded file is removed before a vector
+  exists, and the count is reported back on the dataset, so "0 redactions" is a
+  measurement rather than a silence.
+- **One collection, one namespace.** Points land in `insightgpt_documents` with
+  the normalized payload of [`04-retrieval-rag.md`](04-retrieval-rag.md) §1.1
+  plus `dataset_id` and `dataset_name`.
+- **Deletion is a filtered delete** on `dataset_id` — never a collection drop
+  (§7.1 of [`04-retrieval-rag.md`](04-retrieval-rag.md)).
+
+**What is different:**
+
+| | Scheduled corpus | Uploaded dataset |
+|---|---|---|
+| Trigger | APScheduler job / CLI | A user in the browser |
+| Source of record | `data/ingested/documents.json` | the uploaded bytes |
+| Change tracking | `.index_state.json`, changed-only | none — an upload is indexed once; re-upload to replace |
+| Removal | document vanishes from the corpus | `DELETE /datasets/{id}` |
+| Touched by `reindex_docs` | yes | **no** — the job reads the corpus file, which uploads are not part of |
+
+**Limits, and why they are refusals rather than hangs.** Accepted extensions
+are `.csv .tsv .xlsx .pdf .txt .md .json .docx`; anything else is a `400` naming
+what is accepted. A single file is capped at 25 MB and one request at 50 MB,
+rejected with `413`. An upload that cannot be parsed or embedded sets
+`status="failed"` with the reason on the dataset — never left sitting at
+`"indexing"` forever, which is indistinguishable from slow.
+
+**An uploaded file does not become a governed metric.** This is the honesty
+line, and it is worth stating twice. The structured, text-to-SQL path answers
+only from the hand-authored semantic layer over the retail warehouse. A user who
+uploads `my_sales.csv` and asks "what was revenue?" gets an answer from *their
+document's text*, attributed to that dataset, or an honest decline. Answering
+with the retail fixture's revenue as though it were their data would be the
+worst failure this system could have: confidently wrong, in the exact register
+of being right.
+
+**What is local and what is not.** The file is parsed, redacted, chunked and
+embedded on the machine, and the vectors and chunk text are stored in the local
+Qdrant. The snippets a question retrieves are sent to the configured reasoning
+provider inside the prompt — with `LLM_PROVIDER=gemini`, to Google. That is the
+whole of what leaves the machine, and the UI copy says exactly that rather than
+claiming the data never moves.
+
 ## 8. Operational commands
 
 Illustrative CLI/`make` targets (exact wiring in `scripts/`):

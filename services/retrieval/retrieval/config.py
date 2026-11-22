@@ -22,7 +22,34 @@ from pydantic import BaseModel, Field
 
 log = logging.getLogger("retrieval.config")
 
-CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+class RetrievalConfigError(RuntimeError):
+    """The retrieval config is missing or unreadable.
+
+    A real exception rather than SystemExit, so a caller's ``except
+    Exception`` can record the failure instead of having the interpreter
+    wound out from under it.
+    """
+
+
+def _config_dir() -> Path:
+    """Where ``retrieval.yaml`` lives, source tree or installed wheel.
+
+    Two layouts, because the package runs from both. In the repo the config
+    sits beside the package (``services/retrieval/config/``). Installed, that
+    path resolves to ``site-packages/config/`` - a directory that does not
+    exist - so `uv sync --extra real` produced an API that imported fine and
+    then died with "Missing retrieval config" the first time anything indexed.
+    The wheel now carries the file at ``retrieval/config/``; the sibling
+    directory is still preferred so an edit in the source tree wins during
+    development.
+    """
+    sibling = Path(__file__).resolve().parent.parent / "config"
+    if (sibling / "retrieval.yaml").exists():
+        return sibling
+    return Path(__file__).resolve().parent / "config"
+
+
+CONFIG_DIR = _config_dir()
 DEFAULT_CONFIG = CONFIG_DIR / "retrieval.yaml"
 
 
@@ -115,7 +142,12 @@ class RerankerConfig(BaseModel):
 
 class RetrievalConfig(BaseModel):
     schema_version: int = 1
-    collection: str = "documents"
+    # Namespaced on purpose. The reference deployment runs Qdrant as a SHARED
+    # single instance alongside other projects' collections, so a generic name
+    # like "documents" sits one typo away from someone else's "docs". Every
+    # InsightGPT collection name starts with ``insightgpt_``, and
+    # ``retrieval.store`` asserts that prefix before it issues any delete.
+    collection: str = "insightgpt_documents"
     qdrant_url: str = "http://127.0.0.1:6333"
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     sparse: SparseConfig = Field(default_factory=SparseConfig)
@@ -166,6 +198,12 @@ class RetrievalConfig(BaseModel):
             self.embedding.base_url = ollama.rstrip("/")
         if qdrant := os.environ.get("QDRANT_URL"):
             self.qdrant_url = qdrant.rstrip("/")
+        # One name, one source. ``scripts/bootstrap.py`` already reads
+        # QDRANT_COLLECTION to decide whether to create the collection; without
+        # this the indexer would ignore the same variable and the two would
+        # silently disagree about which collection the points are in.
+        if collection := os.environ.get("QDRANT_COLLECTION"):
+            self.collection = collection.strip()
         if embed_model := os.environ.get("EMBED_MODEL"):
             self.embedding.model = embed_model
         # The asymmetric prefixes belong to the nomic-style Ollama models and
@@ -221,7 +259,12 @@ def load_config(path: str | Path | None = None) -> RetrievalConfig:
     """Load and validate ``config/retrieval.yaml`` (or an explicit path)."""
     cfg_path = Path(path) if path else DEFAULT_CONFIG
     if not cfg_path.exists():
-        raise SystemExit(f"Missing retrieval config: {cfg_path}")
+        # A library raising SystemExit is a trap for its callers: it does not
+        # inherit from Exception, so `except Exception` around an indexing job
+        # does not catch it, the worker thread unwinds silently, and the
+        # dataset sits at "indexing" forever instead of reporting a failure.
+        # That exact path was hit during this feature's build.
+        raise RetrievalConfigError(f"Missing retrieval config: {cfg_path}")
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     return RetrievalConfig.model_validate(raw)._apply_env()
 

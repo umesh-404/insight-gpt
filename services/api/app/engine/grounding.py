@@ -252,3 +252,33 @@ def years_covered(time_range: dict | None, years: list[int]) -> bool:
 def year_span(years: list[int]) -> dict:
     """A full-calendar range spanning ``years`` (used to honour the asked period)."""
     return {"start": f"{min(years)}-01-01", "end": f"{max(years)}-12-31"}
+
+
+# --- questions that name a file ----------------------------------------------
+# The extensions the upload path accepts. A question that names one is asking
+# about a document the reader supplied, not about the governed warehouse.
+_FILE_EXTENSIONS = (
+    "csv", "tsv", "xlsx", "pdf", "txt", "md", "json", "docx", "xls", "doc",
+)
+_FILENAME_RE = re.compile(
+    r"\b[\w\-. ]{1,120}?\.(?:" + "|".join(_FILE_EXTENSIONS) + r")\b", re.IGNORECASE
+)
+
+
+def question_names_a_file(question: str) -> str | None:
+    """The filename a question refers to, or ``None``.
+
+    This decides which side of the line a question falls on. "What was revenue
+    last quarter?" is a governed question and belongs to the semantic layer.
+    "What was revenue in my_sales.csv?" contains the same metric word and is a
+    completely different question: it asks about a file the reader uploaded,
+    and answering it with warehouse revenue would hand back a confident,
+    correctly-formatted number from somebody else's data.
+
+    Detection is on the filename rather than on the set of uploaded datasets,
+    deliberately. A reader who names a file that was never uploaded should get
+    "I could not find that" and not a retail figure - so the question has to
+    leave the governed path before anyone checks whether the file exists.
+    """
+    match = _FILENAME_RE.search(question)
+    return match.group(0).strip() if match else None

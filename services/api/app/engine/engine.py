@@ -21,7 +21,13 @@ from ..semantic.query_builder import Filter, MetricSelection, build_query
 from ..warehouse.executor import DuckDBWarehouse, Warehouse
 from .attachments import AttachmentInput, process_attachments
 from .envelope import AnswerEnvelope, Chart, ChartSeries, Citation, CorrectionAttempt, Table
-from .grounding import question_years, selection_is_grounded, year_span, years_covered
+from .grounding import (
+    question_names_a_file,
+    question_years,
+    selection_is_grounded,
+    year_span,
+    years_covered,
+)
 from .retrieval import FixtureRetriever, Retriever
 from .router import route
 from .selfcorrect import AbstainSignal, suggest_metrics
@@ -137,6 +143,33 @@ class InsightEngine:
                     "different metric than the one asked for.",
                     suggest_metrics(None, self.catalog),
                 )
+
+        # A question that names an uploaded file leaves the governed path.
+        #
+        # The router decides on metric words, so "what was revenue in
+        # my_sales.csv" looks exactly like "what was revenue" to it: it routes
+        # structured, queries the warehouse, never consults retrieval, and
+        # returns a retail figure with no citation - a confident,
+        # correctly-formatted number drawn from somebody else's data, in
+        # answer to a question about the reader's own file. That is the single
+        # worst failure this engine can produce, because nothing on screen
+        # marks it as wrong.
+        #
+        # A file reference is therefore treated as the stronger signal: drop
+        # the metric, force retrieval, and let the documents answer. If the
+        # file was never uploaded the retriever finds nothing and the engine
+        # abstains, which is the honest reply to a question about a file that
+        # does not exist.
+        named_file = question_names_a_file(question)
+        if named_file and not parsed_attachments:
+            log.info("question names a file (%s); answering from documents", named_file)
+            r["metric"] = None
+            r["time_range"] = None
+            r["prior_time_range"] = None
+            r["metric_unresolved"] = False
+            r["needs_docs"] = True
+            if r["route"] in ("structured", "hybrid"):
+                r["route"] = "unstructured"
 
         # A period the question named explicitly but the resolver did not honour
         # means the resolver fell back to its default ("last quarter"). Answering
@@ -783,9 +816,17 @@ def _citations(docs) -> list[Citation]:
             title=d.title,
             date=d.date,
             score=d.score,
+            # A snippet travels with user-supplied evidence, and only with it.
+            # The curated corpus is browsable elsewhere, so repeating its text
+            # in every envelope is weight for nothing. A file the reader
+            # uploaded is the opposite case: they cannot look it up, and a
+            # citation that names their document without quoting any of it
+            # asks them to take the grounding on faith - which is the one
+            # thing this product refuses to ask. "dataset" is an upload that
+            # was indexed; "attachment" is one attached to a single question.
             snippet=(
                 d.body[:250].replace("\n", " ").strip()
-                if d.source_type == "attachment"
+                if d.source_type in ("attachment", "dataset")
                 else None
             ),
         )

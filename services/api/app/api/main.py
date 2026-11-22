@@ -28,6 +28,7 @@ from .observability import RequestContextMiddleware, configure_logging
 from .routers import (
     ask,
     auth,
+    datasets,
     forecast,
     insights,
     metrics,
@@ -107,7 +108,9 @@ def create_app() -> FastAPI:
     app.add_exception_handler(Exception, unhandled_error_handler)
 
     # --- versioned application routers ----------------------------------------
-    for module in (auth, ask, metrics, sources, pipelines, reports, insights, forecast):
+    for module in (
+        auth, ask, metrics, sources, pipelines, reports, insights, forecast, datasets,
+    ):
         app.include_router(module.router, prefix=API_PREFIX)
 
     # --- unversioned operational routes ---------------------------------------

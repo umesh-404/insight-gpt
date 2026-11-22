@@ -18,12 +18,19 @@ time so these three land:
 ## 1. Before you start (2 minutes, off-camera)
 
 ```bash
-setup.cmd --doctor        # Windows
+make preflight            # the local stack: Qdrant, models, provider key
+setup.cmd --doctor        # Windows — the Docker stack too
 ./setup.sh --doctor       # macOS / Linux
 ```
 
-`--doctor` changes nothing and names the exact broken thing. Fix what it names,
-or run `--repair` for a clean rebuild that preserves your `.env`. See §9.
+`make preflight` is the one to run if you are demoing the **local stack** (host
+processes against your own Qdrant and Ollama): one line per check, a fix beside
+every failure, and it changes nothing. `--doctor` adds the Docker stack and
+wiring checks. Fix what either one names, or run `--repair` for a clean rebuild
+that preserves your `.env`. See §9.
+
+Check `GEMINI_API_KEY` is in `.env` before you present: the API refuses to start
+without it, which is far better than discovering it at the first question.
 
 Then confirm the stack is alive and warm the caches by loading each page once:
 
@@ -291,6 +298,8 @@ setup.cmd --doctor        # Windows
 
 | Symptom | First move |
 |---|---|
+| The API will not start at all | `make preflight` — a blank `GEMINI_API_KEY` is the usual cause, and it is refused at boot by design |
+| "Qdrant unreachable" / no retrieval results | `make preflight`. On a host run `QDRANT_URL` must be `127.0.0.1:6333`, not a compose service name |
 | A page or endpoint refuses to load | `--doctor`, then read the named cause |
 | Something is up but behaving wrongly | `--repair` — clean rebuild + recreate, re-seed, re-verify; `.env` is preserved |
 | Answers are slow on a laptop with no GPU | Expected — the local LLM is the slow step. Fall back to the terminal script in §8 against the offline stack, or set a cloud `LLM_PROVIDER` |
@@ -309,7 +318,8 @@ again — completed steps become fast no-ops.
 | *"Isn't this just the model writing SQL?"* | No — the model emits a metric selection (metric key, dimensions, time range). A query builder emits the SQL, and a validator rejects non-`SELECT` statements, non-allow-listed tables, and joins reaching unmodeled tables, then enforces a row limit and a statement timeout. |
 | *"What stops it hallucinating a number?"* | Numbers come from SQL result sets, and the faithfulness harness scores whether every figure in the prose appears in one — currently 9/9, floored at 0.90 in CI. |
 | *"What if the question has no answer?"* | It abstains and says why, with suggestions. §4. |
-| *"Does it need an API key / the internet?"* | No. Embeddings and reranking are always local (Ollama); the reasoning step defaults to local and takes a cloud provider only if you configure one. |
+| *"Does it need an API key / the internet?"* | Partly, and the split is the point. Chunking, redaction, embedding, the vector index and reranking all run **on this machine** — a document's contents never leave it. The configured reasoning step is Gemini, so it needs a key, and the snippets retrieved for a question are sent to Google inside the prompt. Set `LLM_PROVIDER=ollama` and the whole pipeline is local, at the cost of answer quality on a CPU-only laptop. |
+| *"So could you run it fully offline?"* | Yes — `LLM_PROVIDER=ollama` with a local chat model. The reason the demo does not is quality, not capability: the reasoning step is the one place a small local model is clearly worse. |
 | *"Is the data real?"* | Synthetic retail data, generated with a deliberately planted quarterly dip so the slice question has a genuine, discoverable cause — see [`02-data-model.md`](02-data-model.md). |
 | *"What isn't finished?"* | Job chaining, watermark incremental sync for SQL sources, and a frontend test suite. All three are designed in the docs and listed in the README's status table. Say this plainly — it is a better answer than a feature list. |
 

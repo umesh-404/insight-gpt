@@ -9,8 +9,10 @@ business documents in Qdrant for semantic retrieval, and answers questions by
 combining **semantic-layer-grounded text-to-SQL** with **retrieval-augmented
 generation** — every answer showing the SQL that produced a number and the
 documents behind a claim. The whole stack is containerized (Docker Compose),
-runs local-first on a modest laptop with a pluggable path to cloud reasoning
-models, and is exposed through a FastAPI backend and a Next.js frontend.
+runs on a modest laptop — ingestion, redaction, embedding, the vector index and
+reranking are all local, while the reasoning step is pluggable and configured by
+default to a cloud model — and is exposed through a FastAPI backend and a
+Next.js frontend.
 
 > **This `docs/` folder is the source of truth for the project.** Design
 > decisions live here first; implementation follows the approved plan in
@@ -24,13 +26,13 @@ models, and is exposed through a FastAPI backend and a Next.js frontend.
 | 00 | [`00-overview.md`](00-overview.md) | The problem, what InsightGPT does, goals, non-goals, personas, and success criteria |
 | 01 | [`01-architecture.md`](01-architecture.md) | System design, component map, request flow, tech-stack rationale, deployment topology, repo layout |
 | 02 | [`02-data-model.md`](02-data-model.md) | Demo domain, source schemas, warehouse layering, star schema, dbt project, and the semantic metrics layer |
-| 03 | [`03-ingestion-etl.md`](03-ingestion-etl.md) | Source connectors, redaction, raw load, dbt transforms, and scheduled pipeline runs |
+| 03 | [`03-ingestion-etl.md`](03-ingestion-etl.md) | Source connectors, redaction, raw load, dbt transforms, scheduled pipeline runs, and the user-upload path (§7.1) |
 | 04 | [`04-retrieval-rag.md`](04-retrieval-rag.md) | Document chunking, local embeddings, Qdrant hybrid search, reranking, and retrieval evaluation |
 | 05 | [`05-insight-engine.md`](05-insight-engine.md) | NL router, grounded text-to-SQL, SQL guardrails, answer synthesis, and the pluggable LLM provider |
 | 06 | [`06-api.md`](06-api.md) | FastAPI endpoints, JWT auth and roles, SSE streaming, pipeline-run tracking, and observability |
 | 07 | [`07-frontend.md`](07-frontend.md) | Next.js app: chat/ask, dashboards, source admin, pipeline monitor, and executive reports |
 | 08 | [`08-security.md`](08-security.md) | Redaction, read-only analytics role, allow-lists, auth, and prompt-injection defenses |
-| 09 | [`09-deployment.md`](09-deployment.md) | Docker Compose bring-up, configuration, and the cloud-portability path |
+| 09 | [`09-deployment.md`](09-deployment.md) | The two topologies (host run vs. compose) and which hostnames belong to which, configuration, clean machine to working demo, the preflight check, and the cloud-portability path |
 | 10 | [`10-testing-eval.md`](10-testing-eval.md) | dbt tests, pytest, and the retrieval + text-to-SQL evaluation harnesses |
 | 11 | [`11-roadmap.md`](11-roadmap.md) | Phased build plan, vertical-slice definition, risks, and current project state |
 | 12 | [`12-mcp.md`](12-mcp.md) | MCP server: governed metrics over the Model Context Protocol, its tool inventory, safety posture, and client setup |

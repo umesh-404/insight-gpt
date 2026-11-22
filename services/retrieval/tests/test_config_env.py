@@ -12,7 +12,8 @@ from retrieval.config import RetrievalConfig, load_config
 
 
 def _cfg(monkeypatch, **env) -> RetrievalConfig:
-    for key in ("OLLAMA_HOST", "QDRANT_URL", "EMBED_MODEL", "RERANK_MODEL"):
+    for key in ("OLLAMA_HOST", "QDRANT_URL", "EMBED_MODEL", "RERANK_MODEL",
+                "QDRANT_COLLECTION"):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -23,8 +24,27 @@ def test_defaults_come_from_the_yaml_file(monkeypatch):
     cfg = _cfg(monkeypatch)
     assert cfg.embedding.model == "nomic-embed-text"
     assert cfg.embedding.dimensions == 768
-    assert cfg.collection == "documents"
+    assert cfg.collection == "insightgpt_documents"
     assert cfg.reranker.model
+
+
+def test_collection_is_namespaced_so_a_shared_qdrant_is_safe():
+    """The default must be unmistakably ours.
+
+    This Qdrant instance is commonly shared with other projects whose
+    collections have short generic names. A default of "documents" sits one
+    typo from someone else's data; the prefix is also what
+    ``store.assert_insightgpt_collection`` checks before any delete.
+    """
+    from retrieval.store import COLLECTION_PREFIX
+
+    assert RetrievalConfig().collection.startswith(COLLECTION_PREFIX)
+
+
+def test_collection_is_overridable_from_the_environment(monkeypatch):
+    """bootstrap.py already reads QDRANT_COLLECTION; the indexer must too."""
+    cfg = _cfg(monkeypatch, QDRANT_COLLECTION="insightgpt_other ")
+    assert cfg.collection == "insightgpt_other"
 
 
 def test_hosts_are_overridable_and_trailing_slashes_trimmed(monkeypatch):

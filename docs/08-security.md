@@ -348,27 +348,41 @@ exposed**:
 
 ## 8. Data privacy & local-first stance
 
-InsightGPT is **local-first**. In the default configuration, **no data leaves
-the machine**: embeddings and reranking run on local Ollama, retrieval hits a
-local Qdrant, and analytics hit a local Postgres. The synthetic demo dataset and
-all indexes live on the host.
+InsightGPT keeps **data processing local and the reasoning step pluggable**.
+Everything that touches a document's full contents runs on the machine:
+ingestion, redaction, chunking, embedding (local Ollama), the vector index
+(local Qdrant), and analytics (local Postgres or the DuckDB fixture). Uploaded
+datasets take the same path — parsed, redacted, embedded and stored locally.
 
-The **only** channel through which content can leave the machine is a
-**configured cloud LLM provider**. If — and only if — an operator sets an API
-key for a cloud provider (OpenAI, Gemini, or Groq) for the heavy reasoning step,
-then the prompt for that step (the user question, the selected metrics, and the
-retrieved-and-redacted context) is sent to that provider under its terms. This
-is **opt-in**:
+**What leaves the machine, precisely.** The shipped configuration sets
+`LLM_PROVIDER=gemini`, so one channel is open by default: the prompt for the
+reasoning step — the user's question, the selected metrics and their result
+rows, and the **retrieved, already-redacted snippets** — is sent to Google under
+its terms. Nothing else about a document is transmitted: not the file, not the
+unretrieved remainder, not the vectors.
 
-- The default provider is **Ollama (local)** — nothing is transmitted.
-- Switching to a cloud provider is an explicit configuration act (provider name
-  + API key in the environment).
-- Because redaction happens at **ingestion**, any context that reaches a cloud
-  provider has already had secrets and business PII stripped — the cloud path
-  never sees a raw credential or a raw card number that came from a document.
+Two claims this document does **not** make, because neither is true of the
+shipped default:
 
-Operators handling regulated data should keep the default local provider, or
-choose a cloud provider whose data-handling terms meet their obligations.
+- It does not claim nothing leaves the machine. Saying so while `.env` ships
+  `LLM_PROVIDER=gemini` would be the kind of privacy overclaim that is worse
+  than no claim at all.
+- It does not claim the cloud path is risk-free because of redaction. Redaction
+  at ingestion means the cloud path never sees a raw credential or card number
+  that came from a document, which bounds the exposure — it does not eliminate
+  it. Business content in a retrieved snippet is still business content.
+
+**Making it fully local** is one setting: `LLM_PROVIDER=ollama` with a local
+chat model. Then no channel is open at all, at the cost of answer quality on a
+CPU-only machine. `EMBED_PROVIDER` is the mirror-image setting to watch: leaving
+it at `ollama` is what keeps *document text itself* on the machine, and setting
+it to `openai` sends every chunk to a cloud embedding endpoint
+([`09-deployment.md`](09-deployment.md) §2.5). `python scripts/setup.py
+--preflight` prints which of the two configurations is in force.
+
+Operators handling regulated data should switch the reasoning step to the local
+provider, or choose a cloud provider whose data-handling terms meet their
+obligations.
 
 ## 9. Residual risks (stated honestly)
 

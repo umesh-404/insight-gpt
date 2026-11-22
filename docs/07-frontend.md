@@ -128,11 +128,20 @@ being asked "is this real?".
 |---|---|---|
 | `/ask`, `/dashboards`, `/reports` (read) | viewer | reports read; generate is analyst+ |
 | `/pipelines` (view) | analyst | trigger button gated to admin |
-| `/sources` | admin | hidden from nav for lower roles |
+| `/sources` | viewer | two concerns on one route: **uploaded datasets** (viewer reads, analyst uploads and deletes) and **connector administration** (admin only, and the tab is not rendered for anyone else) |
 | `/settings` | viewer | provider internals shown to admin only |
 
 Nav items the role can't use are hidden, and the API re-checks every call — the
 client gate is UX, not security ([`06-api.md`](06-api.md) §2).
+
+`/sources` was admin-only when it was connector administration and nothing
+else. It is viewer-reachable now that it also holds uploaded datasets, because
+an admin-gated link would have hidden the upload screen from the analysts it was
+built for while the route stayed reachable by typing the URL — a feature
+findable only by guessing. The gating that matters moved inward: the connectors
+tab is not rendered below admin, upload and delete controls are not shown to a
+viewer (and the endpoints refuse them anyway), and no copy tells a viewer it can
+upload.
 
 ## 4. Key screens
 

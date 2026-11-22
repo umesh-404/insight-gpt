@@ -1,0 +1,16 @@
+Ketterdam harbour telemetry — deployment notes
+
+These notes are a TEST FIXTURE. Every credential below is fabricated: the
+patterns are credential-SHAPED so the ingestion redactor has something real to
+match, but none of them authenticates against anything, anywhere.
+
+Map tile service (legacy, decommissioned):
+    LEGACY_MAPS_KEY = "AIzaFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK"
+
+Billing sandbox:
+    BILLING_KEY = "sk_live_FAKEFAKEFAKEFAKEFAKE"
+
+On-call contact: harbour-ops@example.com
+
+Operational note that SHOULD survive redaction, because it is content and not a
+secret: the Ketterdam telemetry feed publishes a reading every ninety seconds.

@@ -4,7 +4,7 @@ import { SourcesView } from '@/components/sources-view';
 export const metadata: Metadata = {
   title: 'Data sources',
   description:
-    'Register, test, and administer the data sources feeding the warehouse and index.',
+    'Upload files for local retrieval, and administer the connectors feeding the warehouse and index.',
 };
 
 export default function SourcesPage() {

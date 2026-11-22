@@ -37,6 +37,15 @@ class Retriever(Protocol):
 class FixtureRetriever:
     """Keyword-overlap ranking over the in-repo sample documents."""
 
+    # This retriever reads a FIXED in-repo corpus. It cannot see a document the
+    # user uploaded, and it never will. The flag exists so an upload path can
+    # say so plainly instead of accepting a file, indexing it into Qdrant, and
+    # then answering the user's question about it out of the retail fixtures —
+    # which would look like it worked and would be the exact silent
+    # substitution the project forbids. Read it through
+    # ``build.datasets_are_searchable``.
+    searches_uploaded_datasets = False
+
     def __init__(self, documents: list[dict] | None = None):
         if documents is None:
             from ..fixtures.retail import get_sample_documents

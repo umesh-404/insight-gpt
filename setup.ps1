@@ -1,6 +1,7 @@
 # InsightGPT — one-command setup for Windows.
 #
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
+#   powershell -ExecutionPolicy Bypass -File setup.ps1 -Preflight
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 -Doctor
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 -Repair
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 -Native
@@ -12,6 +13,7 @@
 
 [CmdletBinding()]
 param(
+    [switch]$Preflight,
     [switch]$Doctor,
     [switch]$Repair,
     [switch]$Native,
@@ -24,6 +26,7 @@ Set-Location -Path $PSScriptRoot
 
 # Map the PowerShell switches onto the script's flags.
 $scriptArgs = @()
+if ($Preflight)  { $scriptArgs += '--preflight' }
 if ($Doctor)     { $scriptArgs += '--doctor' }
 if ($Repair)     { $scriptArgs += '--repair' }
 if ($Native)     { $scriptArgs += '--native' }

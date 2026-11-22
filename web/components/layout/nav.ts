@@ -101,8 +101,15 @@ export const NAV_ITEMS: NavItem[] = [
     href: '/sources',
     label: 'Data sources',
     icon: Database,
-    minRole: 'admin',
-    description: 'Source administration',
+    // Viewer, not admin. The page used to be connector administration and
+    // nothing else; it now also holds uploaded datasets, which a viewer may
+    // read and an analyst may add. Leaving the link admin-gated would hide
+    // the upload screen from exactly the roles it was built for, while the
+    // route stayed reachable by URL - a feature findable only by guessing.
+    // Safe because the gating that matters is elsewhere: the page shows the
+    // connectors tab only to an admin, and every endpoint re-checks the role.
+    minRole: 'viewer',
+    description: 'Uploads & connectors',
     group: 'platform',
   },
   {
