@@ -88,7 +88,18 @@ export function DatasetPanel() {
         )
       ) : (
         <>
-          {canUpload ? <DatasetUpload tone="compact" /> : null}
+          {canUpload ? (
+            <DatasetUpload tone="compact" />
+          ) : (
+            // A viewer gets no dropzone at all, which on its own reads as a
+            // missing feature rather than a deliberate boundary. One sentence
+            // says what this account can do, without offering a control it
+            // cannot use.
+            <p className="max-w-[80ch] text-sm text-muted-foreground">
+              These files were uploaded by an analyst and are searchable in Ask.
+              Adding or removing one needs the analyst role.
+            </p>
+          )}
 
           <section aria-labelledby="datasets-heading" className="min-w-0 space-y-3">
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
@@ -102,23 +113,20 @@ export function DatasetPanel() {
                 // The redaction total sits in the section header, not only in a
                 // cell: "22 secrets removed before indexing" is the claim this
                 // product most needs a reader to see without hunting for it.
-                <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground tabular-nums">
+                // Each separator is drawn *before* its own item rather than as
+                // a flex child of its own, so a wrap can never leave a lone
+                // "·" dangling at the end of a line — which is exactly what
+                // happened to this line at 375px.
+                <p className="flex flex-col items-start gap-y-1 text-xs text-muted-foreground tabular-nums sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-2 sm:[&>*+*]:before:mr-2 sm:[&>*+*]:before:text-muted-foreground sm:[&>*+*]:before:content-['·']">
                   <span>
                     {list.length} {list.length === 1 ? 'dataset' : 'datasets'}
                   </span>
-                  <span aria-hidden>·</span>
                   <span>{formatNumber(totalChunks)} passages indexed</span>
-                  <span aria-hidden>·</span>
                   <span className="inline-flex items-center gap-1 font-medium text-foreground">
                     <ShieldCheck className="size-3.5 text-success" aria-hidden />
                     {formatNumber(totalRedactions)} secrets removed before indexing
                   </span>
-                  {working ? (
-                    <>
-                      <span aria-hidden>·</span>
-                      <span>{working} still indexing</span>
-                    </>
-                  ) : null}
+                  {working ? <span>{working} still indexing</span> : null}
                 </p>
               ) : null}
             </div>

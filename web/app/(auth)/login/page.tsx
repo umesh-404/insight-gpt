@@ -7,9 +7,9 @@ import { Logo } from '@/components/layout/logo';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { describeError } from '@/components/states';
 import { useAuth } from '@/lib/auth';
 import { USE_MOCK } from '@/lib/api';
-import { ApiError } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 /**
@@ -79,11 +79,11 @@ export default function LoginPage() {
       await login(email, password);
       router.replace('/ask');
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? err.message
-          : 'Unable to sign in. Check your credentials and try again.',
-      );
+      // Not "check your credentials": with the API stopped, `fetch` rejects
+      // before any password is ever compared, and that message sent the
+      // reader to retype a password that was never the problem.
+      // `describeError` tells a refused connection from a refused login.
+      setError(describeError(err));
     } finally {
       setSubmitting(false);
     }

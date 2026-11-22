@@ -51,6 +51,9 @@ data/ingested/
 # connection string is never persisted), but it is per-machine operator state,
 # not source.
 data/sources.json
+# The uploaded-dataset registry the API writes at runtime: per-machine
+# operator state, like sources.json above, not source.
+data/datasets.json
 data/samples/*.parquet
 *.duckdb
 

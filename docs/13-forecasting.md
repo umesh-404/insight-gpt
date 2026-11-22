@@ -132,6 +132,7 @@ confidence at `low` below eight.
 | 0 or 1 period | Refusal; caveat naming the row count |
 | 2–3 periods | Refusal (the demo-warehouse case) |
 | Perfectly constant series | Forecasts the constant; `sigma` is exactly 0 so the interval has **zero width** — no division by zero — plus a caveat that this reflects the input, not certainty |
+| A **varying** series the model fits exactly | The zero-width interval is **not** shipped: the width is re-derived (§4.1) and a caveat says so. A perfect fit to the past is not knowledge of the future |
 | All-zero series | Same, finite, no `NaN` |
 | Missing periods in the middle | Forecast proceeds, with a caveat naming the missing labels — the model assumes even spacing and the reader is told it isn't |
 | Horizon longer than half the history | Confidence forced to `low` plus an "this is extrapolation" caveat |
@@ -155,13 +156,54 @@ A horizon greater than `n_history / 2` demotes any grade to `low`.
 When the optional extra is installed **and** the history has at least 8 periods,
 `statsforecast`'s **AutoETS** runs instead: proper model selection across
 error/trend/season forms with a model-based interval. The result reports
-`method_family: "statsforecast"` and `method: "statsforecast AutoETS"`, so a
-number's provenance is always visible in the payload.
+`method_family: "statsforecast"` and `method: "statsforecast AutoETS (ETS(A,A,N))"`
+— the **selected** form, read back off the fitted model — so a number's
+provenance is visible in the payload, and so is which model actually produced
+it.
+
+That last detail is load-bearing, not decoration. AutoETS is asked for a season
+length but *chooses* its own form, and on 24 months of visibly seasonal demo
+data it selects `ETS(M,N,N)` — no trend, no seasonal term. The engine therefore
+reads seasonality off the fitted components rather than inferring it from "we
+had enough history for a cycle", and emits a caveat naming the selected model
+when it carries no seasonal term. A backend that does not report what it fitted
+gets a caveat saying seasonality is **unconfirmed**; it never gets the benefit
+of the doubt.
 
 The optional path is defensive by construction: the import is lazy, and any
 failure inside it (missing wheel, fit error, non-finite output) returns `None`
 and the pure-Python fallback runs. An optional accelerator must never be able to
 fail a request.
+
+### 4.1 The zero-width interval, and why it is repaired
+
+AutoETS returns a **collapsed interval** on a short deterministic series —
+`value=177.0, lower=177.0, upper=177.0`, reached by dividing by a zero residual
+variance in `ets.py`. Taken at face value that is a forecast claiming perfect
+certainty about the future, which is the one thing this subsystem exists not to
+do.
+
+It is a property of the *fit*, not of the data: a model flexible enough to
+reproduce a sawtooth exactly has zero in-sample residuals, and zero in-sample
+residuals are evidence of an over-flexible fit, not of foresight. So:
+
+- **A constant history keeps its zero-width interval.** There the collapse
+  genuinely is the input, and the existing caveat says exactly that.
+- **A varying history never does.** The point stays the model's; the interval is
+  re-derived as the residual-standard-error band of the pure-Python fallback
+  (§3, step 4) computed on the same history — a width this project already
+  documents and can explain, rather than a fudge factor invented for the
+  occasion. A caveat states that the interval and the point come from different
+  places.
+- **If every method fits the history exactly**, the points are reported with an
+  explicit "no prediction interval could be estimated" caveat rather than a band
+  that implies one. (Unreachable with the methods shipped today; it is the
+  branch that keeps the rule true rather than approximately true.)
+
+The library's `RuntimeWarning` is suppressed at the call site, because the
+condition it signals is now detected and reported to the *reader* in a caveat
+instead of to whoever happens to be watching stderr. Non-finite output is still
+rejected outright, which is what makes the fallback run.
 
 ## 5. Dependency posture
 
@@ -169,7 +211,11 @@ fail a request.
 base dependencies:
 
 ```bash
-uv pip install -e ".[forecast]"     # opt in to AutoETS/ARIMA/Theta
+# In services/api. Spell out the whole extra set: `uv sync` REPLACES it, so
+# `uv sync --extra forecast` alone would uninstall FastAPI.
+uv sync --extra api --extra real --extra forecast --dev   # opt in to AutoETS
+uv sync --extra api --extra real --dev                    # back to the CI set
+make test-forecast                                        # both, around the suite
 ```
 
 The reasoning matches the project's standing bias toward a small dependency
@@ -180,7 +226,10 @@ the "runs offline on a modest laptop" default and slow to install in CI. So:
 - the base install and CI never see it;
 - availability is probed at **runtime**, not at import time;
 - the test suite passes on the fallback alone, and the optional path is covered
-  through its availability probe and a stubbed backend.
+  through its availability probe and a stubbed backend — **and** is run for real
+  against the installed extra before a change to either path ships (§7), because
+  the one defect that mattered here (§4.1) was invisible to the stub until
+  someone installed the extra and looked.
 
 ### 5.1 Rejected alternatives
 
@@ -190,6 +239,7 @@ the "runs offline on a modest laptop" default and slow to install in CI. So:
 | Default engine | **Pure-Python damped Holt fallback** | Require the statistical engine | Keeps the offline default and CI dependency-free; a forecast should not be gated on a 200 MB install |
 | Short history | **Refuse, and say why** | Emit a forecast with a wide interval | A wide interval still renders as a line on a chart and gets quoted as a number; refusal cannot be misread |
 | Interval | **Always present, per point** | Point estimate with an optional interval | An optional interval is an interval nobody reads |
+| A zero-width interval over a varying history | **Re-derive the width from the documented fallback band, and say so** | Ship the model's collapsed interval; invent a widening factor; drop the point entirely | Shipping it claims certainty; an invented factor is a number with no derivation; dropping the point throws away the better model's estimate when only its *uncertainty* was unusable (§4.1) |
 | Deep learning (LSTM/N-BEATS) | **Not used** | — | No training data, no GPU budget, and unexplainable output in a product whose thesis is explainability |
 | Ratio metrics | **Forecast the ratio directly** | Forecast numerator and denominator, or sum segments | Ratio deltas do not compose; summing them is the classic Simpson's-paradox bug |
 | LLM-authored forecasts | **Never** | Ask the model for next quarter's number | Same rule as the rest of the system: a model narrates numbers, it never sources them |
@@ -258,7 +308,21 @@ ratio metric forecast in its own units and clamped; a constant series that does
 not explode; missing-period caveats; `400` for an ungoverned metric; `403` for a
 viewer; `503` for an unreachable warehouse; and no `500` on any path.
 
-**Not yet wired:** the frontend does not render forecasts. The API and the
-capability report exist; the UI surface is a separate piece of work.
+The suite is **backend-aware**, which matters because CI deliberately does not
+install the optional extra. The interval and seasonality rules of §4 are pinned
+twice: by stubbing the optional backend (so they hold in CI, where AutoETS is
+absent) and by assertions that are not relaxed when the real extra is installed
+— the requirement "a history that varies carries real interval width" is the
+same sentence on both backends. `uv sync --extra api --extra real --extra
+forecast --dev` in `services/api` runs them against the real AutoETS; drop
+`--extra forecast` to return the venv to the CI configuration (a bare
+`uv sync --extra forecast` **replaces** the extra set rather than adding to it,
+which uninstalls FastAPI).
+
+**The frontend does render forecasts**: `web/components/forecast-panel.tsx`, on
+the dashboard. (This paragraph said the opposite until phase 2 — it had been
+true when it was written.) Whatever it draws, the rule from §4.1 holds upstream
+of it: the band it renders is never zero-width over a history that varies, so a
+chart cannot show a confident flat line that the payload does not claim.
 
 ---

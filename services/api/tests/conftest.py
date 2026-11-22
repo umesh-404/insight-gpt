@@ -25,8 +25,21 @@ environment, which is what keeps them deterministic.
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 # The offline stack: deterministic, no network, no model server, no key.
 os.environ.setdefault("LLM_PROVIDER", "fake")
 os.environ.setdefault("RETRIEVER", "fixture")
 os.environ.setdefault("WAREHOUSE", "duckdb")
+
+# Uploaded tables live in a DuckDB file whose default sits under `data/`. A
+# test run must not write to the developer's real one, and two runs must not
+# fight over its file lock - the loser degrades to retrieval, which is correct
+# behaviour but makes a SQL-path test fail for a reason that has nothing to do
+# with the code under test. A per-run temporary path removes both problems.
+# `setdefault`, so a test that wants a specific database can still say so.
+os.environ.setdefault(
+    "DATASETS_DB_PATH",
+    str(Path(tempfile.gettempdir()) / f"insightgpt-test-datasets-{os.getpid()}.duckdb"),
+)

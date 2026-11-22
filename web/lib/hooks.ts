@@ -1,5 +1,6 @@
 'use client';
 
+import * as React from 'react';
 import {
   useMutation,
   useQueries,
@@ -503,4 +504,31 @@ export function useForecast(
     staleTime: 60_000,
     retry: retryUnlessClientError,
   });
+}
+
+/**
+ * Track a CSS media query from React.
+ *
+ * Used where a layout has to change *structure*, not just style — a wide table
+ * becoming a stack of cards, for instance, which cannot be done by hiding one
+ * of two copies in CSS without putting the same rows twice into the
+ * accessibility tree.
+ *
+ * Starts `false` on the server and in the first client render, then corrects
+ * itself in an effect. That costs one frame of the wide layout on a phone,
+ * which is the price of not shipping a hydration mismatch; the alternative,
+ * reading `matchMedia` during render, makes the server and client HTML differ.
+ */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = React.useState(false);
+
+  React.useEffect(() => {
+    const list = window.matchMedia(query);
+    const sync = () => setMatches(list.matches);
+    sync();
+    list.addEventListener('change', sync);
+    return () => list.removeEventListener('change', sync);
+  }, [query]);
+
+  return matches;
 }

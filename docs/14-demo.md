@@ -1,10 +1,14 @@
-# 12 — Demo Walkthrough
+# 14 — Demo Walkthrough
 
-A five-minute script for demonstrating InsightGPT live — to a viva panel, a
-reviewer, or anyone who has not seen it before. It gives the exact sequence, what
-to point at on each screen, and one line of what to say per beat. A terminal-only
-version (pure `curl`) follows in §8 for when the projector, the browser or the
-frontend is not cooperating.
+A script for demonstrating InsightGPT live — to a viva panel, a reviewer, or
+anyone who has not seen it before. It gives the exact sequence, what to point at
+on each screen, and one line of what to say per beat. A terminal-only version
+(pure `curl`) follows in §9 for when the projector, the browser or the frontend
+is not cooperating.
+
+**Budget.** Beats 0–4 and 6 are the original five minutes. Beat 5 (their own
+file, §7) adds about 90 seconds and is the one to keep if the audience cares
+whether this works on *their* data — drop Beat 6 for it rather than rushing both.
 
 **The three moments that matter.** Everything else is table stakes; budget your
 time so these three land:
@@ -27,7 +31,7 @@ setup.cmd --doctor        # Windows — the Docker stack too
 processes against your own Qdrant and Ollama): one line per check, a fix beside
 every failure, and it changes nothing. `--doctor` adds the Docker stack and
 wiring checks. Fix what either one names, or run `--repair` for a clean rebuild
-that preserves your `.env`. See §9.
+that preserves your `.env`. See §10.
 
 Check `GEMINI_API_KEY` is in `.env` before you present: the API refuses to start
 without it, which is far better than discovering it at the first question.
@@ -41,8 +45,9 @@ curl -s http://localhost:8000/health
 Have ready in separate tabs: the chat page, the insights page, and a terminal.
 Log in as **analyst** (`analyst@insightgpt.dev` / `analyst-pass`) — the insights,
 pipeline-run and report endpoints all require at least the analyst role, so a
-viewer session will lose you Beats 3 and 5. Keep the **viewer** account in mind
-for the role question in §7.
+viewer session will lose you Beats 3 and 6. Keep the **viewer** account in mind
+for the role question in §8. Beat 5 needs an **analyst** too: a viewer may read
+the dataset list but not upload.
 
 ---
 
@@ -208,7 +213,42 @@ test file."*
 
 ---
 
-## 7. Beat 5 — It is a real system, not a script (40 seconds)
+## 7. Beat 5 — Their file, answered over every row (90 seconds)
+
+This is the beat that answers *"but can it look at **my** data?"*, and the one
+that most needs to be shown rather than described. Have a small `.csv` of your
+own ready — a few hundred rows with one obvious numeric column.
+
+1. **Upload it** on **Sources**. The progress bar moves while the embed runs,
+   because the number on it is the indexer's own count of chunks embedded, not a
+   timer. When it says `ready` it also says how many chunks and how many
+   secrets/PII values were removed on the way in.
+2. **Ask a text question about it** — *"what does `my_sales.csv` say about
+   returns?"* The citation names the file.
+3. **Ask an arithmetic question** — *"what is the total revenue in
+   `my_sales.csv`?"* You get a figure, the dataset named in the first clause,
+   and the **SQL that produced it** over every row of the file. Say the
+   important part out loud: *"that query ran against a database that holds
+   nothing but uploads. It is never joined to the warehouse, and the answer says
+   so, because a number from someone's spreadsheet that looks like a company
+   figure is the same lie as the reverse."*
+4. **Ask about a file you never uploaded** — *"what is the total in
+   `budget_2027.xlsx`?"* It abstains, names what it does hold, and says it will
+   not answer with the retail sample data. This is the abstention of §4 again,
+   on the user's own turf.
+5. **Optional, if you have 20 seconds: restart the API** (`docker compose
+   restart api`) and reload. The dataset list is still there — it is a file on
+   disk, reconciled against the vector store on load — and a dataset whose
+   indexing was killed by the restart comes back as `failed` with that reason,
+   not as `ready` over an empty index.
+
+If the upload is refused with "this deployment cannot search uploaded files",
+`RETRIEVER` is not `qdrant`; that refusal is deliberate — a green badge over an
+index nothing can read would be worse.
+
+---
+
+## 8. Beat 6 — It is a real system, not a script (40 seconds)
 
 Pick **one** of these depending on your audience, then stop:
 
@@ -228,7 +268,7 @@ Pick **one** of these depending on your audience, then stop:
 
 ---
 
-## 8. Terminal-only demo (no browser)
+## 9. Terminal-only demo (no browser)
 
 Every beat above has a `curl` equivalent. Adding `-H "Accept: application/json"`
 returns the whole answer envelope in one object instead of an SSE stream —
@@ -264,7 +304,7 @@ curl -s -X POST http://localhost:8000/api/v1/ask \
 # 4. Beat 3 — insights, root cause and evidence
 curl -s "http://localhost:8000/api/v1/insights?limit=3" -H "Authorization: Bearer $TOKEN"
 
-# 5. Beat 5 — pipeline runs
+# 5. Beat 6 — pipeline runs
 curl -s "http://localhost:8000/api/v1/pipeline-runs?limit=3" -H "Authorization: Bearer $TOKEN"
 
 # 6. What every backing service is actually doing right now
@@ -286,7 +326,7 @@ Two things worth narrating from the raw JSON:
 
 ---
 
-## 9. If it breaks mid-demo
+## 10. If it breaks mid-demo
 
 **Rule one: `--doctor` first.** It diagnoses only and changes nothing, and it
 names the specific broken thing rather than a generic failure.
@@ -302,7 +342,7 @@ setup.cmd --doctor        # Windows
 | "Qdrant unreachable" / no retrieval results | `make preflight`. On a host run `QDRANT_URL` must be `127.0.0.1:6333`, not a compose service name |
 | A page or endpoint refuses to load | `--doctor`, then read the named cause |
 | Something is up but behaving wrongly | `--repair` — clean rebuild + recreate, re-seed, re-verify; `.env` is preserved |
-| Answers are slow on a laptop with no GPU | Expected — the local LLM is the slow step. Fall back to the terminal script in §8 against the offline stack, or set a cloud `LLM_PROVIDER` |
+| Answers are slow on a laptop with no GPU | Expected — the local LLM is the slow step. Fall back to the terminal script in §9 against the offline stack, or set a cloud `LLM_PROVIDER` |
 | Model pulls are taking too long before the demo | `--skip-models` gets you a running stack fast; say out loud that retrieval quality is degraded in that mode |
 | Nothing works and time is up | Run `make eval` and `make test` instead. The harnesses need no Docker, no network and no models, and they demonstrate the same guarantees with numbers |
 
@@ -311,21 +351,22 @@ again — completed steps become fast no-ops.
 
 ---
 
-## 10. Questions you will be asked
+## 11. Questions you will be asked
 
 | Question | Answer |
 |---|---|
 | *"Isn't this just the model writing SQL?"* | No — the model emits a metric selection (metric key, dimensions, time range). A query builder emits the SQL, and a validator rejects non-`SELECT` statements, non-allow-listed tables, and joins reaching unmodeled tables, then enforces a row limit and a statement timeout. |
 | *"What stops it hallucinating a number?"* | Numbers come from SQL result sets, and the faithfulness harness scores whether every figure in the prose appears in one — currently 9/9, floored at 0.90 in CI. |
 | *"What if the question has no answer?"* | It abstains and says why, with suggestions. §4. |
-| *"Does it need an API key / the internet?"* | Partly, and the split is the point. Chunking, redaction, embedding, the vector index and reranking all run **on this machine** — a document's contents never leave it. The configured reasoning step is Gemini, so it needs a key, and the snippets retrieved for a question are sent to Google inside the prompt. Set `LLM_PROVIDER=ollama` and the whole pipeline is local, at the cost of answer quality on a CPU-only laptop. |
+| *"Does it need an API key / the internet?"* | Partly, and the split is the point. As configured here, chunking, redaction, embedding, the vector index, reranking and every query — including the ones over an uploaded file — run **on this machine**. What leaves it is the reasoning step: the question text and the retrieved, already-redacted snippets go to Gemini, which is why it needs a key. Two settings move that line, and `make preflight` prints which way they are set: `LLM_PROVIDER=ollama` makes the whole pipeline local (at a quality cost on a CPU-only laptop), and `EMBED_PROVIDER=openai` would send every chunk of every uploaded document to a cloud embedder — that one is off here. |
+| *"If I upload my own spreadsheet, where does it go?"* | To disk on this machine, and into two local stores: chunks in the local Qdrant, and — for a `.csv`/`.xlsx` — its rows in a DuckDB file that holds nothing but uploads. A numeric question about it is planned and run locally, so its columns and totals do not go to the provider at all; the answer shows the query it ran. It is never joined to the retail warehouse, and it never becomes a governed metric. |
 | *"So could you run it fully offline?"* | Yes — `LLM_PROVIDER=ollama` with a local chat model. The reason the demo does not is quality, not capability: the reasoning step is the one place a small local model is clearly worse. |
 | *"Is the data real?"* | Synthetic retail data, generated with a deliberately planted quarterly dip so the slice question has a genuine, discoverable cause — see [`02-data-model.md`](02-data-model.md). |
 | *"What isn't finished?"* | Job chaining, watermark incremental sync for SQL sources, and a frontend test suite. All three are designed in the docs and listed in the README's status table. Say this plainly — it is a better answer than a feature list. |
 
 ---
 
-## 11. Related documents
+## 12. Related documents
 
 - Insight engine internals → [`05-insight-engine.md`](05-insight-engine.md)
 - API surface and the SSE event contract → [`06-api.md`](06-api.md)

@@ -711,6 +711,52 @@ def _check_config(env: dict, rep: _Report) -> None:
         )
 
 
+def _check_dataset_storage(env: dict, rep: _Report) -> None:
+    """Can an upload actually be written, and will the list survive a restart?
+
+    The three paths an upload touches are the only state the **API** writes, and
+    a deployment that cannot write them accepts a file and then fails — or, the
+    quieter failure, keeps the dataset list somewhere that does not outlive the
+    container. Checking writability is a one-file create-and-delete, which is
+    the only thing in this preflight that is not strictly a read; it happens
+    inside a directory this project owns and cleans up after itself.
+    """
+    print(_c("1", "\nUploaded datasets (writable, persistent state)"))
+    uploads = Path(env.get("DATASETS_DIR") or (REPO / "data" / "ingested"))
+    registry = Path(env.get("DATASETS_STORE_PATH") or (REPO / "data" / "datasets.json"))
+    tables = Path(
+        env.get("DATASETS_DB_PATH") or (REPO / "data" / "ingested" / "datasets.duckdb")
+    )
+
+    for label, target, hint in (
+        ("uploaded files", uploads, "DATASETS_DIR"),
+        ("the dataset registry", registry.parent, "DATASETS_STORE_PATH"),
+        ("uploaded tables", tables.parent, "DATASETS_DB_PATH"),
+    ):
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".preflight-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            rep.hard(
+                f"cannot write {label} at {target} ({exc.strerror or exc})",
+                (
+                    "In the containerised stack `/app/data/ingested` is mounted "
+                    "read-only, so uploads fail there — see docs/09-deployment.md "
+                    "§1.2.1 for the one-volume fix."
+                    + (f" On a host run, point {hint} somewhere writable." if hint else "")
+                ),
+            )
+        else:
+            rep.good(f"{label}: {target} is writable")
+
+    if registry.exists():
+        rep.good(f"registry present — the dataset list survives a restart ({registry})")
+    else:
+        rep.note(f"no registry file yet at {registry} — it is created on first upload")
+
+
 def _check_qdrant(env: dict, rep: _Report) -> None:
     print(_c("1", "\nVector store (Qdrant)"))
     url = (env.get("QDRANT_URL") or "http://127.0.0.1:6333").rstrip("/")
@@ -918,14 +964,21 @@ def preflight(*, offline: bool = False) -> int:
     rep = _Report()
 
     _check_config(env, rep)
+    _check_dataset_storage(env, rep)
     _check_qdrant(env, rep)
     _check_ollama(env, rep)
     _check_provider(env, rep, offline=offline)
 
     print(_c("1", "\nWhat this configuration means"))
-    info("document text is embedded locally and the vectors are stored locally;")
+    if (env.get("EMBED_PROVIDER") or "ollama").strip().lower() == "ollama":
+        info("document text is embedded locally and the vectors are stored locally;")
+    else:
+        info("document text is embedded by a CLOUD endpoint (EMBED_PROVIDER is not")
+        info("'ollama'), so every chunk of every document leaves this machine;")
     info("the snippets retrieved for a question are sent to the reasoning")
     info(f"provider ({(env.get('LLM_PROVIDER') or 'ollama').strip()}) inside the prompt.")
+    info("a numeric question over an uploaded table is planned and run locally,")
+    info("so its columns and result rows are not sent to that provider.")
 
     print()
     if rep.failures:

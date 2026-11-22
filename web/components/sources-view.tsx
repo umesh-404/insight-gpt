@@ -184,12 +184,29 @@ function shortenLocation(location: string): string {
 export function SourcesView() {
   const { hasRole, loading } = useAuth();
 
+  /**
+   * The subtitle has to be true for the account reading it.
+   *
+   * "Files you upload … and the connectors this deployment reads from"
+   * described two things a viewer can do neither of, on a page where the
+   * viewer sees no dropzone and no connector tab. Each role gets the sentence
+   * that matches the page it is actually looking at.
+   */
+  const description = loading
+    ? 'Where the data behind an answer comes from.'
+    : hasRole('admin')
+      ? 'Files uploaded for retrieval, and the connectors this deployment reads from.'
+      : hasRole('analyst')
+        ? 'Files you upload for retrieval, and what happens to them.'
+        : 'Files that have been uploaded for retrieval, and what happens to them.';
+
   return (
-    <div className="min-w-0 max-w-full space-y-6 overflow-hidden p-4 sm:p-6">
-      <PageHeader
-        title="Data sources"
-        description="Files you upload for retrieval, and the connectors this deployment reads from."
-      />
+    // Capped and centred, as Ask and Settings already are. Left full-bleed,
+    // a 1920px monitor put the filename and the remove button about 1500px
+    // apart, and following a row across that gap is the sort of thing people
+    // get wrong by one row.
+    <div className="mx-auto min-w-0 max-w-screen-xl space-y-6 overflow-hidden p-4 sm:p-6">
+      <PageHeader title="Data sources" description={description} />
 
       {loading ? (
         // Deciding the tab strip before auth resolves flashed a one-tab layout

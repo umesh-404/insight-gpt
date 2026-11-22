@@ -255,21 +255,41 @@ five-minute tour in [`docs/14-demo.md`](docs/14-demo.md).
 
 Upload a file on **Sources** (`.csv .tsv .xlsx .pdf .txt .md .json .docx`, up to
 25 MB each) and ask questions about it on **Ask**. The file is parsed, redacted,
-chunked and embedded **on your machine**, and the chunks and vectors are stored
-in your local Qdrant. The snippets a question retrieves are sent to the
-configured reasoning provider inside the prompt — with `LLM_PROVIDER=gemini`,
-that means those snippets go to Google. That is the whole of what leaves the
-machine; nothing else about the document does.
+chunked and embedded **on your machine**; the chunks and vectors go to your local
+Qdrant, and the first time you ask arithmetic about a `.csv`/`.tsv`/`.xlsx`, its
+rows are loaded into a local DuckDB file that holds nothing but uploads. The
+uploaded bytes and the dataset
+list are kept on disk, so **restarting the API does not empty your dataset
+list** — and a dataset whose indexing was interrupted comes back as `failed`
+with the reason, not as `ready` over an index that has nothing in it.
 
-Two things it deliberately will **not** do:
+Ask a numeric question about a tabular upload — *"what is the total revenue in
+`my_sales.csv`?"* — and you get a figure computed over **every** row, with the
+dataset named and the SQL that produced it shown. Ask a question about its
+language and you get a cited answer from its text.
 
-- **An uploaded spreadsheet does not become a governed metric.** The text-to-SQL
-  path answers only from the hand-authored semantic layer over the retail
-  warehouse. Ask "what was revenue?" after uploading `my_sales.csv` and you get
-  an answer from *your file's text*, attributed to that dataset, or an honest
-  decline — never the retail fixture's revenue dressed up as your data.
-- **An empty index stays empty.** With nothing uploaded, `/ask` does not pretend
-  to have searched.
+What leaves the machine: the question text and the retrieved, already-redacted
+snippets go to the configured reasoning provider — with `LLM_PROVIDER=gemini`,
+to Google. A numeric answer over an uploaded table is planned and run locally,
+so your columns and totals are not in that prompt at all. (`EMBED_PROVIDER` is
+the setting to watch: leaving it at `ollama` is what keeps document text itself
+on the machine.)
+
+Three things it deliberately will **not** do:
+
+- **An uploaded spreadsheet does not become a governed metric.** The governed
+  text-to-SQL path answers only from the hand-authored semantic layer over the
+  retail warehouse, and no upload enters it. Your file's number comes from your
+  file, attributed to it — never the retail fixture's revenue dressed up as your
+  data.
+- **It never mixes the two.** An uploaded table lives in its own database with
+  its own allow-list; it is never attached to, joined with, or used as a
+  fallback for the warehouse.
+- **It will not total a part of your file.** A file too large to load completely
+  is marked truncated and aggregates over it are declined, because a sum over
+  the rows that fit is not the answer to a question about the file. Likewise, an
+  empty index stays empty: with nothing uploaded, `/ask` does not pretend to
+  have searched.
 
 Details in [`docs/03-ingestion-etl.md`](docs/03-ingestion-etl.md) §7.1.
 
@@ -460,10 +480,11 @@ onto a managed platform — see [`docs/09-deployment.md`](docs/09-deployment.md)
 
 The system runs end to end: ingestion with redaction, the dbt warehouse and its
 semantic layer, hybrid retrieval, the insight engine with guardrails and
-abstention, the FastAPI surface with JWT auth and SSE, the Next.js UI, the
-scheduled worker, and both eval harnesses. CI runs lint, every Python suite, the
-drift guards, a real dbt build on a throwaway Postgres, the web build, and the
-evals on every push.
+abstention, uploaded datasets (durable list, indexed text, and SQL over a
+tabular upload's own table), forecasting with prediction intervals, the FastAPI
+surface with JWT auth and SSE, the Next.js UI, the scheduled worker, and both
+eval harnesses. CI runs lint, every Python suite, the drift guards, a real dbt
+build on a throwaway Postgres, the web build, and the evals on every push.
 
 Designed in the docs and **deliberately not built**:
 
@@ -495,6 +516,8 @@ Start with the docs index: [`docs/README.md`](docs/README.md).
 - [`09-deployment.md`](docs/09-deployment.md) — Docker Compose & cloud path
 - [`10-testing-eval.md`](docs/10-testing-eval.md) — tests & eval harnesses
 - [`11-roadmap.md`](docs/11-roadmap.md) — phased build plan
+- [`12-mcp.md`](docs/12-mcp.md) — the MCP server surface
+- [`13-forecasting.md`](docs/13-forecasting.md) — forecasting, intervals, and when it refuses
 - [`14-demo.md`](docs/14-demo.md) — five-minute demo walkthrough
 
 ## License

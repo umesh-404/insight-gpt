@@ -224,6 +224,31 @@ The data-engineering monitor.
 - **Settings.** Profile, theme toggle (persisted), and — for admins — the active
   LLM provider + model and dependency status pulled from `/status`.
 
+### 4.6 Sources / datasets
+
+The screen where the user's own data arrives, so every state it can be in has
+to be legible rather than merely handled:
+
+- **Upload.** `DatasetUpload` refuses an unaccepted type or an oversized file in
+  the client *and* the server refuses it again; the accepted list and both size
+  caps are stated before the user picks, not after.
+- **Indexing.** The bar is the API's `progress`, which is parse/redact up to
+  0.45 and then the indexer's own count of chunks embedded
+  ([`06-api.md`](06-api.md) §3.3.1). It moves during the embed and never moves
+  backwards, because the slow step is exactly when a still bar reads as a hang.
+- **Ready.** Chunk count and redaction count, both measured. `0 redactions` is
+  a measurement, not a silence.
+- **Failed.** The reason, in the user's words rather than a traceback — and no
+  retry button on a permanent error (an unparseable file does not become
+  parseable on a second attempt).
+- **Deleted.** The vectors go first; the row disappears only once they are
+  actually gone, so the list never shows a dataset the index has lost or hides
+  one it still holds.
+- **Restart.** The list is served from a durable registry reconciled against
+  the vector store, so a reload after an API restart shows the same datasets —
+  and shows a dataset whose indexing the restart killed as `failed`, not
+  `ready`.
+
 ## 5. Component inventory
 
 Domain components, each a thin, typed composition over shadcn/ui primitives.
@@ -243,6 +268,10 @@ Domain components, each a thin, typed composition over shadcn/ui primitives.
 | `DateRangeFilter` | Range + dimension filter bar | query params |
 | `InventoryAtRiskTable` | Ranked at-risk SKUs | `MetricResult` |
 | `ReportPreview` | Paged report blocks + export | `Report` |
+| `DatasetUpload` | Drop zone, client-side type/size refusal, the accepted-types sentence | `POST /datasets` |
+| `DatasetTable` | One row per dataset: status, real progress, chunk and redaction counts, delete | `Dataset[]` + `DatasetJob` polling |
+| `DatasetPanel` | The datasets half of `/sources`, including the viewer's read-only view | both of the above |
+| `ForecastPanel` | A governed metric's history, projection and **interval band**, with the method and caveats | `ForecastResult` |
 
 ### `ChartRenderer` and `chart_spec`
 

@@ -331,9 +331,10 @@ graph LR
     VAL --> PARSE["parse to text<br/>csv/tsv/xlsx/pdf/txt/md/json/docx"]
     PARSE --> RED["redact<br/>secrets + PII"]
     RED --> CHUNK["chunk"]
-    CHUNK --> EMB["embed locally<br/>Ollama nomic-embed-text"]
+    CHUNK --> EMB["embed<br/>local Ollama by default"]
     EMB --> UPS["upsert into insightgpt_documents<br/>every point tagged dataset_id"]
     UPS --> READY["status: ready<br/>chunks + redactions counted"]
+    READY -.->|"first numeric question<br/>about the file"| TBL["tabular only: materialize<br/>its rows into the uploads database"]
 ```
 
 Upload returns `202` with a job id immediately; the client polls
@@ -358,10 +359,41 @@ in [`06-api.md`](06-api.md).
 | | Scheduled corpus | Uploaded dataset |
 |---|---|---|
 | Trigger | APScheduler job / CLI | A user in the browser |
-| Source of record | `data/ingested/documents.json` | the uploaded bytes |
+| Source of record | `data/ingested/documents.json` | the uploaded bytes under `data/ingested/<dataset_id>/`, listed in the registry `data/datasets.json` |
 | Change tracking | `.index_state.json`, changed-only | none — an upload is indexed once; re-upload to replace |
 | Removal | document vanishes from the corpus | `DELETE /datasets/{id}` |
 | Touched by `reindex_docs` | yes | **no** — the job reads the corpus file, which uploads are not part of |
+
+**The registry survives a restart, and reconciles when it loads.** Until phase 2
+the dataset list lived in the API process, which was the worst combination
+available: restarting the API emptied the list in the UI while the uploaded
+bytes and the Qdrant points were still on disk, so the product denied holding
+data it was still holding. The list is now a JSON file (`data/datasets.json`,
+overridable with `DATASETS_STORE_PATH`), written atomically tmp-then-rename, in
+the same shape `sources_store` uses for connectors — including a `durable`
+property that says plainly when a deployment has fallen back to process memory
+instead of implying persistence it does not have.
+
+Because the file and the vector store are two pieces of state that can
+disagree, the registry **reconciles against Qdrant on first use**: a dataset
+whose points are gone is not `ready`, and one left at `indexing` by a restart
+that killed its worker is `failed` with that as the reason. Neither is quietly
+re-badged as success — see [`06-api.md`](06-api.md) §3.3.1.
+
+**A tabular upload also gets a real table — on first use, not at upload.**
+`.csv`, `.tsv` and `.xlsx` rows are read back from the persisted upload and
+materialized into an uploads-only DuckDB database (`data/ingested/datasets.duckdb`,
+overridable with `DATASETS_DB_PATH`), one table per dataset, with a schema
+inferred by scanning the values and reported rather than guessed. It happens the
+first time a numeric question about that file arrives and is then reused, which
+is the second reason the raw bytes are kept: an upload nobody asks arithmetic
+about never pays for a table. That is what lets "what is total revenue in
+`my_sales.csv`?" be
+answered over every row instead of declined; the rules that keep it separate
+from the retail warehouse are in
+[`05-insight-engine.md`](05-insight-engine.md) §3.4. A file that exceeds the row
+cap is marked truncated, and aggregates over it are **declined** rather than
+computed from the part that fit.
 
 **Limits, and why they are refusals rather than hangs.** Accepted extensions
 are `.csv .tsv .xlsx .pdf .txt .md .json .docx`; anything else is a `400` naming
@@ -371,20 +403,36 @@ rejected with `413`. An upload that cannot be parsed or embedded sets
 `"indexing"` forever, which is indistinguishable from slow.
 
 **An uploaded file does not become a governed metric.** This is the honesty
-line, and it is worth stating twice. The structured, text-to-SQL path answers
-only from the hand-authored semantic layer over the retail warehouse. A user who
-uploads `my_sales.csv` and asks "what was revenue?" gets an answer from *their
-document's text*, attributed to that dataset, or an honest decline. Answering
-with the retail fixture's revenue as though it were their data would be the
-worst failure this system could have: confidently wrong, in the exact register
-of being right.
+line, and it is worth stating twice. The governed text-to-SQL path answers only
+from the hand-authored semantic layer over the retail warehouse, and no upload
+ever enters it. A user who uploads `my_sales.csv` and asks "what was revenue?"
+gets a figure computed over *their file*, attributed to that dataset and shown
+with the query that produced it
+([`05-insight-engine.md`](05-insight-engine.md) §3.4) — or an answer from the file's
+own text, or an honest decline. What never happens is the retail fixture's
+revenue being returned as though it were their data: confidently wrong, in the
+exact register of being right.
 
-**What is local and what is not.** The file is parsed, redacted, chunked and
-embedded on the machine, and the vectors and chunk text are stored in the local
-Qdrant. The snippets a question retrieves are sent to the configured reasoning
-provider inside the prompt — with `LLM_PROVIDER=gemini`, to Google. That is the
-whole of what leaves the machine, and the UI copy says exactly that rather than
-claiming the data never moves.
+**What is local and what is not.** The file is parsed, redacted and chunked on
+the machine; its rows, vectors and chunk text are stored on the machine (the
+uploads database, and the local Qdrant). Two things can cross the boundary, and
+both are configuration you can read off `.env`:
+
+- **The reasoning step.** The snippets a question retrieves are sent to the
+  configured reasoning provider inside the prompt — with `LLM_PROVIDER=gemini`,
+  to Google — along with the question text itself, which is what the router
+  reads. A *numeric* question over a tabular upload is different: it is planned
+  and executed locally and its answer is assembled in code, so the dataset's
+  column names and result rows never reach a provider
+  ([`08-security.md`](08-security.md) §8).
+- **Embedding, only if you move it.** `EMBED_PROVIDER=ollama` (the default)
+  embeds on the machine. Setting it to `openai` sends every chunk of every
+  uploaded document to a cloud embedding endpoint, which is a different and much
+  larger exposure than the reasoning prompt — see
+  [`08-security.md`](08-security.md) §8.
+
+That is the whole of what can leave the machine, and the UI copy says exactly
+that rather than claiming the data never moves.
 
 ## 8. Operational commands
 

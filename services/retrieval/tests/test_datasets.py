@@ -295,3 +295,41 @@ def test_a_path_object_and_a_str_resolve_differently():
         None, Path("/tmp/a.csv")
     )
     assert _resolve_source("a,b\n1,2", text=None, path=None) == ("a,b\n1,2", None)
+
+
+def test_progress_is_reported_once_per_embedding_batch(wired, monkeypatch):
+    """The embed is the slow step, so it is the step that has to report.
+
+    Progress used to jump straight from "embedding" to "done", which on a real
+    file is a bar that sits still for the minutes that actually matter. The
+    unit is one report per request sent to the embedding model - real work, not
+    a timer (contract 3.8) - and the request pattern is unchanged: the batches
+    are cut on the same configured `batch_size` the embedder uses internally.
+    """
+    cfg, holder, embedder = wired
+    monkeypatch.setattr(cfg.embedding, "batch_size", 2)
+    # Long enough to chunk into several pieces, so there is more than one batch.
+    body = "\n\n".join(f"Paragraph {i}. " + ("sales figures " * 60) for i in range(12))
+
+    seen: list[tuple[float, str]] = []
+    result = index_dataset(
+        "ds_abc123abc123",
+        "a.txt",
+        body,
+        config=cfg,
+        progress=lambda f, m: seen.append((f, m)),
+    )
+    assert result.ok
+
+    batch_reports = [(f, m) for f, m in seen if m.startswith("embedded ")]
+    assert len(batch_reports) >= 2, f"expected a report per batch, got {seen}"
+    # One request per batch of `batch_size` texts.
+    calls = (len(embedder.seen) + 1) // 2
+    assert len(batch_reports) == calls
+    # Monotone, inside the embed's own slice of the bar, and never pretending
+    # the write has happened while chunks are still being embedded.
+    fractions = [f for f, _ in batch_reports]
+    assert fractions == sorted(fractions)
+    assert all(0.3 <= f <= 0.85 for f in fractions)
+    # The message counts chunks that are done, not chunks that were started.
+    assert batch_reports[-1][1].endswith(f"of {len(embedder.seen):,} chunks")

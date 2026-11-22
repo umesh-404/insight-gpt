@@ -177,6 +177,49 @@ the North region", evidenced by cited tickets).
 Metric decomposition like this — total → by-dimension → contribution — is a
 reusable template the engine applies to any "why did *metric* change?" question.
 
+### 3.4 Uploaded datasets — a second SQL path that never touches the warehouse
+
+A question that **names a file** (`question_names_a_file`) leaves the governed
+path entirely. Phase 1 could only answer such a question from the file's indexed
+text, so "what is total revenue in `my_sales.csv`?" abstained: retrieval returns
+a handful of row chunks, and a total summed from those is a figure computed from
+a sample. That abstention was correct and useless.
+
+Phase 2 gives a **tabular** upload its own table
+([`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1) and answers the arithmetic
+with one query over every row. Four rules make that safe rather than merely
+impressive, and each is a rule, not a preference:
+
+1. **Separate database, separate allow-list.** Uploaded tables live in their own
+   DuckDB file with their own connection. The allow-list passed to `validate_sql`
+   on each call holds exactly one name — that dataset's own table — so a query
+   reaching another upload, a retail fact table or a catalog view fails
+   validation instead of returning rows. The two stores are never attached,
+   joined, or used as each other's fallback.
+2. **The question has to actually ask arithmetic.** The planner returns "not
+   mine" for anything that does not, and the answer comes from the indexed text
+   as before. Nothing that used to be a retrieval answer silently becomes a
+   number.
+3. **A partial table cannot answer a whole-table question.** A file loaded up to
+   the row cap is marked truncated and aggregates over it are **declined** with
+   the real row counts. So is a sum over a column that did not read as numbers,
+   or an aggregate whose column the question never named — with the real column
+   list, not a guess.
+4. **The answer says where the number came from.** The envelope names the
+   dataset in the first clause of the prose, carries the exact SQL, cites the
+   dataset with its derived schema, and caveats that the figure is from an
+   upload and *not* from the governed retail warehouse.
+
+The three outcomes are distinguishable by a reader without being told: a figure
+attributed to the dataset with its query; an **abstention** naming the file
+(including when the file is not one the registry holds — a filename we do not
+have never falls through to a governed figure); or a text answer with citations
+and no `sql`.
+
+The reverse direction is equally forbidden. A question that names no file is
+never answered from an upload, and the engine does not consult uploaded tables
+when resolving a governed metric.
+
 ---
 
 ## 4. SQL guardrails

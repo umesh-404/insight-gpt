@@ -6,6 +6,14 @@ warehouse layering, the star schema, the dbt project structure, and the
 data-side companion to [`01-architecture.md`](01-architecture.md) §4.2 and the
 target of the ELT pipeline in [`03-ingestion-etl.md`](03-ingestion-etl.md).
 
+**What is deliberately not in here:** the tables created from **uploaded**
+files. They are inferred per upload rather than modeled, they live in their own
+database outside the warehouse, and nothing in this document — no fact, no
+dimension, no metric — refers to them
+([`05-insight-engine.md`](05-insight-engine.md) §3.4). A user's spreadsheet
+never becomes part of the governed data model, and that is the point of keeping
+it out of this file.
+
 ## 1. Why retail / e-commerce
 
 The project needs **one** domain modeled end to end (a non-goal is competing

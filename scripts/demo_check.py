@@ -20,10 +20,28 @@ next one:
     8.  the chunks are really in the vector store, and no secret is
     9.  a query retrieves the uploaded content
     10. an answer in /ask cites the uploaded dataset by name
+    11. the dataset list survives a restart, and still agrees with Qdrant
+    12. a numeric question over a tabular upload returns the file's real total
+    13. that figure is attributed to the upload and reads no retail table
+    14. the same question about a file nobody uploaded abstains
+    15. the uploaded-table store holds no raw secret
+    16. indexing progress moved because batches completed, not because time passed
 
-Safe to run repeatedly. It creates two datasets from the fixture files in
+Steps 12 and 15 recompute what the answer should be from the fixture file
+rather than comparing against a recorded number, so a plausible wrong total
+fails here too.
+
+Safe to run repeatedly. It creates four datasets from the fixture files in
 ``tests/e2e_datasets/fixtures`` and removes them again through the API's own
-``DELETE /datasets/{id}``, which is a filtered delete on ``dataset_id``.
+``DELETE /datasets/{id}``, which is a filtered delete on ``dataset_id``; it
+then drops the uploaded-table rows for *those ids only*, because the route
+does not (see step 17).
+
+One thing step 11 does write: reloading the registry from its own file runs the
+reconciliation pass, which is what a real restart does on boot. It can correct
+a row that disagrees with the vector store — a dataset left at ``indexing`` by
+an earlier crash becomes ``failed`` — which is a correction, not a loss, and
+would have happened on the next restart anyway.
 
 SAFETY (contract §3): this Qdrant instance is shared with another project. The
 script NEVER creates, drops, recreates or prunes a collection. ``--scratch``
@@ -38,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -63,6 +82,24 @@ from e2e_datasets.qdrant_safety import (  # noqa: E402
 
 LIGHTHOUSE = "ketterdam_lighthouse.md"
 SECRET_FILE = "deploy_notes.txt"
+#: Phase 2: the tabular path. `TABULAR` has 600 rows and one right answer that
+#: this script recomputes from the file; `LEAKY` has secrets in its CELLS, which
+#: is a different question from secrets in its prose; `UNKNOWN_FILE` is never
+#: uploaded, and naming it has to abstain.
+TABULAR = "quarry_sales.csv"
+LEAKY = "leaky_orders.csv"
+UNKNOWN_FILE = "fjerda_ledger_2031.csv"
+#: Physical tables of the governed warehouse. None may appear in a query
+#: generated for an uploaded dataset (contract §3.3).
+RETAIL_TABLES = (
+    "fact_order_items",
+    "fact_inventory_snapshot",
+    "dim_date",
+    "dim_product",
+    "dim_customer",
+    "dim_store",
+    "dim_channel",
+)
 PLANTED_FACT = "Hestia Marlow"
 SECRET_BODIES = (
     "AIzaFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK",
@@ -436,10 +473,35 @@ def _login(client: Any) -> str | None:
     return response.json()["access_token"]
 
 
+def _capture_progress(samples: list[tuple[float, str]]) -> None:
+    """Record what the indexer reports during the real embed (step 16).
+
+    A pass-through around the indexing seam: the original callback still fires,
+    so the dataset's bar behaves exactly as it does in the app, and this script
+    additionally sees every ``(fraction, message)`` the indexer produced. The
+    alternative — timing the UI — cannot distinguish a bar driven by batches
+    from one driven by a clock, which is the whole question (§3.8).
+    """
+    from app.api import datasets_store as store
+
+    original = store.index_dataset_text
+
+    def wrapper(*, progress=None, **kwargs: Any) -> int:
+        def tee(fraction: float, message: str) -> None:
+            samples.append((float(fraction), str(message)))
+            if progress is not None:
+                progress(fraction, message)
+
+        return original(progress=tee, **kwargs)
+
+    store.index_dataset_text = wrapper  # type: ignore[assignment]
+
+
 def run_journey(report: Report, collection: str) -> None:
     from fastapi.testclient import TestClient
 
     created: list[dict[str, Any]] = []
+    progress_samples: list[tuple[float, str]] = []
     try:
         # Imported inside the guard on purpose: app/api/main.py builds the app at
         # module scope, so a configuration the app refuses to boot with raises on
@@ -468,6 +530,7 @@ def run_journey(report: Report, collection: str) -> None:
             )
             return
         headers = {"Authorization": f"Bearer {token}"}
+        _capture_progress(progress_samples)
 
         # --- 6. upload ----------------------------------------------------
         for name in (LIGHTHOUSE, SECRET_FILE):
@@ -535,6 +598,16 @@ def run_journey(report: Report, collection: str) -> None:
 
         # --- 10. an answer cites the dataset ------------------------------
         _check_citation(report, client, headers, retrieval_ok)
+
+        # --- 11-16: what phase 2 added -----------------------------------
+        _restart_registry(report, created)
+        tabular = _check_tabular_answer(report, client, headers)
+        if tabular is not None:
+            created.append(tabular)
+        leaky = _check_tabular_secrets(report, client, headers)
+        if leaky is not None:
+            created.append(leaky)
+        _check_progress_moved(report, progress_samples)
     finally:
         _cleanup(report, client, created)
         client.close()
@@ -703,6 +776,34 @@ def _check_citation(
     )
 
 
+def _drop_own_upload_tables(created: list[dict[str, Any]]) -> list[str]:
+    """Drop the uploaded-table rows this run materialized, and only those.
+
+    ``DELETE /datasets`` removes the Qdrant points, the raw files and the
+    registry row, but does not drop the table in the uploaded-datasets
+    database, so a run of this script would otherwise leave an ``upload_<id>``
+    table behind every time — with the file's raw cells in it. Each drop is by
+    the dataset id this run generated, so nothing anyone else uploaded is ever
+    addressed. Returns the ids that had a table to remove.
+    """
+    try:
+        from app.warehouse.datasets_db import get_datasets_db
+    except Exception:  # noqa: BLE001 — nothing to clean if it is not installed
+        return []
+    try:
+        db = get_datasets_db()
+    except Exception:  # noqa: BLE001
+        return []
+    dropped: list[str] = []
+    for dataset in created:
+        try:
+            if db.drop(dataset["id"]):
+                dropped.append(dataset["id"])
+        except Exception:  # noqa: BLE001 — a cleanup hiccup is not a finding
+            continue
+    return dropped
+
+
 def _cleanup(report: Report, client: Any, created: list[dict[str, Any]]) -> None:
     """Remove only the datasets this run created, through the API's own delete."""
     if not created:
@@ -713,17 +814,384 @@ def _cleanup(report: Report, client: Any, created: list[dict[str, Any]]) -> None
     for dataset in created:
         response = client.delete(f"{API}/datasets/{dataset['id']}", headers=headers)
         (removed if response.status_code == 200 else stuck).append(dataset["id"])
+    orphans = _drop_own_upload_tables(created)
+    if orphans:
+        report.record(
+            "17. uploaded tables removed",
+            WARN,
+            f"DELETE /datasets reported success but left {len(orphans)} table(s) in the "
+            f"uploaded-datasets database; this script dropped its own: "
+            + ", ".join(orphans),
+            "app/api/routers/datasets.py::delete_dataset never calls "
+            "DatasetsDB.drop, so deleting a dataset in the UI leaves its table — "
+            "and its raw, unredacted cells — behind for ever, with the registry row "
+            "that named it gone.",
+        )
     if stuck:
         report.record(
-            "11. cleanup",
+            "17. cleanup",
             WARN,
             f"removed {len(removed)}, could not remove: {', '.join(stuck)}",
             "delete them from the Sources page, or re-run once Qdrant is reachable. "
             "They are inert, but they will show up in the demo's dataset list.",
         )
     else:
-        report.record("11. cleanup", PASS, f"removed {len(removed)} dataset(s) this run created")
+        report.record("17. cleanup", PASS, f"removed {len(removed)} dataset(s) this run created")
 
+
+
+# --------------------------------------------------------------------------
+# Steps 11-16: what phase 2 added
+# --------------------------------------------------------------------------
+# These four claims are the ones that cannot be checked by looking at the UI,
+# because each of them is about something being *absent*: a dataset list that
+# does not empty on restart, a figure that is not the warehouse's, an answer
+# that is not given for a file nobody uploaded, and a bar that does not move
+# without work behind it.
+
+
+def _restart_registry(report: Report, created: list[dict[str, Any]]) -> None:
+    """11. the dataset list survives a restart.
+
+    A real restart is simulated the way a fresh process boots: throw the
+    in-process registry away and build a new one over the same file, then
+    reconcile it against what Qdrant actually holds. If the registry is not
+    durable at all, that is the finding.
+    """
+    name = "11. the dataset list survives a restart"
+    if not created:
+        report.record(name, SKIP, "nothing was uploaded to restart with")
+        return
+    try:
+        from app.api import datasets_store as store
+    except Exception as exc:  # noqa: BLE001
+        report.record(name, FAIL, f"{type(exc).__name__}: {exc}", "the API package is broken")
+        return
+
+    registry = getattr(store, "registry", None)
+    if registry is None:
+        report.record(
+            name,
+            FAIL,
+            "app.api.datasets_store has no registry(); the dataset list is still "
+            "in-process",
+            "the registry has to be durable, or restarting the API mid-demo empties "
+            "the dataset list while the files and vectors are still there.",
+        )
+        return
+
+    current = registry()
+    if not current.durable:
+        report.record(
+            name,
+            FAIL,
+            f"the registry backend is {current.backend!r}, which does not survive a "
+            "restart",
+            "set DATASETS_STORE_PATH, or run the API from the repo root so the default "
+            "data/datasets.json is used. Until then, restarting the API loses the "
+            "dataset list.",
+        )
+        return
+
+    path = current.path
+    before = {d["id"] for d in created}
+    try:
+        fresh = store.set_registry(path)
+        changed = fresh.reconcile()
+        after = {d.id for d in fresh.list_all()}
+    except Exception as exc:  # noqa: BLE001
+        report.record(
+            name,
+            FAIL,
+            f"rebuilding the registry from {path} raised {type(exc).__name__}: {exc}",
+            "a registry that cannot be reloaded is not durable; read the error above",
+        )
+        return
+
+    missing = sorted(before - after)
+    if missing:
+        report.record(
+            name,
+            FAIL,
+            f"{len(missing)} dataset(s) did not survive: {', '.join(missing)}",
+            f"the registry file is {path}; check it was written before the reload",
+        )
+        return
+
+    # And every surviving row has to still agree with the vector store.
+    lying = [
+        d
+        for d in fresh.list_all()
+        if d.id in before and (d.status != "ready" or d.chunks < 1)
+    ]
+    if lying:
+        report.record(
+            name,
+            FAIL,
+            "survived the restart but no longer indexed: "
+            + ", ".join(f"{d.name} ({d.status}, {d.chunks} chunks): {d.error}" for d in lying),
+            "reconciliation found the points missing. If the collection was recreated "
+            "since the upload, re-upload the file; do NOT drop the collection.",
+        )
+        return
+    report.record(
+        name,
+        PASS,
+        f"{len(before)} dataset(s) reloaded from {path.name} and confirmed against the "
+        f"vector store ({len(changed)} row(s) corrected)",
+    )
+
+
+def _check_tabular_answer(
+    report: Report, client: Any, headers: dict[str, str]
+) -> dict[str, Any] | None:
+    """12-14. a numeric question over an uploaded table.
+
+    The expected total is computed from the fixture here, so a plausible wrong
+    number cannot pass this check either. Returns the dataset it created so the
+    caller can clean it up.
+    """
+    import csv
+    from decimal import Decimal
+
+    name = "12. a tabular upload answers a numeric question"
+    source = FIXTURES / TABULAR
+    if not source.is_file():
+        report.record(name, SKIP, f"{TABULAR} is not in {FIXTURES}")
+        return None
+    with source.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    expected = float(sum(Decimal(r["revenue"]) for r in rows))
+
+    response = client.post(
+        f"{API}/datasets",
+        files=[("files", (TABULAR, source.read_bytes(), "text/csv"))],
+        headers=headers,
+    )
+    if response.status_code != 202:
+        report.record(
+            name,
+            FAIL,
+            f"HTTP {response.status_code} {response.text[:200]}",
+            "the upload of the tabular fixture was refused; see step 6's guidance",
+        )
+        return None
+    dataset = {"id": response.json()["dataset_id"], "name": TABULAR}
+    final = _poll(client, headers, dataset["id"])
+    if final.get("status") != "ready":
+        report.record(
+            name,
+            FAIL,
+            f"status={final.get('status')!r} message={final.get('message')!r}",
+            "the tabular fixture did not index; the reason above is the parser's",
+        )
+        return dataset
+
+    envelope = _ask(client, headers, f"What is the total revenue in {TABULAR}?")
+    if envelope is None:
+        report.record(name, FAIL, "/ask did not return an answer", "see the API log")
+        return dataset
+    answer = envelope.get("answer") or ""
+    if envelope.get("abstained"):
+        report.record(
+            name,
+            WARN,
+            f"the question was declined: {answer[:200]}",
+            "declining is honest, but a tabular upload is supposed to answer an "
+            "aggregate now. If this is a truncated file the decline is correct.",
+        )
+    elif not _states_figure(answer, expected):
+        report.record(
+            name,
+            FAIL,
+            f"expected {expected:,.2f} (computed from {TABULAR}); the answer says "
+            f"{answer[:220]!r}",
+            "the figure does not match the file. Do not present this: a wrong total "
+            "formatted like a right one is the failure mode this product refuses.",
+        )
+    else:
+        report.record(
+            name,
+            PASS,
+            f"total {expected:,.2f} returned, SQL shown: {(envelope.get('sql') or ['-'])[0][:90]}",
+        )
+
+    # 13. attributed to the upload, and nowhere near the warehouse.
+    sql = " ".join(envelope.get("sql") or []).lower()
+    retail = [t for t in RETAIL_TABLES if t in sql]
+    names_it = TABULAR.lower() in answer.lower() or any(
+        TABULAR.lower() in str(v).lower()
+        for c in (envelope.get("citations") or [])
+        for v in c.values()
+    )
+    if retail:
+        report.record(
+            "13. the figure is attributed to the upload, not the warehouse",
+            FAIL,
+            f"the query touches governed warehouse table(s): {', '.join(retail)}",
+            "an uploaded table and the retail warehouse share no query, join or "
+            "fallback. This is the one defect that must block a demo.",
+        )
+    elif not names_it:
+        report.record(
+            "13. the figure is attributed to the upload, not the warehouse",
+            FAIL,
+            f"the answer names neither the dataset nor a citation to it: {answer[:200]!r}",
+            "a figure a reader could take for a warehouse number has to say which "
+            "uploaded file it came from.",
+        )
+    else:
+        report.record(
+            "13. the figure is attributed to the upload, not the warehouse",
+            PASS,
+            "the answer names the dataset and the query reads only its own table",
+        )
+
+    # 14. a file nobody uploaded.
+    unknown = _ask(client, headers, f"What is the total revenue in {UNKNOWN_FILE}?")
+    if unknown is None:
+        report.record("14. an unknown file abstains", FAIL, "/ask did not answer")
+    else:
+        unknown_answer = unknown.get("answer") or ""
+        if unknown.get("sql"):
+            report.record(
+                "14. an unknown file abstains",
+                FAIL,
+                f"governed SQL ran for a file that does not exist: {unknown['sql']}",
+                "a question about an upload must never fall back to the warehouse.",
+            )
+        elif _reported_figures(unknown_answer) and not unknown.get("abstained"):
+            report.record(
+                "14. an unknown file abstains",
+                FAIL,
+                f"a figure was returned for a file nobody uploaded: {unknown_answer[:200]!r}",
+                "this is the worst outcome in the product: a correct-looking number "
+                "answering a question about data that does not exist.",
+            )
+        else:
+            report.record(
+                "14. an unknown file abstains",
+                PASS,
+                "declined, with no figure and no governed SQL",
+            )
+    return dataset
+
+
+def _check_tabular_secrets(report: Report, client: Any, headers: dict[str, str]) -> dict | None:
+    """15. the uploaded-table store holds no raw secrets (§3.5).
+
+    Redaction on the embedding path was proved in step 8. The table is a second
+    store, and the question has to be asked of it separately.
+    """
+    name = "15. no raw secret in the uploaded-table store"
+    source = FIXTURES / LEAKY
+    if not source.is_file():
+        report.record(name, SKIP, f"{LEAKY} is not in {FIXTURES}")
+        return None
+    response = client.post(
+        f"{API}/datasets",
+        files=[("files", (LEAKY, source.read_bytes(), "text/csv"))],
+        headers=headers,
+    )
+    if response.status_code != 202:
+        report.record(name, SKIP, f"HTTP {response.status_code}: the upload was refused")
+        return None
+    dataset = {"id": response.json()["dataset_id"], "name": LEAKY}
+    if _poll(client, headers, dataset["id"]).get("status") != "ready":
+        report.record(name, SKIP, "the fixture did not index")
+        return dataset
+
+    envelope = _ask(client, headers, f"What is the total revenue by api_key in {LEAKY}?")
+    rendered = str(envelope)
+    leaked = [s for s in SECRET_BODIES if s in rendered]
+    if leaked:
+        report.record(
+            name,
+            FAIL,
+            f"{len(leaked)} secret(s) came back in the answer: "
+            + ", ".join(s[:16] + "..." for s in leaked),
+            "the uploaded-table store is built from the RAW file: "
+            "DatasetsDB.materialize calls read_table_file and never redacts, so a "
+            "grouped query hands the values straight back. Do not demo a CSV with "
+            "real credentials or customer data in it until this is fixed.",
+        )
+    else:
+        report.record(name, PASS, "a grouped query over a secret-bearing column leaked nothing")
+    return dataset
+
+
+def _check_progress_moved(report: Report, progress_samples: list[tuple[float, str]]) -> None:
+    """16. the bar moved because work happened (§3.8).
+
+    ``progress_samples`` is what the indexer actually reported during the real
+    embed in step 7, captured by wrapping the seam rather than by timing the
+    UI. Two or more distinct fractions inside the embed's slice means the bar
+    was driven by batches completing; one means it still jumps.
+    """
+    name = "16. indexing progress moved during the embed"
+    if not progress_samples:
+        report.record(
+            name,
+            FAIL,
+            "the indexer reported no progress at all during a real embed",
+            "the progress callback that index_dataset exposes is not being passed, so "
+            "the bar jumps across the slowest step in the product.",
+        )
+        return
+    fractions = sorted({round(f, 3) for f, _ in progress_samples})
+    if len(fractions) < 2:
+        report.record(
+            name,
+            WARN,
+            f"only one progress value was reported: {fractions}",
+            "a small file embeds in one batch, so one report is honest. Re-run with a "
+            "larger file to see the bar move.",
+        )
+        return
+    report.record(
+        name,
+        PASS,
+        f"{len(progress_samples)} report(s) across {len(fractions)} distinct "
+        f"fraction(s) {fractions[0]}..{fractions[-1]}; last message: "
+        f"{progress_samples[-1][1]!r}",
+    )
+
+
+def _ask(client: Any, headers: dict[str, str], question: str) -> dict[str, Any] | None:
+    response = client.post(
+        f"{API}/ask",
+        json={"question": question, "stream": False},
+        headers={**headers, "Accept": "application/json"},
+    )
+    if response.status_code != 200:
+        return None
+    return response.json()
+
+
+_FIGURE_RE = re.compile(
+    r"(?<![\w.])(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*"
+    r"(cr|crore|crores|l|lakh|lakhs|k|m|mn|million|bn)?(?!\w)(?!\.\d)",
+    re.IGNORECASE,
+)
+_MULT = {
+    "": 1.0, "k": 1e3, "l": 1e5, "lakh": 1e5, "lakhs": 1e5, "m": 1e6, "mn": 1e6,
+    "million": 1e6, "cr": 1e7, "crore": 1e7, "crores": 1e7, "bn": 1e9,
+}
+
+
+def _reported_figures(text: str) -> list[float]:
+    out = []
+    for raw, suffix in _FIGURE_RE.findall(text or ""):
+        try:
+            out.append(float(raw.replace(",", "")) * _MULT.get((suffix or "").lower(), 1.0))
+        except ValueError:
+            continue
+    return out
+
+
+def _states_figure(text: str, expected: float, tolerance: float = 0.005) -> bool:
+    window = max(abs(expected) * tolerance, 0.01)
+    return any(abs(v - expected) <= window for v in _reported_figures(text))
 
 # --------------------------------------------------------------------------
 # Entry point

@@ -34,6 +34,7 @@ or the warehouse.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -48,6 +49,7 @@ from .. import datasets_store as store
 from ..datasets_store import Dataset, DatasetJob, StoredDataset
 from ..deps import rate_limit
 from ..errors import APIError, DependencyUnavailableError, NotFoundError
+from ..observability import dataset_event, file_fingerprint
 
 log = logging.getLogger("insightgpt.datasets")
 
@@ -138,6 +140,39 @@ def _validate_type(filename: str | None) -> None:
     )
 
 
+#: The slice of the bar the indexer owns. Everything before it — reading the
+#: persisted file, parsing, redacting — is seconds; the embed is minutes.
+_INDEX_FROM = 0.45
+_INDEX_TO = 0.95
+
+
+def _progress_reporter(dataset_id: str):
+    """A ``progress(fraction, message)`` callback for the indexing seam.
+
+    Two things it guarantees, both of which matter more than smoothness:
+
+    * **It never moves backwards.** The indexer reports on its own 0..1 scale
+      and starts near zero ("reading the file"), while this worker has already
+      parsed and redacted; a bar that jumps back to 5% reads as a restart that
+      did not happen. The fraction is mapped into the indexer's slice of the
+      bar and then clamped to the highest value reported so far.
+    * **It carries the indexer's own words.** The message says "embedded 128 of
+      420 chunks" because that is what the indexer actually just did. Nothing
+      here invents a stage name or a number (contract §3.8).
+    """
+    highest = _INDEX_FROM
+
+    def report(fraction: float, message: str) -> None:
+        nonlocal highest
+        mapped = _INDEX_FROM + (_INDEX_TO - _INDEX_FROM) * max(0.0, min(1.0, fraction))
+        highest = max(highest, mapped)
+        # Progress is deliberately not persisted (see `datasets_store`): it
+        # describes a job in flight, and no job survives a restart.
+        store.update(dataset_id, progress=round(highest, 3), message=message)
+
+    return report
+
+
 def _index_dataset(dataset_id: str) -> None:
     """Parse -> redact -> embed one already-persisted dataset.
 
@@ -172,6 +207,7 @@ def _index_dataset(dataset_id: str) -> None:
             kind=kind,
             text=redacted,
             created_at=record.created_at.date().isoformat(),
+            progress=_progress_reporter(dataset_id),
         )
         if chunks == 0:
             # "Ready" with nothing in the index would read as success in the UI
@@ -286,6 +322,16 @@ async def upload_datasets(
                 path=str(path),
             )
             store.put(record)
+            # Structured, and deliberately fingerprinted rather than named:
+            # a filename can itself be the PII ("resignation_priya_sharma.pdf"),
+            # and these logs sit on the far side of the redaction boundary.
+            dataset_event(
+                "dataset_upload",
+                dataset_id=dataset_id,
+                bytes=len(payload),
+                kind=record.kind,
+                **file_fingerprint(name),
+            )
             created.append(record)
     except Exception:
         # The batch is rejected as a whole, so a file that was already written
@@ -370,8 +416,17 @@ async def delete_dataset(
                 "deleted. Try again once the vector store is reachable.",
                 details={"dataset_id": dataset_id, "reason": str(exc)[:200]},
             ) from exc
-        log.info("deleted %s point(s) for dataset %s", removed, dataset_id)
+        dataset_event("dataset_deleted", dataset_id=dataset_id, points_removed=removed)
 
     store.remove_files(dataset_id)
+    # A tabular upload also has a table in its own DuckDB database. Forgetting
+    # the dataset has to forget that too, or the file is gone from every
+    # surface while its rows sit on disk indefinitely. Suppressed because this
+    # is cleanup, not correctness: the record is already removed, so the
+    # engine reports the file as unknown and abstains either way.
+    with contextlib.suppress(Exception):
+        from ...warehouse.datasets_db import get_datasets_db
+
+        get_datasets_db().drop(dataset_id)
     store.remove(dataset_id)
     return DeleteResult(deleted=True)

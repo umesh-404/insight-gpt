@@ -34,8 +34,12 @@ class HistoryPoint(BaseModel):
 class ForecastPoint(BaseModel):
     """One projected period with its prediction interval.
 
-    ``lower <= value <= upper`` always holds; on a perfectly constant history
-    the interval collapses to zero width rather than exploding.
+    ``lower <= value <= upper`` always holds. The interval collapses to zero
+    width only when the *history itself* is constant — there it is a property of
+    the input, and the result says so. A model that returns a zero-width
+    interval over a history that varies has merely fitted the past perfectly;
+    the engine re-derives the width in that case rather than shipping a claim of
+    certainty, and names it in ``caveats``.
     """
 
     period: str

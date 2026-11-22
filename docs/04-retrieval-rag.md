@@ -43,13 +43,29 @@ by governed SQL. Qdrant holds only document text and its metadata. This
 separation is a hard design line: it keeps numeric answers exact and auditable
 (SQL, not vector similarity) and keeps retrieval focused on language.
 
-An **uploaded spreadsheet is on the retrieval side of that line, not the SQL
-side.** A `.csv` is parsed into text rows, chunked, redacted and embedded like
-any other document; it does **not** become a warehouse table and it does **not**
-become a governed metric. So a question like "what was revenue?" asked after
-uploading `my_sales.csv` is answered from that document's text, with the
-dataset named in the citation — or declined. What it must never do is answer
-with the retail fixture's revenue as though it were the user's file
+An **uploaded spreadsheet never becomes a governed metric.** A `.csv` is parsed
+into text rows, chunked, redacted and embedded like any other document, and
+retrieval is how every question about its language is answered — with the
+dataset named in the citation, or declined.
+
+Phase 2 added one thing to that picture, and it is worth being exact about what.
+A *tabular* upload is **also** loaded into its own DuckDB database so that an
+arithmetic question about it ("what is total revenue in `my_sales.csv`?") can be
+answered over **every** row rather than over the handful of row chunks a search
+returns — summing those would be a total computed from a sample
+([`05-insight-engine.md`](05-insight-engine.md) §3.4). What has *not* changed:
+
+- The upload's table is not in the warehouse. Separate database file, separate
+  connection, separate allow-list; the two are never attached, joined, or used
+  as each other's fallback.
+- The upload did not become a metric. There is no semantic-layer entry for it,
+  no dashboard tile, and no governed metric name that resolves to it.
+- The retail warehouse still never answers a question about somebody's file,
+  and an upload's number is never presented as a warehouse figure: the answer
+  names the dataset and shows the SQL that produced it.
+
+Answering with the retail fixture's revenue as though it were the user's file
+remains the worst failure available to this system
 ([`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1).
 
 ### 1.1 Metadata (payload) schema

@@ -77,8 +77,36 @@ interface ErrorPresentation {
   guidance?: string;
 }
 
+/**
+ * True when the request never reached the API at all.
+ *
+ * `fetch` rejects with a bare `TypeError: Failed to fetch` for a refused
+ * connection, a DNS failure, a CORS rejection and an offline browser alike —
+ * and that string, shown verbatim, was the body of the error panel on
+ * `/sources` whenever the API was down. "Failed to fetch" is a browser
+ * implementation detail; it tells the reader nothing about what to do. The
+ * upload path already raises `ApiError(0, 'network_error')` with a real
+ * sentence, so this detection exists to make the two read the same.
+ */
+function isNetworkFailure(error: unknown): boolean {
+  if (error instanceof ApiError) return error.status === 0;
+  return (
+    error instanceof TypeError &&
+    /fetch|network|load failed/i.test(error.message)
+  );
+}
+
 /** Different failure classes need different words — and different urgency. */
 function present(error: unknown): ErrorPresentation {
+  if (isNetworkFailure(error)) {
+    return {
+      heading: 'Could not reach the API',
+      icon: <CloudOff className="size-5" aria-hidden />,
+      tone: 'warning',
+      guidance:
+        'Nothing was sent and nothing changed. Check the API is running, then try again.',
+    };
+  }
   if (error instanceof ApiError) {
     if (error.status === 429) {
       return {
@@ -119,6 +147,11 @@ function present(error: unknown): ErrorPresentation {
  * reads the same wherever it surfaces.
  */
 export function describeError(error: unknown): string {
+  // An `ApiError(0)` carries its own sentence, so it falls through to the
+  // branch below; only the bare `TypeError` from `fetch` needs words put to it.
+  if (!(error instanceof ApiError) && isNetworkFailure(error)) {
+    return 'The request did not reach the API.';
+  }
   if (error instanceof ApiError) {
     const retryAfter = Number(error.details?.retry_after);
     if (error.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) {

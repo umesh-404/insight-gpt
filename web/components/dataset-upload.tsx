@@ -80,10 +80,16 @@ function triage(
     }
     if (!isAcceptedDatasetFile(file.name)) {
       const ext = datasetExtension(file.name);
+      // The list of accepted formats is *not* repeated here. Three rejected
+      // files produced three copies of the same 70-character sentence, which
+      // buried the part that differs between them. The panel states it once,
+      // underneath.
       rejected.push({
         key: nextKey(),
         name: file.name,
-        reason: `${ext ? `${ext} files are` : 'Files without an extension are'} not accepted. Accepted: ${ACCEPTED_SUMMARY}.`,
+        reason: ext
+          ? `${ext} is not one of the accepted formats.`
+          : 'A file needs one of the accepted extensions.',
       });
       continue;
     }
@@ -141,7 +147,12 @@ export function DatasetUpload({
 }) {
   const { toast } = useToast();
   const upload = useUploadDataset();
-  const inputId = 'dataset-file-input';
+  // Generated, not a constant: two of these on one page (hero and compact)
+  // would otherwise share an id, and every label would point at the first
+  // input.
+  const reactId = React.useId();
+  const inputId = `dataset-file-input${reactId}`;
+  const limitsId = `dataset-upload-limits${reactId}`;
 
   const [queue, setQueue] = React.useState<QueueItem[]>([]);
   const [rejected, setRejected] = React.useState<Rejected[]>([]);
@@ -321,7 +332,7 @@ export function DatasetUpload({
             {/* The limits are stated here, before anything is chosen, rather
                 than arriving as a rejection afterwards. */}
             <p
-              id="dataset-upload-limits"
+              id={limitsId}
               className={cn(
                 'mt-1 text-sm text-muted-foreground',
                 hero ? 'max-w-[52ch]' : 'max-w-[72ch]',
@@ -342,7 +353,7 @@ export function DatasetUpload({
               type="file"
               multiple
               accept={DATASET_ACCEPT_ATTR}
-              aria-describedby="dataset-upload-limits"
+              aria-describedby={limitsId}
               // `peer` and not `hidden`: the input stays the real focusable
               // control (a <label> is not focusable), so the visible ring has
               // to be driven off the input's focus state. Without this, a
@@ -479,11 +490,16 @@ export function DatasetUpload({
           <ul className="mt-2 space-y-1.5">
             {rejected.map((entry) => (
               <li key={entry.key} className="text-sm">
-                <span className="font-medium">{entry.name}</span>
+                <span className="break-words font-medium">{entry.name}</span>
                 <span className="text-muted-foreground"> — {entry.reason}</span>
               </li>
             ))}
           </ul>
+          {rejected.some((entry) => /accepted (formats|extensions)/.test(entry.reason)) ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Accepted: {ACCEPTED_SUMMARY}.
+            </p>
+          ) : null}
         </div>
       ) : null}
     </div>

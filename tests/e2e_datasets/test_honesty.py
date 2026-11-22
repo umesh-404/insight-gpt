@@ -13,6 +13,8 @@ text is stable.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -256,15 +258,83 @@ def test_an_upload_is_refused_when_it_could_never_be_searched(
 # --- §6.2 — say which dataset an answer came from ---------------------------
 
 
+@contextmanager
+def registered(name: str, dataset_id: str, *, kind: str = "document") -> Iterator[None]:
+    """Put one dataset in the registry for the duration of a test.
+
+    Needed since phase 2: ``engine.py`` now resolves a named file against the
+    registry *before* retrieval runs (``dataset_query.resolve_named_file``), so
+    a stub retriever holding a file's chunks is no longer enough to make the
+    engine believe the file exists. Registering it is what makes the test's
+    premise — "this file was uploaded" — actually true, which is what the test
+    was always claiming.
+    """
+    record = store.StoredDataset(
+        id=dataset_id,
+        name=name,
+        kind=kind,
+        status="ready",
+        bytes=1024,
+        chunks=3,
+        redactions=0,
+        created_at=datetime.now(UTC),
+        progress=1.0,
+        message="Indexed 3 chunk(s)",
+    )
+    store.put(record)
+    try:
+        yield
+    finally:
+        store.remove(dataset_id)
+
+
 def test_an_answer_from_an_upload_names_that_dataset(
     client: TestClient, analyst: str, retriever: StubRetriever
 ) -> None:
     retriever.set_dataset_docs()
-    envelope = ask(client, analyst, f"Summarize {LIGHTHOUSE_FILE} for me")
+    with registered(LIGHTHOUSE_FILE, "ds_feed00112233"):
+        envelope = ask(client, analyst, f"Summarize {LIGHTHOUSE_FILE} for me")
     assert envelope["citations"], "an answer built from documents carried no citations"
     assert citation_mentions(envelope, LIGHTHOUSE_FILE), (
         "no citation identifies the uploaded dataset by name, so the reader cannot tell "
         f"which file the answer came from: {envelope['citations']}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "DEFECT, surfaced by phase 2 and dangerous in combination with the two "
+        "registry-loader defects in test_durability.py: "
+        "app/engine/dataset_query.py::resolve_named_file treats the registry as the "
+        "sole authority on whether a file exists ('The registry is the authority on "
+        "whether the file exists'), and app/engine/engine.py::_named_file_envelope "
+        "abstains with 'I have no uploaded file called X ... No files are uploaded "
+        "yet.' whenever the row is absent. But the chunks are in Qdrant and "
+        "retrievable, which is the §3.6 disagreement from the other direction: if the "
+        "registry file is corrupt or one row fails validation, the list is emptied and "
+        "the product then actively DENIES holding files whose vectors it can still "
+        "search — a false statement about the reader's own data, in place of the "
+        "answer it could give. Resolution should fall back to the index (or say the "
+        "list could not be read), not assert absence from one of two stores."
+    ),
+)
+def test_a_file_the_index_holds_is_not_denied_because_the_registry_lost_it(
+    client: TestClient, analyst: str, retriever: StubRetriever
+) -> None:
+    """The registry and the index disagree, and the index is the one that can
+    answer. Saying "I have no uploaded file called X" is then untrue."""
+    retriever.set_dataset_docs()  # chunks present, registry deliberately empty
+    envelope = ask(client, analyst, f"Summarize {LIGHTHOUSE_FILE} for me")
+
+    answer = envelope["answer"].lower()
+    for denial in ("i have no uploaded file", "no files are uploaded"):
+        assert denial not in answer, (
+            f"the engine denies holding {LIGHTHOUSE_FILE} while its chunks are indexed "
+            f"and retrievable: {envelope['answer']!r}"
+        )
+    assert envelope["citations"], (
+        "the file's chunks are in the index and the answer carries no citation to them"
     )
 
 

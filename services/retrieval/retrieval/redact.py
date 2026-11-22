@@ -36,6 +36,15 @@ _TOKEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("github-pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b")),
     ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("stripe-key", re.compile(r"\b[sr]k_live_[A-Za-z0-9]{20,}\b")),
+    # The hyphenated family - `sk-live-…`, `sk-proj-…`, and the bare `sk-<40>`
+    # most hosted model APIs issue. The underscore rule above matched none of
+    # them, and a credential that no token rule claims is left for the phone
+    # and card rules to chew on: a real key came out of ingestion as
+    # `sk-live-ABCD[REDACTED PHONE]abcdef` - still a secret, now also
+    # corrupted. Found in a stored chunk, rendered back in a citation.
+    ("api-key-hyphenated", re.compile(r"\b[sr]k-(?:live|test|proj|ant|or)-[A-Za-z0-9_-]{10,}\b")),
+    ("api-key-bare", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    ("bearer-token", re.compile(r"\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{20,}")),
     ("gcp-api-key", re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
 ]
@@ -64,6 +73,13 @@ _CARD = re.compile(r"\b(?:\d[ -]?){13,16}\b")
 # digits with separators, not any 7-digit integer.
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{3}\)?[ .-]?)\d{3}[ .-]?\d{4}(?!\d)")
+# An explicit country code followed by 7-14 digits in any grouping. The rule
+# above only matches 3-3-4, so `+91 98765 43210` - the shape of every mobile
+# number in this product's own demo data - went through ingestion untouched.
+# The leading `+` is required on purpose: without it this would swallow order
+# ids and any long run of digits, and a redactor that eats real content is a
+# redactor someone turns off, which protects nobody.
+_PHONE_INTL = re.compile(r"(?<![\d+])\+\d{1,3}[ .-]?(?:\d[ .-]?){6,13}\d(?!\d)")
 
 
 def _luhn_ok(digits: str) -> bool:
@@ -124,6 +140,7 @@ def redact(source: str) -> tuple[str, int]:
         return "[REDACTED PHONE]"
 
     source = _PHONE.sub(phone_sub, source)
+    source = _PHONE_INTL.sub(phone_sub, source)
 
     # Private-key blocks, line-wise so the line count is preserved exactly.
     if "PRIVATE KEY" in source:

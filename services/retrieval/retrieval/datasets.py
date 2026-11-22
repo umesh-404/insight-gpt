@@ -66,8 +66,16 @@ log = logging.getLogger("retrieval.datasets")
 # never silently blended with it (contract §6.1).
 DATASET_SOURCE_TYPE = "dataset"
 
-# Progress is reported at stage boundaries, not per chunk. See `_Progress`.
+# Progress is reported at stage boundaries and once per embedding batch.
+# See `_Progress` and `_ReportingEmbedder`.
 ProgressCallback = Callable[[float, str], None]
+
+#: The slice of the 0..1 progress range the embed owns. Everything before it
+#: (read, extract) is fast; 0.9 and 1.0 are the Qdrant write and the confirmed
+#: count. The embed never reaches 1.0 on its own, because the points are not in
+#: the store yet when the last batch comes back.
+_EMBED_FROM = 0.3
+_EMBED_TO = 0.85
 
 __all__ = [
     "DATASET_SOURCE_TYPE",
@@ -147,10 +155,13 @@ def index_dataset(
     indexer happened to run.
 
     ``progress``, if given, is called as ``progress(fraction, message)`` at
-    stage boundaries (read, extracted, embedding, written). It is coarse by
-    design: the expensive step is a single batched embed call per 32 chunks and
-    splitting it to report a smoother number would make indexing slower to look
-    busier.
+    stage boundaries (read, extracted, embedding, written) **and once per
+    embedding batch** in between, because the embed is where the minutes go and
+    a bar that sits at 0.3 for two minutes reads as a hung upload. The unit is
+    a real one: one call per request actually sent to the embedding model, with
+    the fraction derived from batches completed out of batches needed. Nothing
+    here animates on a timer (contract §3.8) — if the model stalls, so does the
+    number, which is the honest reading.
     """
     if not dataset_id:
         raise ValueError("index_dataset requires a dataset_id")
@@ -223,7 +234,16 @@ def index_dataset(
             # Checked before chunking so a missing model fails in the first
             # second instead of after every chunk has been prepared.
             embedder.health()
-            stats = Indexer(cfg, store, embedder).index_documents([doc])
+            # The embed is the long pole, and it is the one step the caller
+            # cannot see into, so progress is reported from inside it.
+            reporting = _ReportingEmbedder(
+                embedder,
+                batch_size=cfg.embedding.batch_size,
+                report=report,
+                low=_EMBED_FROM,
+                high=_EMBED_TO,
+            )
+            stats = Indexer(cfg, store, reporting).index_documents([doc])
         report(0.9, "written to the vector store")
     except Exception as exc:  # noqa: BLE001 - the job must end, not hang (§6.6)
         log.exception("indexing dataset %s failed", dataset_id)
@@ -286,6 +306,60 @@ def _resolve_source(
     if isinstance(text_or_path, Path):
         return None, text_or_path
     return str(text_or_path), None
+
+
+class _ReportingEmbedder:
+    """An embedder that reports progress once per embedding batch.
+
+    Why a wrapper and not a hook in the indexer or the embedder: batching is
+    the embedder's business and the pipeline is shared with the curated corpus,
+    so neither of those is the right place to grow a UI concern. This splits
+    the chunk list on the **same configured batch size** the embedder would use
+    internally and calls it once per batch, so the request pattern the model
+    sees is unchanged — one request per batch of ``batch_size`` — and the only
+    thing added is a progress call between requests.
+
+    Everything other than :meth:`embed_documents` is delegated, so the indexer
+    cannot tell the difference and a cloud embedder works the same way.
+    """
+
+    def __init__(
+        self,
+        inner: object,
+        *,
+        batch_size: int,
+        report: ProgressCallback,
+        low: float,
+        high: float,
+    ) -> None:
+        self._inner = inner
+        self._batch_size = max(1, int(batch_size or 1))
+        self._report = report
+        self._low = low
+        self._high = high
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        size = self._batch_size
+        batches = (len(texts) + size - 1) // size
+        out: list[list[float]] = []
+        for number, start in enumerate(range(0, len(texts), size), start=1):
+            out.extend(self._inner.embed_documents(texts[start : start + size]))
+            # Reported after the batch returns, so the number describes work
+            # that has finished rather than work that has been started.
+            fraction = self._low + (self._high - self._low) * (number / batches)
+            self._report(
+                # Rounded so the last batch reports exactly `high` rather than
+                # a float a hair above it, which a caller clamping to a band
+                # would then have to special-case.
+                round(min(fraction, self._high), 4),
+                f"embedded {min(start + size, len(texts)):,} of {len(texts):,} chunks",
+            )
+        return out
 
 
 class _Progress:

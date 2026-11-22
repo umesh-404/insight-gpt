@@ -93,6 +93,57 @@ corpus it cites.
 (re-seed, re-index), but `pgdata` for a real deployment is not — back it up
 (Section 6).
 
+#### 1.2.1 Uploaded datasets need writable, persistent state — and Compose does not give them any yet
+
+An upload is the one thing the **API** writes. It touches three paths, all under
+`data/` at the repo root when the API runs on the host:
+
+| Path | Holds | Overridden by |
+|---|---|---|
+| `data/ingested/<dataset_id>/` | the uploaded bytes, so a re-index needs no re-upload | `DATASETS_DIR` |
+| `data/datasets.json` | the dataset registry (atomic tmp-then-rename) | `DATASETS_STORE_PATH` |
+| `data/ingested/datasets.duckdb` | every tabular upload's own table | `DATASETS_DB_PATH` |
+
+On a host run (`make dev`, `uvicorn`, the native setup) all three are ordinary
+files in the repo and survive a restart, which is what
+[`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1 describes.
+`python scripts/setup.py --preflight` now checks all three for writability and
+says which it could not write.
+
+**In the shipped Compose stack they do not, and two of them cannot be written at
+all.** `api` mounts `ingested_data` at `/app/data/ingested` **read-only** (for
+the good reason above: writing the corpus is the worker's job), so both
+`save_upload` and the uploads database write into a read-only mount and the
+upload fails. The registry — the one path outside that mount — lands on the
+container's own writable layer, which survives `docker compose restart` but
+**not** `up --force-recreate`, a rebuild, or `make clean`. So "the dataset list
+survives a restart" is true of a host run and of a container restart, and not of
+a recreate.
+
+Until the compose file carries its own volume for this, treat uploads as a
+**host-run feature** and demo them that way. The fix is small and is deliberately
+*not* mounting a volume over `/app/data` (that would hide the baked-in
+`data/generator` package):
+
+```yaml
+# docker/compose.yml — api service
+    environment:
+      DATASETS_DIR: ${DATASETS_DIR:-/app/data/uploads/files}
+      DATASETS_STORE_PATH: ${DATASETS_STORE_PATH:-/app/data/uploads/datasets.json}
+      DATASETS_DB_PATH: ${DATASETS_DB_PATH:-/app/data/uploads/datasets.duckdb}
+    volumes:
+      - uploads_data:/app/data/uploads        # rw: the one thing the API writes
+# and in the top-level volumes: block
+volumes:
+  uploads_data:
+```
+
+One volume, mounted read-write at a path nothing else uses, with all three
+overrides pointed inside it — so the document corpus stays read-only for the API
+and only the uploads are writable. `make clean` deletes it along with the rest of the project's
+volumes, which is correct: uploads are user data for a demo, not a source of
+truth, and §6 says what is and is not backed up.
+
 ### 1.3 Healthchecks & dependencies
 
 Where a healthcheck can be written, dependents wait for *readiness* rather than

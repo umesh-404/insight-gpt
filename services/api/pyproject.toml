@@ -42,7 +42,15 @@ forecast = [
 ]
 
 [tool.uv.sources]
-insightgpt-retrieval = { path = "../retrieval" }
+# Editable, so the API runs the retrieval source rather than a copy of it.
+# As a plain path dependency this installed a SNAPSHOT into site-packages: a
+# fix to redaction or to the indexer landed in the source tree, the API went
+# on running the old code, and the only symptom was that the fix appeared not
+# to work. A security fix to the redactor was verified passing in
+# `services/retrieval` and still leaking through the API for exactly this
+# reason. The container image already installs it with `-e`, so this also
+# makes local match the image instead of quietly diverging from it.
+insightgpt-retrieval = { path = "../retrieval", editable = true }
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.8"]

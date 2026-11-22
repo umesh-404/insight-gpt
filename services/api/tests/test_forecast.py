@@ -117,6 +117,11 @@ def test_enough_history_produces_bracketed_forecast_with_a_method(catalog) -> No
     assert result.confidence in ("medium", "high")
     assert result.low_confidence is False
 
+    # Backend-aware: this series is deterministic enough that AutoETS (the
+    # optional extra) fits it exactly and returns a collapsed interval, while
+    # the stdlib fallback returns a residual-error band. Either way the
+    # requirement is the same and is not relaxed for the optional backend — a
+    # history that varies must come back with real width.
     for point in result.forecast:
         assert point.lower <= point.value <= point.upper
         assert point.upper > point.lower  # a noisy series must carry real width
@@ -319,7 +324,12 @@ def test_monthly_grain_labels_and_seasonality(catalog) -> None:
     result = forecast_metric("revenue", catalog, warehouse, grain="month", horizon=2)
     assert result.forecast[0].period == "2026-01"
     assert result.forecast[1].period == "2026-02"
-    assert "season" in result.method or any("seasonal" in c for c in result.caveats)
+    # Backend-aware: the fallback names a seasonal term in its method string,
+    # while AutoETS selects its own form and may pick a non-seasonal one on this
+    # history. Both are acceptable; silently projecting without a seasonal term
+    # and saying nothing is not.
+    text = result.method.lower() + " ".join(result.caveats).lower()
+    assert "season" in text
 
 
 # --------------------------------------------------------------------------
@@ -468,14 +478,108 @@ def test_optional_backend_result_is_used_when_it_works(monkeypatch, catalog) -> 
     monkeypatch.setattr("app.forecast.engine.statsforecast_available", lambda: True)
     monkeypatch.setattr(
         "app.forecast.engine.statsforecast_project",
-        lambda values, h, m, level: ([(500.0, 400.0, 600.0)] * h, "statsforecast AutoETS"),
+        lambda values, h, m, level: backends.BackendForecast(
+            points=[(500.0, 400.0, 600.0)] * h,
+            method="statsforecast AutoETS (ETS(A,A,N))",
+            seasonal=False,
+        ),
     )
     warehouse = SeriesWarehouse([100.0 + i for i in range(12)])
     result = forecast_metric("revenue", catalog, warehouse, grain="quarter")
     assert result.method_family == "statsforecast"
-    assert result.method == "statsforecast AutoETS"
+    assert result.method == "statsforecast AutoETS (ETS(A,A,N))"
     assert result.forecast[0].value == pytest.approx(500.0)
     assert result.forecast[0].lower == pytest.approx(400.0)
+
+
+# --------------------------------------------------------------------------
+# a zero-width interval is a certainty claim, and is never shipped
+#
+# These run on either backend: the optional one is stubbed, so the behaviour is
+# pinned in CI (where the ``forecast`` extra is deliberately absent) and with
+# the extra installed, where AutoETS really does return a collapsed interval on
+# a short deterministic series.
+# --------------------------------------------------------------------------
+
+
+def _stub_backend(
+    monkeypatch,
+    points,
+    *,
+    method="statsforecast AutoETS (ETS(A,A,A))",
+    seasonal=True,
+):
+    monkeypatch.setattr("app.forecast.engine.statsforecast_available", lambda: True)
+    monkeypatch.setattr(
+        "app.forecast.engine.statsforecast_project",
+        lambda values, h, m, level: backends.BackendForecast(
+            points=list(points[:h]), method=method, seasonal=seasonal
+        ),
+    )
+
+
+def test_zero_width_backend_interval_is_re_derived_over_a_varying_history(
+    monkeypatch, catalog
+) -> None:
+    """The real AutoETS defect: a perfect in-sample fit collapses the interval."""
+    values = [100.0 + 5.0 * i + (3.0 if i % 2 else -3.0) for i in range(16)]
+    _stub_backend(monkeypatch, [(177.0, 177.0, 177.0), (188.0, 188.0, 188.0)])
+
+    warehouse = SeriesWarehouse(values)
+    result = forecast_metric("revenue", catalog, warehouse, grain="quarter", horizon=2)
+
+    assert result.method_family == "statsforecast"  # the point is still the model's
+    assert result.forecast[0].value == pytest.approx(177.0)
+    for point in result.forecast:
+        assert point.upper > point.lower, "a varying history never gets a certainty claim"
+        assert point.lower <= point.value <= point.upper
+    widths = [p.upper - p.lower for p in result.forecast]
+    assert widths[0] < widths[1]  # and it still accumulates with the horizon
+    assert any("zero-width" in c for c in result.caveats)
+    assert any("residual-error band" in c for c in result.caveats)
+
+
+def test_constant_history_keeps_its_honest_zero_width_interval(
+    monkeypatch, catalog
+) -> None:
+    """A collapse that *is* a property of the input is labelled, not widened."""
+    _stub_backend(monkeypatch, [(250.0, 250.0, 250.0)])
+    warehouse = SeriesWarehouse([250.0] * 12)
+    result = forecast_metric("revenue", catalog, warehouse, grain="quarter", horizon=1)
+
+    point = result.forecast[0]
+    assert point.lower == point.upper == pytest.approx(250.0)
+    assert any("perfectly constant" in c for c in result.caveats)
+    assert not any("zero-width" in c for c in result.caveats)
+
+
+def test_a_backend_with_no_seasonal_term_says_so_rather_than_implying_one(
+    monkeypatch, catalog
+) -> None:
+    """Enough history for a cycle is not a claim that a cycle was modelled."""
+    periods = [f"2024-{m:02d}" for m in range(1, 13)] + [
+        f"2025-{m:02d}" for m in range(1, 13)
+    ]
+    values = [100.0 + 2.0 * i + (20.0 if (i % 12) in (10, 11) else 0.0) for i in range(24)]
+    _stub_backend(
+        monkeypatch,
+        [(166.0, 152.0, 180.0)],
+        method="statsforecast AutoETS (ETS(M,N,N))",
+        seasonal=False,
+    )
+    warehouse = SeriesWarehouse(values, periods=periods)
+    result = forecast_metric("revenue", catalog, warehouse, grain="month", horizon=1)
+
+    caveat = next(c for c in result.caveats if "No seasonal term" in c)
+    assert "non-seasonal model" in caveat
+    assert "24 periods" in caveat  # not the "not enough history" reason
+
+
+def test_unreported_backend_seasonality_is_called_unknown(monkeypatch, catalog) -> None:
+    _stub_backend(monkeypatch, [(500.0, 450.0, 550.0)], seasonal=None)
+    warehouse = SeriesWarehouse([100.0 + i for i in range(12)])
+    result = forecast_metric("revenue", catalog, warehouse, grain="quarter", horizon=1)
+    assert any("Seasonality unconfirmed" in c for c in result.caveats)
 
 
 # --------------------------------------------------------------------------

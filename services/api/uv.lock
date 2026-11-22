@@ -485,7 +485,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'api'", specifier = ">=0.111" },
     { name = "fpdf2", marker = "extra == 'api'", specifier = ">=2.7,<3" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "insightgpt-retrieval", marker = "extra == 'real'", directory = "../retrieval" },
+    { name = "insightgpt-retrieval", marker = "extra == 'real'", editable = "../retrieval" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'api'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -509,7 +509,7 @@ dev = [
 [[package]]
 name = "insightgpt-retrieval"
 version = "0.1.0"
-source = { directory = "../retrieval" }
+source = { editable = "../retrieval" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
@@ -520,13 +520,18 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
+    { name = "openpyxl", marker = "extra == 'files'", specifier = ">=3.1" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pypdf", marker = "extra == 'files'", specifier = ">=4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qdrant-client", specifier = ">=1.12" },
 ]
+provides-extras = ["files"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "openpyxl", specifier = ">=3.1" },
+    { name = "pypdf", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.8" },
 ]

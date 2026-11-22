@@ -120,6 +120,11 @@ services:
       # that cannot serve users: the template provider, or a cloud provider
       # with no key. Leave it unset for offline development.
       APP_ENV: ${APP_ENV:-}
+      # Point every upload write at the one writable volume. Defaults in code
+      # resolve under `data/ingested`, which is read-only in this service.
+      DATASETS_DIR: ${DATASETS_DIR:-/app/data/uploads/files}
+      DATASETS_STORE_PATH: ${DATASETS_STORE_PATH:-/app/data/uploads/datasets.json}
+      DATASETS_DB_PATH: ${DATASETS_DB_PATH:-/app/data/uploads/datasets.duckdb}
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
       # Service name, not the host-run loopback in .env — see the header.
@@ -182,6 +187,14 @@ services:
       # and dbt run in the worker, which mounts the same volumes writable.
       - generated_data:/app/data/generated:ro
       - ingested_data:/app/data/ingested:ro
+      # The one place the API is allowed to write. Uploads used to land in
+      # `data/ingested`, which is mounted read-only here on purpose - the
+      # curated corpus is the worker's to write and the API's to read - so an
+      # upload through the containerised stack could not be saved at all.
+      # Giving uploads their own volume keeps that separation and makes the
+      # dataset registry actually durable: on the container layer it survived
+      # `restart` but not `up --force-recreate`, a rebuild, or `make clean`.
+      - uploads_data:/app/data/uploads
     healthcheck:
       # The API serves GET /health at the root. python (urllib) is always in the
       # image, so this is a reliable probe and lets `web` gate on api readiness.
@@ -285,3 +298,4 @@ volumes:
   ollama_models:
   generated_data:   # synthetic CSVs + document JSON written by scripts/seed.py
   ingested_data:    # the redacted document corpus handed to retrieval
+  uploads_data:     # user-uploaded files, their registry, and their DuckDB tables

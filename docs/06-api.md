@@ -370,6 +370,29 @@ both read back from the work done, not estimated. A dataset whose indexing died
 is `status="failed"` with the reason in `error`; it is never left at
 `"indexing"`, which is indistinguishable from slow.
 
+**`progress` is reported, not animated.** Parse and redaction occupy the first
+0.45; the remainder is the embed, and the fraction inside it comes from the
+indexer's own callback ("embedded 128 of 420 chunks" is what the indexer just
+did). It is clamped so it never moves backwards, and it is **not** persisted: it
+describes a job in flight, and no job survives a restart. A bar that sat still
+through the slow step and then jumped to 1.0 was the phase-1 behaviour and is
+gone.
+
+**The list survives a restart.** The registry is a JSON file written atomically
+(`data/datasets.json`, overridable with `DATASETS_STORE_PATH`), and it
+**reconciles against Qdrant** when it first loads: a dataset whose points are no
+longer there is not reported `ready`, and one left at `"indexing"` by a restart
+that killed its worker comes back `"failed"` with that reason rather than
+waiting forever for a worker that no longer exists. Where a deployment cannot
+persist, the registry says so instead of implying durability it does not have.
+
+**A number from an uploaded table says so.** `POST /ask` with a question naming
+a tabular upload can now answer arithmetic over that file: the envelope carries
+the `sql` that ran, cites the dataset, and caveats that the figure came from an
+upload rather than the governed warehouse. A question about a file the registry
+does not hold **abstains** — it is never answered with a retail figure. The
+routing rules are in [`05-insight-engine.md`](05-insight-engine.md) §3.4.
+
 **Deletion removes the vectors, by filter.** `DELETE /datasets/{id}` issues a
 filtered delete on the `dataset_id` payload field, never a collection drop —
 see [`04-retrieval-rag.md`](04-retrieval-rag.md) §7.1 for why that distinction
@@ -720,6 +743,17 @@ auditable, not just plausible.
   request id, so `/ask` shows exactly which model steps ran and what they cost.
   The provider name is whatever is configured (Ollama by default; OpenAI,
   Gemini, or Groq if a key is set).
+- **The dataset lifecycle trail.** One structured line per upload, per index
+  stage, and per failure or delete, carrying `event`, `dataset_id`, `outcome`,
+  `duration_ms`, and the real `chunks` / `redactions` counts — enough to say
+  which dataset was slow and where, from the log alone. What it deliberately
+  does *not* carry: the document's text, the filename in full (an extension, a
+  length and a stable short digest instead — users name files after the person
+  or case they concern), or anything credential-shaped. Redaction happens at
+  ingestion and the logs sit on the far side of that boundary, so
+  `observability.dataset_event` scrubs its own input rather than trusting the
+  caller: forbidden fields are dropped and *recorded as dropped*, connection
+  strings lose their credentials, and long token-shaped runs are masked.
 - **Pipeline run records.** Every worker run persists a `PipelineRun` (§3.4)
   with per-stage row counts, timings, and errors — the same records the
   `/pipeline-runs` endpoints serve. This is the audit trail for data freshness.

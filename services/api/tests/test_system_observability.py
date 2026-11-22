@@ -7,6 +7,7 @@ collaborators rather than by taking a live service down.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -21,7 +22,12 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api import deps  # noqa: E402
 from app.api.deps import reset_caches  # noqa: E402
 from app.api.main import create_app  # noqa: E402
-from app.api.observability import current_request_id  # noqa: E402
+from app.api.observability import (  # noqa: E402
+    current_request_id,
+    dataset_event,
+    dataset_stage,
+    file_fingerprint,
+)
 from app.api.routers import system as sysmod  # noqa: E402
 
 
@@ -283,3 +289,104 @@ def test_unhandled_exception_is_a_sanitized_500_with_a_log(
     record = [r for r in caplog.records if r.name == "insightgpt.error"][-1]
     assert record.context["request_id"] == body["request_id"]
     assert "secret internal detail" in record.getMessage()
+
+
+# --- the dataset lifecycle trail (phase 2) --------------------------------------
+
+
+def _dataset_lines(caplog) -> list[dict]:
+    return [r.context for r in caplog.records if r.name == "insightgpt.datasets"]
+
+
+def test_dataset_event_is_structured_and_correlated(caplog) -> None:
+    with caplog.at_level(logging.INFO, logger="insightgpt.datasets"):
+        dataset_event("dataset_upload", dataset_id="ds_abc", bytes=2048, files=2)
+    line = _dataset_lines(caplog)[-1]
+    assert line["event"] == "dataset_upload"
+    assert line["dataset_id"] == "ds_abc"
+    assert line["bytes"] == 2048
+    assert line["request_id"] == "-"  # no request in flight, and it says so
+
+
+def test_dataset_event_refuses_document_text_and_filenames(caplog) -> None:
+    """The redaction boundary is at ingestion; a log line is the wrong side."""
+    with caplog.at_level(logging.INFO, logger="insightgpt.datasets"):
+        dataset_event(
+            "dataset_indexed",
+            dataset_id="ds_abc",
+            text="Account 4111111111111111 belongs to Jane Doe",
+            filename="Q3-payroll-jane-doe.xlsx",
+            chunks=12,
+        )
+    line = _dataset_lines(caplog)[-1]
+    assert "text" not in line and "filename" not in line
+    assert line["chunks"] == 12
+    assert line["dropped_fields"] == "filename,text"  # dropped, not silently lost
+    assert "jane" not in json.dumps(line).lower()
+
+
+def test_dataset_event_masks_credentials_in_free_text(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="insightgpt.datasets"):
+        dataset_event(
+            "dataset_failed",
+            dataset_id="ds_abc",
+            level=logging.WARNING,
+            error="ConnectionError: postgresql://admin:hunter2@db:5432/warehouse refused",
+        )
+    error = _dataset_lines(caplog)[-1]["error"]
+    assert "hunter2" not in error
+    assert "[redacted]@db:5432" in error
+
+
+def test_file_fingerprint_keeps_the_extension_not_the_name() -> None:
+    first = file_fingerprint("Q3-payroll-jane-doe.xlsx")
+    assert first["file_ext"] == "xlsx"
+    assert "jane" not in str(first["file_ref"])
+    assert first["file_name_chars"] == len("Q3-payroll-jane-doe.xlsx")
+    # Stable, so the same file correlates across lines and across runs.
+    assert file_fingerprint("Q3-payroll-jane-doe.xlsx") == first
+    assert file_fingerprint("other.xlsx")["file_ref"] != first["file_ref"]
+    assert file_fingerprint(None)["file_ext"] == ""
+
+
+def test_dataset_stage_times_a_success_and_carries_the_outcome(caplog) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger="insightgpt.datasets"),
+        dataset_stage("dataset_index", dataset_id="ds_abc", kind="tabular") as stage,
+    ):
+        stage["chunks"] = 420
+        stage["redactions"] = 3
+    line = _dataset_lines(caplog)[-1]
+    assert line["outcome"] == "ok"
+    assert line["chunks"] == 420 and line["redactions"] == 3
+    assert line["kind"] == "tabular"
+    assert line["duration_ms"] >= 0
+
+
+def test_dataset_stage_lets_a_handled_failure_say_so(caplog) -> None:
+    """The indexing worker records its own failure instead of propagating one."""
+    with (
+        caplog.at_level(logging.INFO, logger="insightgpt.datasets"),
+        dataset_stage("dataset_index", dataset_id="ds_abc") as stage,
+    ):
+        stage["outcome"] = "failed"
+        stage["error_type"] = "UnsupportedFileTypeError"
+    record = [r for r in caplog.records if r.name == "insightgpt.datasets"][-1]
+    assert record.levelno == logging.WARNING
+    assert record.context["outcome"] == "failed"
+    assert record.context["error_type"] == "UnsupportedFileTypeError"
+    assert record.context["duration_ms"] >= 0  # still measured, not dropped
+
+
+def test_dataset_stage_records_a_failure_and_reraises(caplog) -> None:
+    with (
+        caplog.at_level(logging.INFO, logger="insightgpt.datasets"),
+        pytest.raises(ValueError),
+        dataset_stage("dataset_index", dataset_id="ds_bad"),
+    ):
+        raise ValueError("unreadable PDF")
+    record = [r for r in caplog.records if r.name == "insightgpt.datasets"][-1]
+    assert record.levelno == logging.WARNING  # a failure is not an info line
+    assert record.context["outcome"] == "failed"
+    assert record.context["error_type"] == "ValueError"
+    assert record.context["duration_ms"] >= 0
