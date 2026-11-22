@@ -263,6 +263,41 @@ unbounded completion against a metered API is an unbounded invoice.
 > max_completion_tokens cannot both be set`, so sending both spellings to
 > "cover either" fails every call. Verified against the live endpoint.
 
+### 2.2 Embeddings on a host without Ollama
+
+`RETRIEVER=qdrant` needs something to turn text into vectors. The default is a
+local Ollama model, which a managed host usually has nowhere to run — and
+without an embedder the retriever falls back to `fixture`, which is keyword
+overlap. That matters more than it sounds: the product presents hybrid dense
+retrieval with reranking, so a deployment quietly running keyword matching is
+making a claim it is not meeting.
+
+`EMBED_PROVIDER=openai` points the embedder at any OpenAI-compatible
+`/embeddings` endpoint (the same Gemini key already configured above works):
+
+```bash
+EMBED_PROVIDER=openai
+EMBED_API_KEY_ENV=GEMINI_API_KEY
+EMBED_MODEL=gemini-embedding-001
+EMBED_DIMENSIONS=3072      # must match the collection; changing it = re-index
+```
+
+Two failure modes are refused rather than absorbed, because both are otherwise
+invisible:
+
+- **Width mismatch.** A model returning 3072-d vectors against a collection
+  built for 768 would corrupt it. The first call fails, naming the number to
+  set.
+- **Prefix carry-over.** The `search_document:` / `search_query:` prompts are
+  specific to the nomic-style Ollama models; sent to a cloud model they embed
+  those literal words into every passage and cost recall without erroring.
+  They are cleared automatically for a non-Ollama provider.
+
+Note that `qdrant` also needs a reachable Qdrant. On a single-container host
+that means a managed instance, not a sibling service.
+
+---
+
 **Checking it is actually working.** `GET /system/status` (admin) asks the
 provider for its `/models` list and reports whether the configured model is
 still in it. This is the check that catches the failure mode a key-presence

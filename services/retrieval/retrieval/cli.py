@@ -79,7 +79,7 @@ def resolve_corpus(path: str | None, *, samples: bool = False) -> tuple[list[Doc
 
 def _cmd_index(args) -> int:
     from .corpus import IndexState, state_path_for
-    from .embedder import Embedder
+    from .embedder import make_embedder
     from .indexer import Indexer
     from .store import Store
 
@@ -94,7 +94,7 @@ def _cmd_index(args) -> int:
 
     store = Store(cfg)
     store.ensure_collection()
-    with Embedder(cfg.embedding) as embedder:
+    with make_embedder(cfg.embedding) as embedder:
         embedder.health()
         stats = Indexer(cfg, store, embedder).index_changed(docs, state, full=args.full)
 

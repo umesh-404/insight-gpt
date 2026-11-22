@@ -12,6 +12,7 @@ without editing the file — mirroring how ``services/api`` reads its settings.
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -19,14 +20,30 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
+log = logging.getLogger("retrieval.config")
+
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 DEFAULT_CONFIG = CONFIG_DIR / "retrieval.yaml"
 
 
 class EmbeddingConfig(BaseModel):
+    # "ollama" talks to a local model server; "openai" talks to any service
+    # exposing POST /embeddings (OpenAI, Gemini's compatibility endpoint,
+    # Groq). The second exists because a managed deployment usually has no
+    # GPU box to run Ollama on, and without it retrieval silently falls back
+    # to keyword matching while the product still claims dense retrieval.
+    provider: str = "ollama"
+    # Env var holding the key, for the "openai" provider only. Named rather
+    # than embedded so the key itself never enters a config file.
+    api_key_env: str = "GEMINI_API_KEY"
     base_url: str = "http://127.0.0.1:11434"
     model: str = "nomic-embed-text"
     dimensions: int = 768
+    # Whether to ASK the cloud provider for `dimensions`. Off by default: a
+    # provider that does not support the field can reject the whole request
+    # rather than ignore it, and the width is asserted on the first call
+    # anyway, so requesting it is an optimisation rather than a safeguard.
+    request_dimensions: bool = False
     distance: str = "Cosine"
     max_context_tokens: int = 2048
     batch_size: int = 32
@@ -118,12 +135,54 @@ class RetrievalConfig(BaseModel):
         the query/document prefixes stored in Qdrant, or retrieval degrades
         silently — a real change there requires a full re-index.
         """
-        if ollama := os.environ.get("OLLAMA_HOST"):
+        # EMBED_PROVIDER is read first: it decides whether OLLAMA_HOST is
+        # even relevant below. Compose sets OLLAMA_HOST unconditionally, so
+        # without this ordering a cloud embedding deployment would keep
+        # pointing at a model server that is not there.
+        if embed_provider := os.environ.get("EMBED_PROVIDER"):
+            self.embedding.provider = embed_provider.strip().lower()
+        if embed_base := os.environ.get("EMBED_BASE_URL"):
+            self.embedding.base_url = embed_base.rstrip("/")
+        elif self.embedding.provider != "ollama":
+            # A cloud provider with the Ollama default left in place would try
+            # to POST /embeddings at localhost:11434 and fail confusingly.
+            self.embedding.base_url = (
+                "https://generativelanguage.googleapis.com/v1beta/openai"
+            )
+        if key_env := os.environ.get("EMBED_API_KEY_ENV"):
+            self.embedding.api_key_env = key_env.strip()
+        if dims := os.environ.get("EMBED_DIMENSIONS"):
+            # Not swallowed: this number decides the width of every vector in
+            # the collection, so a typo that silently kept the old value would
+            # surface much later as a dimension mismatch mid-index.
+            try:
+                self.embedding.dimensions = int(dims)
+            except ValueError:
+                log.warning(
+                    "EMBED_DIMENSIONS=%r is not an integer; keeping %d",
+                    dims, self.embedding.dimensions,
+                )
+        if (ollama := os.environ.get("OLLAMA_HOST")) and self.embedding.provider == "ollama":
             self.embedding.base_url = ollama.rstrip("/")
         if qdrant := os.environ.get("QDRANT_URL"):
             self.qdrant_url = qdrant.rstrip("/")
         if embed_model := os.environ.get("EMBED_MODEL"):
             self.embedding.model = embed_model
+        # The asymmetric prefixes belong to the nomic-style Ollama models and
+        # to nothing else. Carrying "search_document: " into a Gemini or
+        # OpenAI embedding does not error - it just embeds those words as part
+        # of every passage and quietly costs recall, which is the exact silent
+        # degradation this module's docstring warns about. So they are cleared
+        # for a non-Ollama provider unless the operator sets them deliberately.
+        if self.embedding.provider != "ollama":
+            if "EMBED_QUERY_PREFIX" not in os.environ:
+                self.embedding.query_prefix = ""
+            if "EMBED_DOCUMENT_PREFIX" not in os.environ:
+                self.embedding.document_prefix = ""
+        if (qp := os.environ.get("EMBED_QUERY_PREFIX")) is not None:
+            self.embedding.query_prefix = qp
+        if (dp := os.environ.get("EMBED_DOCUMENT_PREFIX")) is not None:
+            self.embedding.document_prefix = dp
         # `RERANK_MODEL` is the variable bootstrap PULLS, so it has to be the
         # variable the reranker USES — otherwise changing it in .env pulls one
         # model and scores with another, and the mismatch shows up only as a

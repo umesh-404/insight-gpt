@@ -20,7 +20,7 @@ from typing import Any
 from qdrant_client import QdrantClient, models
 
 from .config import RetrievalConfig
-from .embedder import Embedder
+from .embedder import make_embedder
 from .rewrite import QueryRewriter
 from .sparse import build_sparse_vector
 
@@ -82,7 +82,7 @@ class Searcher:
         self.cfg = config
         self.collection = config.collection
         self.client = QdrantClient(url=config.qdrant_url, timeout=30)
-        self.embedder = Embedder(config.embedding)
+        self.embedder = make_embedder(config.embedding)
         self.rewriter = QueryRewriter(config.query_rewrite, config.embedding)
         # Imported here (not at module top) to break the search <-> rerank cycle.
         from .rerank import Reranker

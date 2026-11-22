@@ -118,6 +118,15 @@ services:
       RETRIEVER: ${RETRIEVER:-qdrant}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      # Embedding backend. The compose stack runs an Ollama sibling, so the
+      # default needs nothing. EMBED_PROVIDER=openai switches to a cloud
+      # /embeddings endpoint for hosts that have no model server to point at.
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-ollama}
+      EMBED_API_KEY_ENV: ${EMBED_API_KEY_ENV:-GEMINI_API_KEY}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      # Must match the collection's vector width; a mismatch is refused, not
+      # written, so changing this means a re-index.
+      EMBED_DIMENSIONS: ${EMBED_DIMENSIONS:-}
       # The API reranks at query time through the shared retrieval package, so it
       # needs the SAME rerank model bootstrap pulled in the worker. Omitting it
       # here let the API fall back to the config-file default while .env named a
@@ -179,6 +188,15 @@ services:
       RETRIEVER: ${RETRIEVER:-qdrant}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      # Embedding backend. The compose stack runs an Ollama sibling, so the
+      # default needs nothing. EMBED_PROVIDER=openai switches to a cloud
+      # /embeddings endpoint for hosts that have no model server to point at.
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-ollama}
+      EMBED_API_KEY_ENV: ${EMBED_API_KEY_ENV:-GEMINI_API_KEY}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      # Must match the collection's vector width; a mismatch is refused, not
+      # written, so changing this means a re-index.
+      EMBED_DIMENSIONS: ${EMBED_DIMENSIONS:-}
       RERANK_MODEL: ${RERANK_MODEL:-dengcao/Qwen3-Reranker-0.6B:F16}
       # reindex_docs reads the corpus services/ingestion publishes. "samples"
       # switches it to the built-in demo set (explicit fallback only).
