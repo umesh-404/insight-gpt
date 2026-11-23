@@ -111,8 +111,12 @@ export function InsightsView() {
       {/* Briefing strip: what was found, how bad, over which period. */}
       {data && items.length > 0 ? (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border bg-card px-4 py-3 shadow-soft">
-          <p className="text-sm text-foreground">
-            <span className="text-lg font-semibold tabular-nums">{data.total}</span>{' '}
+          {/* The count is the briefing's headline, so it outranks its own
+              label rather than sharing a type size with it. */}
+          <p className="flex items-baseline gap-2 text-sm">
+            <span className="text-2xl font-semibold leading-none tracking-tight text-foreground">
+              {data.total}
+            </span>
             <span className="text-muted-foreground">
               anomal{data.total === 1 ? 'y' : 'ies'} flagged
             </span>

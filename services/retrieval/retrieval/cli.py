@@ -1,6 +1,6 @@
 """Command-line entry point for the retrieval service.
 
-    insight-retrieval setup                 # create the `documents` collection
+    insight-retrieval setup                 # create the configured collection
     insight-retrieval index                 # index the ingestion corpus (changed only)
     insight-retrieval index --full          # re-embed everything
     insight-retrieval index --samples       # index the built-in demo documents
@@ -79,7 +79,7 @@ def resolve_corpus(path: str | None, *, samples: bool = False) -> tuple[list[Doc
 
 def _cmd_index(args) -> int:
     from .corpus import IndexState, state_path_for
-    from .embedder import Embedder
+    from .embedder import make_embedder
     from .indexer import Indexer
     from .store import Store
 
@@ -94,7 +94,7 @@ def _cmd_index(args) -> int:
 
     store = Store(cfg)
     store.ensure_collection()
-    with Embedder(cfg.embedding) as embedder:
+    with make_embedder(cfg.embedding) as embedder:
         embedder.health()
         stats = Indexer(cfg, store, embedder).index_changed(docs, state, full=args.full)
 
@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="path to retrieval.yaml (default: bundled)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("setup", help="create the documents collection").set_defaults(
+    sub.add_parser("setup", help="create the configured collection").set_defaults(
         func=_cmd_setup
     )
     p_index = sub.add_parser(

@@ -217,6 +217,37 @@ never emits arbitrary SQL from model free-text; if it somehow did, the parser
 rejects non-SELECT; if that were bypassed, the read-only grant makes the write
 impossible. Security comes from the **composition**, not any single check.
 
+### 3.1 Uploaded tables run in a different store, under their own allow-list
+
+Phase 2 added a second SQL surface: a tabular upload gets its own table so an
+arithmetic question about the file can be answered over every row
+([`05-insight-engine.md`](05-insight-engine.md) §3.4). It is deliberately **not**
+a new schema inside the warehouse.
+
+- **Its own DuckDB file, its own connection.** `data/ingested/datasets.duckdb`
+  — one file holding nothing but uploaded tables, never
+  attached to the warehouse, never joined with it, never its fallback. The two
+  cannot meet at the connection level, so a query cannot span them even if
+  every check above it failed.
+- **An allow-list of exactly one name.** Each call validates against that one
+  dataset's own table. A query naming another upload, a retail fact table or a
+  catalog view is rejected rather than answered — which also means one user's
+  question cannot read another dataset's table.
+- **The same parser, the same `SELECT`-only gauntlet, a mandatory bounded
+  `LIMIT`** (≤ 1000, literal, checked on the AST — not trusted to the planner
+  that emits it), so an unbounded scan of a half-million-row upload cannot be
+  issued by a future caller that forgets.
+- **Each read on its own cursor.** A DuckDB connection holds one result set, so
+  two concurrent `execute()` calls on a shared connection hand each other's
+  rows back. That was a real bug in `executor.py` once; it is not repeated here.
+
+**The honest difference from the warehouse path:** this database has no
+read-only role, because the same process has to *write* the tables when a file
+is uploaded. The protection is the parser plus the one-table allow-list rather
+than a database grant underneath them, which is one layer fewer. The exposure
+is bounded by what is in there — only uploaded files, each isolated from the
+others — and it is listed as a residual risk in §9 rather than papered over.
+
 ## 4. Prompt-injection defenses
 
 Retrieved document text is the most dangerous input in the system because it is
@@ -276,6 +307,24 @@ return all rows") are part of the text-to-SQL eval harness; see
 - **AuthN — JWT.** The FastAPI backend issues signed JWTs on login; every
   protected endpoint validates the token. Tokens are short-lived; the signing
   secret (`JWT_SECRET`) comes from the environment, never the codebase.
+- **Startup fails on an unusable `JWT_SECRET`.** A missing secret, a known
+  placeholder (the in-repo development fallback) or one shorter than 32 bytes
+  raises at app construction. Compose no longer carries a default for it either
+  — `${JWT_SECRET:?...}` makes `docker compose up` fail with a readable message
+  before a container starts, rather than booting one that then refuses to serve;
+  two layers, because the first one a careless deployment skips is the one that
+  matters. The insecure development
+  fallback is *opt-in* via `APP_ENV=development|local|test`, never the default:
+  a deployment that simply forgot to set the variable must not boot signing
+  tokens with a value printed in a public repository, because that lets anyone
+  holding the repo mint an admin token. Padding a short secret out to 32 bytes
+  is not a mitigation — it adds no entropy and only hides a weak key, so a
+  short secret is rejected rather than padded.
+- **Refresh re-reads the user.** `POST /auth/refresh` resolves the role from the
+  user store, never from the refresh token's `role` claim. A refresh token lives
+  seven days, so trusting its claim would leave a demotion or a deactivation
+  unenforceable for a week. Refresh shares login's IP-keyed rate-limit budget,
+  since it is reachable with only a cookie.
 - **AuthZ — roles.** Three roles with least privilege:
 
   | Role | Can | Cannot |
@@ -330,27 +379,53 @@ exposed**:
 
 ## 8. Data privacy & local-first stance
 
-InsightGPT is **local-first**. In the default configuration, **no data leaves
-the machine**: embeddings and reranking run on local Ollama, retrieval hits a
-local Qdrant, and analytics hit a local Postgres. The synthetic demo dataset and
-all indexes live on the host.
+InsightGPT keeps **data processing local and the reasoning step pluggable**.
+Everything that touches a document's full contents runs on the machine:
+ingestion, redaction, chunking, embedding (local Ollama **unless
+`EMBED_PROVIDER` is changed** — see below), the vector index (local Qdrant), and
+analytics (local Postgres or the DuckDB fixture). Uploaded datasets take the
+same path: parsed, redacted, embedded and stored on the machine, including the
+uploaded bytes under `data/ingested/` and, for a tabular upload, its rows in the
+uploads database at `data/ingested/datasets.duckdb` (§3.1).
 
-The **only** channel through which content can leave the machine is a
-**configured cloud LLM provider**. If — and only if — an operator sets an API
-key for a cloud provider (OpenAI, Gemini, or Groq) for the heavy reasoning step,
-then the prompt for that step (the user question, the selected metrics, and the
-retrieved-and-redacted context) is sent to that provider under its terms. This
-is **opt-in**:
+**What leaves the machine, precisely.** The shipped configuration sets
+`LLM_PROVIDER=gemini`, so one channel is open by default: the prompt for the
+reasoning step — the user's question, the selected metrics and their result
+rows, and the **retrieved, already-redacted snippets** — is sent to Google under
+its terms. Nothing else about a document is transmitted: not the file, not the
+unretrieved remainder, not the vectors.
 
-- The default provider is **Ollama (local)** — nothing is transmitted.
-- Switching to a cloud provider is an explicit configuration act (provider name
-  + API key in the environment).
-- Because redaction happens at **ingestion**, any context that reaches a cloud
-  provider has already had secrets and business PII stripped — the cloud path
-  never sees a raw credential or a raw card number that came from a document.
+Phase 2 **did not widen that channel**, and the detail is worth recording
+because the opposite would have been the obvious implementation. A numeric
+question over an uploaded table is planned deterministically, executed locally,
+and its answer prose, SQL and citation are assembled in code — no provider call
+happens on that path, so the dataset's column names and its result rows stay on
+the machine. What still leaves is what already left for every question: the
+question text itself, which goes to the provider for routing, and which
+therefore includes the filename the user typed.
 
-Operators handling regulated data should keep the default local provider, or
-choose a cloud provider whose data-handling terms meet their obligations.
+Two claims this document does **not** make, because neither is true of the
+shipped default:
+
+- It does not claim nothing leaves the machine. Saying so while `.env` ships
+  `LLM_PROVIDER=gemini` would be the kind of privacy overclaim that is worse
+  than no claim at all.
+- It does not claim the cloud path is risk-free because of redaction. Redaction
+  at ingestion means the cloud path never sees a raw credential or card number
+  that came from a document, which bounds the exposure — it does not eliminate
+  it. Business content in a retrieved snippet is still business content.
+
+**Making it fully local** is one setting: `LLM_PROVIDER=ollama` with a local
+chat model. Then no channel is open at all, at the cost of answer quality on a
+CPU-only machine. `EMBED_PROVIDER` is the mirror-image setting to watch: leaving
+it at `ollama` is what keeps *document text itself* on the machine, and setting
+it to `openai` sends every chunk to a cloud embedding endpoint
+([`09-deployment.md`](09-deployment.md) §2.5). `python scripts/setup.py
+--preflight` prints which of the two configurations is in force.
+
+Operators handling regulated data should switch the reasoning step to the local
+provider, or choose a cloud provider whose data-handling terms meet their
+obligations.
 
 ## 9. Residual risks (stated honestly)
 
@@ -381,7 +456,14 @@ is a claim the test suite in §10 deliberately does **not** make:
   equally sensitive.
 - **No per-project ACL inside a deployment.** Access control is by role, not by
   row-level or dataset-level policy. Any authenticated analyst can query any
-  allow-listed metric. Row-level security is out of scope for the project.
+  allow-listed metric — and, since phase 2, read any **uploaded** dataset:
+  uploads are isolated from each other at the query level (§3.1) but not owned
+  by the user who uploaded them. Row-level security is out of scope.
+- **The uploads database has no read-only role.** The process that answers
+  questions over an uploaded table is the process that wrote it, so there is no
+  grant underneath the parser and the one-table allow-list (§3.1). One layer
+  fewer than the warehouse path, bounded by the fact that the store holds
+  nothing but uploaded files.
 - **Single-org trust assumption.** The model assumes users are members of one
   organization with a shared data-access posture. It is not designed to isolate
   mutually-distrusting tenants.

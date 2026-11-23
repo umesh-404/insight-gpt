@@ -146,19 +146,32 @@ async def login(body: LoginRequest, response: Response) -> TokenPair:
     return pair
 
 
-@router.post("/refresh", response_model=AccessToken)
+@router.post(
+    "/refresh",
+    response_model=AccessToken,
+    # Refresh is reachable with only a 7-day cookie, so it is as attractive a
+    # brute-force/abuse target as login and shares login's IP-keyed budget.
+    dependencies=[Depends(rate_limit("login", require_auth=False))],
+)
 async def refresh(
     response: Response,
     body: RefreshRequest | None = None,
     igpt_refresh: str | None = Cookie(default=None, alias=REFRESH_COOKIE),
 ) -> AccessToken:
     claims = _refresh_claims(igpt_refresh, body)
+    # The role is re-read from the user store, never copied out of the refresh
+    # token: that token lives for 7 days, so trusting its `role` claim would
+    # make a demotion or a deactivation unenforceable for a week.
+    user = get_user(claims.sub)
+    if user is None:
+        raise UnauthorizedError("Unknown user.")
+    Role.parse(user.role)
     # Re-stamp the cookie so an active session keeps a full-length refresh window.
     token = igpt_refresh or (body.refresh_token if body and body.refresh_token else None)
     if token:
         _set_refresh_cookie(response, token)
     return AccessToken(
-        access_token=mint_access_token(claims.sub, claims.role),
+        access_token=mint_access_token(user.id, user.role),
         expires_in=ACCESS_TTL_SECONDS,
     )
 

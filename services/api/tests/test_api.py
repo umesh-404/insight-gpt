@@ -10,7 +10,7 @@ import os
 
 os.environ.setdefault("LLM_PROVIDER", "fake")
 os.environ.setdefault("WAREHOUSE", "duckdb")
-os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
+os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-32-bytes")
 
 import json
 from collections.abc import Iterator
@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_engine, reset_caches
 from app.api.main import create_app
 from app.engine.guardrails import GuardrailError
+from app.providers.base import ProviderError
 
 
 @pytest.fixture(scope="module")
@@ -281,6 +282,59 @@ def test_guardrail_rejection_is_a_400_not_a_500(
     error = resp.json()["error"]
     assert error["code"] == "bad_request"
     assert "secrets" not in error["message"]
+
+
+def test_a_provider_outage_is_a_503_not_a_500(
+    client: TestClient, failing_engine: list[Exception]
+) -> None:
+    """An unreachable model is an upstream outage, not a bug in this service.
+
+    Reducing it to "Failed to answer the question" strands both readers: a user
+    cannot tell a broken deployment from a hard question, and an operator gets
+    no cause to act on. The status has to say upstream, and the message has to
+    name the provider.
+    """
+    failing_engine[0] = ProviderError(
+        "gemini: rate-limited the request", provider="gemini", status=429, retryable=True
+    )
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask",
+        json={"question": "revenue last quarter?", "stream": False},
+        headers={**_auth(token), "Accept": "application/json"},
+    )
+    assert resp.status_code == 503
+    error = resp.json()["error"]
+    assert error["code"] == "dependency_unavailable"
+    assert "gemini" in error["message"]
+    assert error["request_id"]
+
+
+def test_a_provider_outage_never_returns_a_templated_answer(
+    client: TestClient, failing_engine: list[Exception]
+) -> None:
+    """The failure this product cannot afford.
+
+    Everything the UI renders is framed as traceable - the SQL behind a figure,
+    the document behind a claim. Prose assembled while the model was down would
+    wear that framing while being something else, and nothing on screen would
+    distinguish it. So an outage must produce an error, never an envelope.
+    """
+    failing_engine[0] = ProviderError(
+        "gemini: timed out after 60s", provider="gemini", retryable=True
+    )
+    token = _login(client, "analyst@insightgpt.dev", "analyst-pass")
+    resp = client.post(
+        "/api/v1/ask", json={"question": "why did sales decline?", "stream": True},
+        headers=_auth(token),
+    )
+    events = _sse_events(resp.text)
+    names = [n for n, _ in events]
+    assert names == ["meta", "error"], f"an outage must not stream an answer: {names}"
+    assert events[-1][1]["code"] == "dependency_unavailable"
+    # No token, citation or SQL event may be emitted for an answer that was
+    # never generated.
+    assert not {"token", "sql", "citations", "chart"} & set(names)
 
 
 def test_stream_failure_emits_a_terminal_error_event(

@@ -83,8 +83,8 @@ web/app/
       page.tsx                  # Ask / Chat (conversation list + thread)
       [conversationId]/page.tsx # a specific conversation
     dashboards/
-      page.tsx                  # dashboard list
-      [id]/page.tsx             # one dashboard
+      page.tsx                  # the governed overview (live /metrics/query)
+      [id]/page.tsx             # a seeded preview id; 404s anything else
     sources/page.tsx            # data-source admin (admin only)
     pipelines/
       page.tsx                  # run history + triggers
@@ -102,17 +102,46 @@ Route groups separate the **unauthenticated** `(auth)` shell from the
 **guarded** `(app)` shell. The `(app)/layout.tsx` renders the persistent
 sidebar + top bar and enforces auth (§6).
 
+**Relative date ranges anchor to the data, not to the wall clock.** "Last 30
+days", "This quarter" and "Year to date" resolve against the newest period the
+warehouse actually holds, which `dashboard-view.tsx` discovers with one
+unfiltered coverage query before any other tile resolves. The naive version
+anchored to `new Date()`, and because the demo warehouse ends partway through
+the year, every relative range selected a window with no rows — the whole
+dashboard rendered "No data in range" and read as a broken app rather than as
+an empty window. Tiles stay in their loading state until coverage resolves, so
+the page never flashes a false empty; if coverage fails it falls back to the
+wall clock rather than inventing a date. The resolved window and the data's end
+date are both printed above the KPI grid, so what is on screen is never
+ambiguous about which period it describes.
+
+**Saved dashboards do not exist yet.** `/dashboards` is the shared governed
+overview, resolved live through `/metrics/query`. `[id]` keeps three seeded ids
+that render that same overview behind an explicit preview banner, and `404`s
+anything else — an unknown id previously rendered a convincing page for a
+dashboard nobody had saved, which is the kind of thing that cannot survive
+being asked "is this real?".
+
 ### 3.1 Route ↔ role
 
 | Route | Min role | Notes |
 |---|---|---|
 | `/ask`, `/dashboards`, `/reports` (read) | viewer | reports read; generate is analyst+ |
 | `/pipelines` (view) | analyst | trigger button gated to admin |
-| `/sources` | admin | hidden from nav for lower roles |
+| `/sources` | viewer | two concerns on one route: **uploaded datasets** (viewer reads, analyst uploads and deletes) and **connector administration** (admin only, and the tab is not rendered for anyone else) |
 | `/settings` | viewer | provider internals shown to admin only |
 
 Nav items the role can't use are hidden, and the API re-checks every call — the
 client gate is UX, not security ([`06-api.md`](06-api.md) §2).
+
+`/sources` was admin-only when it was connector administration and nothing
+else. It is viewer-reachable now that it also holds uploaded datasets, because
+an admin-gated link would have hidden the upload screen from the analysts it was
+built for while the route stayed reachable by typing the URL — a feature
+findable only by guessing. The gating that matters moved inward: the connectors
+tab is not rendered below admin, upload and delete controls are not shown to a
+viewer (and the endpoints refuse them anyway), and no copy tells a viewer it can
+upload.
 
 ## 4. Key screens
 
@@ -195,6 +224,31 @@ The data-engineering monitor.
 - **Settings.** Profile, theme toggle (persisted), and — for admins — the active
   LLM provider + model and dependency status pulled from `/status`.
 
+### 4.6 Sources / datasets
+
+The screen where the user's own data arrives, so every state it can be in has
+to be legible rather than merely handled:
+
+- **Upload.** `DatasetUpload` refuses an unaccepted type or an oversized file in
+  the client *and* the server refuses it again; the accepted list and both size
+  caps are stated before the user picks, not after.
+- **Indexing.** The bar is the API's `progress`, which is parse/redact up to
+  0.45 and then the indexer's own count of chunks embedded
+  ([`06-api.md`](06-api.md) §3.3.1). It moves during the embed and never moves
+  backwards, because the slow step is exactly when a still bar reads as a hang.
+- **Ready.** Chunk count and redaction count, both measured. `0 redactions` is
+  a measurement, not a silence.
+- **Failed.** The reason, in the user's words rather than a traceback — and no
+  retry button on a permanent error (an unparseable file does not become
+  parseable on a second attempt).
+- **Deleted.** The vectors go first; the row disappears only once they are
+  actually gone, so the list never shows a dataset the index has lost or hides
+  one it still holds.
+- **Restart.** The list is served from a durable registry reconciled against
+  the vector store, so a reload after an API restart shows the same datasets —
+  and shows a dataset whose indexing the restart killed as `failed`, not
+  `ready`.
+
 ## 5. Component inventory
 
 Domain components, each a thin, typed composition over shadcn/ui primitives.
@@ -214,6 +268,10 @@ Domain components, each a thin, typed composition over shadcn/ui primitives.
 | `DateRangeFilter` | Range + dimension filter bar | query params |
 | `InventoryAtRiskTable` | Ranked at-risk SKUs | `MetricResult` |
 | `ReportPreview` | Paged report blocks + export | `Report` |
+| `DatasetUpload` | Drop zone, client-side type/size refusal, the accepted-types sentence | `POST /datasets` |
+| `DatasetTable` | One row per dataset: status, real progress, chunk and redaction counts, delete | `Dataset[]` + `DatasetJob` polling |
+| `DatasetPanel` | The datasets half of `/sources`, including the viewer's read-only view | both of the above |
+| `ForecastPanel` | A governed metric's history, projection and **interval band**, with the method and caveats | `ForecastResult` |
 
 ### `ChartRenderer` and `chart_spec`
 

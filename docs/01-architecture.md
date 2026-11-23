@@ -175,11 +175,12 @@ reasoning, not just the result (a `rememory` practice).
 | Concern | Choice | Why | Rejected |
 |---|---|---|---|
 | Warehouse | **PostgreSQL** | Ubiquitous, real SQL, runs in Docker, deploys to any cloud, credible "warehouse" story | DuckDB (great but embedded, weaker multi-service story); Snowflake/BigQuery (signup + external dependency for a demo) |
+| Uploaded tables | **DuckDB, in a separate file with its own allow-list** | An embedded, zero-admin table per upload, physically unable to meet the warehouse: no shared connection means no accidental join and no fallback between somebody's spreadsheet and the governed figures | A schema inside the warehouse (one bug away from a join across the honesty line); answering aggregates from retrieved row chunks (a total computed from a sample) |
 | Transformations | **dbt (dbt-postgres)** | Industry standard; versioned, testable models; native home for the semantic layer | Hand-written SQL migrations (no lineage/tests); pandas scripts (not warehouse-native) |
 | Reliability of NL→data | **Semantic-layer-grounded text-to-SQL** | 2026 benchmarks show grounding lifts accuracy from ~70–85% to ~90%+; LLM picks metrics, engine writes SQL | Free-form text-to-SQL (hallucinated joins/aggregations) |
 | Vector DB | **Qdrant** | Reused from rememory; fast hybrid search, local Docker, 127.0.0.1 | pgvector (simpler but weaker hybrid + rerank ergonomics); Pinecone/cloud (external, paid) |
 | Embeddings + rerank | **Ollama (local)** | Free, private, CPU-viable small models; matches rememory | Cloud embedding APIs (cost + privacy) |
-| LLM reasoning | **Pluggable provider (Ollama default; OpenAI/Gemini/Groq optional)** | Runs anywhere; upgrade quality with a key; no lock-in | Single hardcoded provider (lock-in, and vendor-clean constraint) |
+| LLM reasoning | **Pluggable provider (Ollama is the code default; the shipped `.env` configures Gemini, OpenAI/Groq optional)** | Runs anywhere; upgrade quality with a key; no lock-in | Single hardcoded provider (lock-in, and vendor-clean constraint) |
 | Orchestration | **APScheduler + FastAPI worker** | Lightweight, no extra infra, easy to demo and reason about | Airflow/Dagster (heavy for scope); cron only (no run tracking/retries in-app) |
 | API | **FastAPI** | Async, typed (pydantic), SSE streaming, great DX | Flask (less async/typing); Django (too heavy) |
 | Frontend | **Next.js + Tailwind + shadcn/ui** | Portfolio-grade UI, SSR/routing, strong component ecosystem | Streamlit (fast but not "very good UI"); plain React SPA (loses SSR/routing) |

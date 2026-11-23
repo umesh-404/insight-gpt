@@ -1,5 +1,6 @@
 'use client';
 
+import * as React from 'react';
 import {
   useMutation,
   useQueries,
@@ -7,10 +8,12 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query';
-import { api } from './api';
-import { ApiError } from './types';
+import { api, datasetsApi } from './api';
+import { ApiError, isTerminalDatasetStatus } from './types';
 import type {
   Conversation,
+  Dataset,
+  DatasetJob,
   ConversationSummary,
   ForecastCapabilityReport,
   ForecastResult,
@@ -374,6 +377,105 @@ export function useDeleteSource() {
 
 
 /* ----------------------------------------------------------------------------
+ * Uploaded datasets
+ *
+ * Keys live in their own object rather than in `qk` above so this block is a
+ * pure addition to the file; `datasetQk` is imported wherever `qk` would be.
+ * ------------------------------------------------------------------------- */
+
+export const datasetQk = {
+  all: ['datasets'] as const,
+  one: (id: string) => ['dataset', id] as const,
+  job: (id: string) => ['dataset-job', id] as const,
+};
+
+/**
+ * The dataset list.
+ *
+ * `enabled` exists so the caller can gate on the signed-in role *before* the
+ * request leaves the browser: mounting this for a user who cannot read
+ * datasets fires a request guaranteed to 403.
+ *
+ * The list also self-polls while anything on it is still being indexed, so a
+ * dataset uploaded in another tab still finishes on screen here.
+ */
+export function useDatasets(enabled = true): UseQueryResult<Dataset[]> {
+  return useQuery({
+    queryKey: datasetQk.all,
+    queryFn: () => datasetsApi.list(),
+    enabled,
+    retry: retryUnlessClientError,
+    refetchInterval: (query) =>
+      query.state.data?.some((d) => !isTerminalDatasetStatus(d.status)) ? 4000 : false,
+  });
+}
+
+/**
+ * Poll one dataset's indexing job.
+ *
+ * Polled faster than the list because this is the number a person is actually
+ * watching move. It stops the moment the job reaches `ready` or `failed` —
+ * including on `failed`, so a dead run is never re-asked forever.
+ */
+export function useDatasetJob(
+  id: string | null,
+  enabled = true,
+): UseQueryResult<DatasetJob> {
+  return useQuery({
+    queryKey: datasetQk.job(id ?? ''),
+    queryFn: () => datasetsApi.status(id as string),
+    enabled: enabled && Boolean(id),
+    retry: retryUnlessClientError,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status && isTerminalDatasetStatus(status) ? false : 1200;
+    },
+  });
+}
+
+/**
+ * Upload one file. The caller owns the queue; this owns one request.
+ *
+ * Not optimistic. A row invented before the server has accepted the file would
+ * claim an id, a chunk count and a redaction count that do not exist yet, and
+ * those three numbers are the whole trust story of this screen.
+ */
+export function useUploadDataset() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      file,
+      onUploadProgress,
+      signal,
+    }: {
+      file: File;
+      onUploadProgress?: (fraction: number) => void;
+      signal?: AbortSignal;
+    }) => datasetsApi.upload(file, onUploadProgress, signal),
+    onSuccess: (job) => {
+      qc.setQueryData(datasetQk.job(job.dataset_id), job);
+      void qc.invalidateQueries({ queryKey: datasetQk.all });
+    },
+  });
+}
+
+export function useDeleteDataset() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => datasetsApi.remove(id),
+    onSuccess: (_data, id) => {
+      // Drop the row at once so the table never lists a dataset whose vectors
+      // the server has already deleted, then reconcile with a refetch.
+      qc.setQueryData<Dataset[]>(datasetQk.all, (prev) =>
+        prev ? prev.filter((d) => d.id !== id) : prev,
+      );
+      qc.removeQueries({ queryKey: datasetQk.job(id) });
+      void qc.invalidateQueries({ queryKey: datasetQk.all });
+    },
+  });
+}
+
+/* ----------------------------------------------------------------------------
  * Forecasting
  * ------------------------------------------------------------------------- */
 
@@ -402,4 +504,31 @@ export function useForecast(
     staleTime: 60_000,
     retry: retryUnlessClientError,
   });
+}
+
+/**
+ * Track a CSS media query from React.
+ *
+ * Used where a layout has to change *structure*, not just style — a wide table
+ * becoming a stack of cards, for instance, which cannot be done by hiding one
+ * of two copies in CSS without putting the same rows twice into the
+ * accessibility tree.
+ *
+ * Starts `false` on the server and in the first client render, then corrects
+ * itself in an effect. That costs one frame of the wide layout on a phone,
+ * which is the price of not shipping a hydration mismatch; the alternative,
+ * reading `matchMedia` during render, makes the server and client HTML differ.
+ */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = React.useState(false);
+
+  React.useEffect(() => {
+    const list = window.matchMedia(query);
+    const sync = () => setMatches(list.matches);
+    sync();
+    list.addEventListener('change', sync);
+    return () => list.removeEventListener('change', sync);
+  }, [query]);
+
+  return matches;
 }

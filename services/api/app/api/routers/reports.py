@@ -15,13 +15,13 @@ stored ``ready`` (or ``failed`` with the reason recorded).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from ...auth.roles import Role, require_role
@@ -36,13 +36,18 @@ router = APIRouter(tags=["reports"])
 Section = Literal["kpis", "sales", "inventory", "voice_of_customer"]
 
 # Each report section maps to a governed question the engine can answer.
+#
+# The questions name no period. The period is the reader's, passed to the
+# engine as an explicit override: when these questions said "last quarter" the
+# engine resolved that against its own clock, so the Period control chose a
+# window that appeared in the header and changed nothing in the report.
 _SECTION_QUESTIONS: dict[str, tuple[str, str]] = {
-    "kpis": ("Key metrics", "What was revenue last quarter?"),
-    "sales": ("Sales analysis", "Why did sales decline last quarter?"),
+    "kpis": ("Key metrics", "What was revenue?"),
+    "sales": ("Sales analysis", "Why did sales decline?"),
     "inventory": ("Inventory", "Which products should we restock?"),
     "voice_of_customer": (
         "Voice of customer",
-        "Summarize customer complaints this month.",
+        "Summarize customer complaints.",
     ),
 }
 
@@ -51,9 +56,22 @@ _PDF_TABLE_ROWS = 12        # rows of key figures rendered per section
 
 
 class TimeRange(BaseModel):
+    """The report's period. ``start``/``end`` are inclusive ISO dates.
+
+    Validated rather than free-form: the period now scopes every section's
+    query, so a malformed one has to be a 422 and not a silently ignored
+    header string.
+    """
+
     grain: str | None = None
-    start: str
-    end: str
+    start: date
+    end: date
+
+    @model_validator(mode="after")
+    def _ordered(self) -> TimeRange:
+        if self.end < self.start:
+            raise ValueError("period end must not precede period start")
+        return self
 
 
 class ReportRequest(BaseModel):
@@ -105,12 +123,18 @@ def _trim() -> None:
         _REPORTS.pop(rid, None)
 
 
-def _build_blocks_sync(engine: InsightEngine, sections: list[str]) -> list[ReportBlock]:
-    """Run every section's question. Synchronous — call via run_in_threadpool."""
+def _build_blocks_sync(
+    engine: InsightEngine, sections: list[str], period: TimeRange
+) -> list[ReportBlock]:
+    """Run every section's question over ``period``.
+
+    Synchronous — call via run_in_threadpool.
+    """
+    window = {"start": period.start.isoformat(), "end": period.end.isoformat()}
     blocks: list[ReportBlock] = []
     for section in sections:
         heading, question = _SECTION_QUESTIONS[section]
-        env = engine.ask(question)
+        env = engine.ask(question, time_range=window)
         blocks.append(
             ReportBlock(
                 heading=heading,
@@ -145,7 +169,9 @@ async def create_report(
     error: str | None = None
     try:
         # One hop to the pool for the whole set, rather than one per section.
-        blocks = await run_in_threadpool(_build_blocks_sync, engine, list(body.sections))
+        blocks = await run_in_threadpool(
+            _build_blocks_sync, engine, list(body.sections), body.period
+        )
         status = "ready"
     except Exception as exc:  # noqa: BLE001 — a failed report is a recorded state
         blocks = []
@@ -189,7 +215,7 @@ async def export_report(
             content=pdf,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": f'attachment; filename="{report.id}.pdf"',
+                "Content-Disposition": _disposition(report, "pdf"),
                 "Content-Length": str(len(pdf)),
             },
         )
@@ -197,10 +223,26 @@ async def export_report(
     return PlainTextResponse(
         markdown,
         media_type="text/markdown",
-        headers={
-            "Content-Disposition": f'attachment; filename="{report.id}.md"',
-        },
+        headers={"Content-Disposition": _disposition(report, "md")},
     )
+
+
+def _slug(title: str) -> str:
+    """An ASCII, filesystem-safe stem for the download - headers are latin-1."""
+    kept = [c.lower() if c.isascii() and c.isalnum() else "-" for c in title]
+    return "-".join("".join(kept).split("-")).strip("-")[:60]
+
+
+def _disposition(report: Report, extension: str) -> str:
+    """Name the download after the report, not its opaque id.
+
+    The browser saves whatever this header says, so exporting "Executive
+    summary" wrote ``rep_f1e8477e933e.pdf`` into the reader's downloads
+    folder. The id stays in the name so two exports of one title never
+    collide.
+    """
+    stem = _slug(report.title) or "report"
+    return f'attachment; filename="{stem}-{report.id}.{extension}"'
 
 
 # --- rendering ----------------------------------------------------------------

@@ -52,6 +52,30 @@ export function formatPercent(value: number, fractionDigits = 1): string {
   return `${(value * 100).toFixed(fractionDigits)}%`;
 }
 
+/**
+ * Smallest period-over-period move a KPI tile is willing to call a change.
+ *
+ * 0.0005 is exactly the point below which a ratio rounds to "0.0%" at the one
+ * decimal we print. Under it the tile used to render "0.0% ▲ improved" for a
+ * +0.03% drift: a verdict, an arrow and a colour, all asserted about a number
+ * that reads as zero. Below the floor the movement is reported as flat.
+ */
+export const DELTA_NOISE_FLOOR = 0.0005;
+
+/**
+ * Is this ratio a movement worth colouring, or rounding noise?
+ *
+ * Returns false for null/NaN too, so a caller can use it as the single test for
+ * "do we have a change to talk about".
+ */
+export function isMaterialChange(ratio: number | null | undefined): boolean {
+  return (
+    typeof ratio === 'number' &&
+    Number.isFinite(ratio) &&
+    Math.abs(ratio) >= DELTA_NOISE_FLOOR
+  );
+}
+
 /** Human-readable duration from milliseconds (e.g. "1m 12s", "820ms"). */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null) return '—';
@@ -115,4 +139,43 @@ export function timeAgo(iso: string | null | undefined): string {
   const days = Math.round(hours / 24);
   if (days < 7) return `${days}d ago`;
   return formatDateTime(iso);
+}
+
+/**
+ * Build a tick formatter that keeps ONE unit across a whole axis.
+ *
+ * `formatCurrency` compacts per value at the lakh threshold, which is right
+ * for a figure in prose and wrong for an axis: ticks of 0 / 50k / 1L / 1.5L /
+ * 2L rendered "₹0, ₹50,000, ₹1L, ₹1.5L, ₹2L", two units on one scale, so the
+ * reader re-anchors at every gridline. The unit is picked once from `max` -
+ * the largest value actually plotted - and applied to every tick, which also
+ * keeps labels short enough that a fixed-width axis cannot shear their
+ * leading digits off.
+ *
+ * Zero is always bare ("₹0", not "₹0Cr"): a scaled zero is still zero, and the
+ * suffix only adds noise at the axis origin.
+ */
+export function makeAxisTickFormatter(
+  max: number,
+  format?: string | null,
+): (value: number) => string {
+  const magnitude = Math.abs(max);
+  const { divisor, suffix } =
+    magnitude >= 1e7
+      ? { divisor: 1e7, suffix: 'Cr' }
+      : magnitude >= 1e5
+        ? { divisor: 1e5, suffix: 'L' }
+        : { divisor: 1, suffix: '' };
+
+  return (value: number) => {
+    if (format === 'ratio' || format === 'percent') return formatPercent(value, 0);
+    const currency = format === 'currency';
+    if (value === 0) return currency ? formatCurrency(0) : '0';
+    if (!suffix) return currency ? formatCurrency(value) : formatNumber(value);
+    const scaled = value / divisor;
+    const text = Number.isInteger(scaled)
+      ? String(scaled)
+      : scaled.toFixed(1).replace(/\.0$/, '');
+    return currency ? `₹${text}${suffix}` : `${text}${suffix}`;
+  };
 }

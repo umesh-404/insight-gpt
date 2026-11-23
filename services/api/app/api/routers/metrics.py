@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from ...auth.roles import Role, require_role
@@ -86,6 +86,8 @@ class MetricsCatalog(BaseModel):
 
 
 class TimeRange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     grain: str | None = None
     start: str
     end: str
@@ -118,6 +120,14 @@ class MetricQuery(BaseModel):
     Ordering may be given as ``order_by_metric`` (canonical), ``order``, or
     ``order_by`` — all mean "order by the metric value".
     """
+
+    # An UNKNOWN field is rejected rather than ignored. A governed metrics API
+    # exists to return numbers you can put on a slide, and pydantic's default
+    # is to drop what it does not recognise: a caller who sent `start`/`end`
+    # instead of `time_range` got HTTP 200 and the ALL-TIME total, which is a
+    # plausible number and the wrong one. Failing the request is the only
+    # answer that cannot be mistaken for a smaller window.
+    model_config = ConfigDict(extra="forbid")
 
     metric: str = Field(min_length=1)
     dimensions: list[str] = Field(default_factory=list)

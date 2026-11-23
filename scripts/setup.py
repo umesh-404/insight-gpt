@@ -1,6 +1,7 @@
 """InsightGPT setup / repair / doctor — one command from a fresh clone.
 
     python scripts/setup.py               # set up (or repair) the Docker stack
+    python scripts/setup.py --preflight   # is the local stack ready to demo?
     python scripts/setup.py --doctor      # diagnose only; changes nothing
     python scripts/setup.py --repair      # force a rebuild + recreate, then re-verify
     python scripts/setup.py --native      # no Docker: prepare the local dev stack
@@ -17,6 +18,10 @@ Design rules, learned the hard way on this project:
   values you set are never overwritten.
 * **Stdlib only.** This file must run before anything is installed, on whatever
   Python the machine has (3.9+). No third-party imports, ever.
+* **Read-only about other people's data.** The preflight check below talks to a
+  Qdrant that may be shared with other projects. It issues GET requests only,
+  and every write/delete path in this repo is fenced to the ``insightgpt_``
+  collection namespace. A setup script that "cleans up" is a data-loss bug.
 """
 
 from __future__ import annotations
@@ -601,6 +606,393 @@ def step_native_smoke() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Preflight — is the configured local stack actually ready to demo?            #
+# --------------------------------------------------------------------------- #
+# The collection namespace this project owns. Everything InsightGPT creates,
+# writes or deletes in Qdrant lives under this prefix. The instance on a
+# developer machine is routinely shared with other projects, whose collections
+# must survive us untouched, so the prefix is asserted in code rather than
+# remembered — here, in scripts/bootstrap.py, and in the retrieval package.
+QDRANT_COLLECTION_PREFIX = "insightgpt_"
+
+# Mirrors services/api/app/providers/factory.py. Duplicated rather than imported
+# because this file is stdlib-only and must run before anything is installed; if
+# the factory gains a provider, add it here too.
+_PROVIDER_ENDPOINTS = {
+    "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
+    "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY"),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
+}
+
+
+class _Report:
+    """Collects pass/fail lines so the exit code reflects the whole run."""
+
+    def __init__(self) -> None:
+        self.failures: list[tuple[str, str]] = []
+
+    def good(self, msg: str) -> None:
+        ok(msg)
+
+    def note(self, msg: str) -> None:
+        info(msg)
+
+    def soft(self, msg: str, fix: str = "") -> None:
+        """Something to know about, but the demo still works."""
+        warn(msg)
+        if fix:
+            print(f"       fix: {fix}", flush=True)
+
+    def hard(self, msg: str, fix: str) -> None:
+        bad(msg)
+        print(f"       fix: {fix}", flush=True)
+        self.failures.append((msg, fix))
+
+
+def _get_json(url: str, timeout: float = 6.0, headers: dict | None = None):
+    """GET and parse JSON. Returns ``(status, obj_or_None, error_text)``.
+
+    Never raises: a preflight that crashes on an unreachable service tells you
+    less than one that reports which service was unreachable.
+    """
+    try:
+        status, body = http_get(url, timeout=timeout, headers=headers)
+    except Exception as exc:  # noqa: BLE001 - diagnosis must never crash
+        return 0, None, f"{type(exc).__name__}: {exc}"
+    try:
+        return status, json.loads(body), ""
+    except Exception:  # noqa: BLE001
+        return status, None, body[:200].decode(errors="replace")
+
+
+def _model_is_present(installed: set, wanted: str) -> bool:
+    """Ollama lists models as ``name:tag``; a bare name means ``:latest``."""
+    wanted = wanted.strip()
+    if not wanted:
+        return False
+    candidates = {wanted, wanted if ":" in wanted else f"{wanted}:latest"}
+    return bool(candidates & installed)
+
+
+def _check_config(env: dict, rep: _Report) -> None:
+    print(_c("1", "\nConfiguration (.env)"))
+    if not ENV_FILE.exists():
+        rep.hard(".env is missing", f"Run: {_entrypoint()}   (creates it from .env.example)")
+        return
+
+    secret = env.get("JWT_SECRET", "")
+    if len(secret) < 32:
+        rep.hard(
+            "JWT_SECRET is empty or too short — the API refuses to start",
+            "openssl rand -hex 32   (then put it in .env), or run "
+            f"{_entrypoint()} which generates one",
+        )
+    else:
+        rep.good("JWT_SECRET set")
+
+    retriever = env.get("RETRIEVER", "").strip().lower()
+    if retriever == "qdrant":
+        rep.good("RETRIEVER=qdrant — real hybrid retrieval over the local index")
+    else:
+        rep.hard(
+            f"RETRIEVER={retriever or 'unset'} — uploaded datasets would never be searched",
+            "Set RETRIEVER=qdrant in .env. `fixture` is keyword overlap over six "
+            "built-in demo documents and cannot see an uploaded file.",
+        )
+
+    embed_provider = (env.get("EMBED_PROVIDER") or "ollama").strip().lower()
+    if embed_provider == "ollama":
+        rep.good("EMBED_PROVIDER=ollama — document text is embedded on this machine")
+    else:
+        rep.soft(
+            f"EMBED_PROVIDER={embed_provider} — document text is sent to a cloud "
+            "embedding endpoint, not embedded locally",
+            "Set EMBED_PROVIDER=ollama for the local-embedding configuration.",
+        )
+
+
+def _check_dataset_storage(env: dict, rep: _Report) -> None:
+    """Can an upload actually be written, and will the list survive a restart?
+
+    The three paths an upload touches are the only state the **API** writes, and
+    a deployment that cannot write them accepts a file and then fails — or, the
+    quieter failure, keeps the dataset list somewhere that does not outlive the
+    container. Checking writability is a one-file create-and-delete, which is
+    the only thing in this preflight that is not strictly a read; it happens
+    inside a directory this project owns and cleans up after itself.
+    """
+    print(_c("1", "\nUploaded datasets (writable, persistent state)"))
+    uploads = Path(env.get("DATASETS_DIR") or (REPO / "data" / "ingested"))
+    registry = Path(env.get("DATASETS_STORE_PATH") or (REPO / "data" / "datasets.json"))
+    tables = Path(
+        env.get("DATASETS_DB_PATH") or (REPO / "data" / "ingested" / "datasets.duckdb")
+    )
+
+    for label, target, hint in (
+        ("uploaded files", uploads, "DATASETS_DIR"),
+        ("the dataset registry", registry.parent, "DATASETS_STORE_PATH"),
+        ("uploaded tables", tables.parent, "DATASETS_DB_PATH"),
+    ):
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            probe = target / ".preflight-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            rep.hard(
+                f"cannot write {label} at {target} ({exc.strerror or exc})",
+                (
+                    "In the containerised stack `/app/data/ingested` is mounted "
+                    "read-only, so uploads fail there — see docs/09-deployment.md "
+                    "§1.2.1 for the one-volume fix."
+                    + (f" On a host run, point {hint} somewhere writable." if hint else "")
+                ),
+            )
+        else:
+            rep.good(f"{label}: {target} is writable")
+
+    if registry.exists():
+        rep.good(f"registry present — the dataset list survives a restart ({registry})")
+    else:
+        rep.note(f"no registry file yet at {registry} — it is created on first upload")
+
+
+def _check_qdrant(env: dict, rep: _Report) -> None:
+    print(_c("1", "\nVector store (Qdrant)"))
+    url = (env.get("QDRANT_URL") or "http://127.0.0.1:6333").rstrip("/")
+    collection = env.get("QDRANT_COLLECTION") or ""
+
+    if not collection:
+        rep.hard(
+            "QDRANT_COLLECTION is not set",
+            f"Set QDRANT_COLLECTION={QDRANT_COLLECTION_PREFIX}documents in .env.",
+        )
+    elif not collection.startswith(QDRANT_COLLECTION_PREFIX):
+        rep.hard(
+            f"QDRANT_COLLECTION={collection!r} is outside the "
+            f"{QDRANT_COLLECTION_PREFIX!r} namespace this project owns",
+            "A Qdrant instance is usually shared. Writing into another project's "
+            f"collection would overwrite its points, so set "
+            f"QDRANT_COLLECTION={QDRANT_COLLECTION_PREFIX}documents in .env.",
+        )
+        collection = ""  # do not go on to probe a collection we must not use
+    else:
+        rep.good(f"collection name {collection!r} is inside our namespace")
+
+    status, payload, err = _get_json(f"{url}/collections")
+    if status != 200 or not isinstance(payload, dict):
+        rep.hard(
+            f"Qdrant not reachable at {url} ({err or f'HTTP {status}'})",
+            "Start it, e.g.  docker start <your-qdrant-container>  — or run the "
+            "whole containerised stack with `make up`. Then check QDRANT_URL in "
+            ".env points at the right host (127.0.0.1:6333 for a host run).",
+        )
+        return
+    names = [c.get("name", "") for c in payload.get("result", {}).get("collections", [])]
+    rep.good(f"Qdrant reachable at {url}")
+
+    # Say out loud what else lives here, so it is obvious that this check is a
+    # read and that nothing else is in scope for anything this repo does.
+    others = sorted(n for n in names if n and not n.startswith(QDRANT_COLLECTION_PREFIX))
+    if others:
+        rep.note(f"other collections on this instance, left untouched: {', '.join(others)}")
+
+    if not collection:
+        return
+    if collection not in names:
+        rep.soft(
+            f"collection {collection!r} does not exist yet (0 indexed chunks)",
+            "This is normal before the first upload — the indexer creates it. To "
+            "create it now:  uv run --project services/retrieval insight-retrieval setup",
+        )
+        return
+
+    status, payload, err = _get_json(f"{url}/collections/{collection}")
+    if status != 200 or not isinstance(payload, dict):
+        rep.hard(
+            f"could not read collection {collection!r} ({err or f'HTTP {status}'})",
+            "Check the Qdrant logs; the instance answered /collections but not "
+            "this collection.",
+        )
+        return
+    result = payload.get("result", {}) or {}
+    points = result.get("points_count")
+    shown = points if points is not None else "?"
+    rep.good(f"collection {collection!r} exists — {shown} chunks indexed")
+
+    # A width mismatch does not error at query time, it returns nonsense, so it
+    # is worth catching here rather than in a demo.
+    vectors = ((result.get("config") or {}).get("params") or {}).get("vectors") or {}
+    sizes = (
+        [vectors.get("size")]
+        if isinstance(vectors, dict) and "size" in vectors
+        else [v.get("size") for v in vectors.values() if isinstance(v, dict)]
+    )
+    sizes = [s for s in sizes if isinstance(s, int)]
+    configured = (env.get("EMBED_DIMENSIONS") or "").strip()
+    if sizes and configured.isdigit() and int(configured) not in sizes:
+        rep.hard(
+            f"EMBED_DIMENSIONS={configured} but the collection stores "
+            f"{'/'.join(str(s) for s in sizes)}-d vectors",
+            "Qdrant cannot resize in place. Either set EMBED_DIMENSIONS back to "
+            "the collection's width, or re-index from scratch after deleting ONLY "
+            f"the {collection!r} collection.",
+        )
+    elif sizes:
+        rep.good(f"vector width {sizes[0]}-d matches EMBED_DIMENSIONS")
+
+
+def _check_ollama(env: dict, rep: _Report) -> None:
+    print(_c("1", "\nLocal models (Ollama)"))
+    host = (env.get("OLLAMA_HOST") or "http://127.0.0.1:11434").rstrip("/")
+    status, payload, err = _get_json(f"{host}/api/tags", timeout=8.0)
+    if status != 200 or not isinstance(payload, dict):
+        rep.hard(
+            f"Ollama not reachable at {host} ({err or f'HTTP {status}'})",
+            "Start it with `ollama serve` (or `make up` for the containerised "
+            "stack), then check OLLAMA_HOST in .env — a host run needs "
+            "127.0.0.1:11434, not the compose service name.",
+        )
+        return
+    installed = {m.get("name", "") for m in payload.get("models", [])}
+    rep.good(f"Ollama reachable at {host} ({len(installed)} models installed)")
+
+    embed = (env.get("EMBED_MODEL") or "nomic-embed-text").strip()
+    if _model_is_present(installed, embed):
+        rep.good(f"embedding model {embed!r} pulled")
+    else:
+        rep.hard(
+            f"embedding model {embed!r} is not pulled — nothing can be indexed",
+            f"ollama pull {embed}",
+        )
+
+    rerank = (env.get("RERANK_MODEL") or "").strip()
+    if not rerank:
+        rep.soft(
+            "RERANK_MODEL is empty — reranking is disabled",
+            "Set RERANK_MODEL=dengcao/Qwen3-Reranker-0.6B:F16 in .env to enable it.",
+        )
+    elif _model_is_present(installed, rerank):
+        rep.good(f"reranker model {rerank!r} pulled")
+    else:
+        # Not a hard failure: search falls back to the RRF order.
+        rep.soft(
+            f"reranker model {rerank!r} is not pulled — results fall back to the "
+            "RRF order instead of being reranked",
+            f"ollama pull {rerank}",
+        )
+
+
+def _check_provider(env: dict, rep: _Report, *, offline: bool) -> None:
+    print(_c("1", "\nReasoning provider"))
+    provider = (env.get("LLM_PROVIDER") or "ollama").strip().lower()
+    model = (env.get("LLM_MODEL") or "").strip()
+
+    if provider not in _PROVIDER_ENDPOINTS:
+        if provider == "fake":
+            rep.hard(
+                "LLM_PROVIDER=fake answers from a fixed template, not a model",
+                "Set LLM_PROVIDER=gemini and GEMINI_API_KEY in .env.",
+            )
+        else:
+            rep.note(f"LLM_PROVIDER={provider} — no key needed, not checked here")
+        return
+
+    base, key_env = _PROVIDER_ENDPOINTS[provider]
+    key = (env.get(key_env) or os.environ.get(key_env) or "").strip()
+    if not key:
+        rep.hard(
+            f"{key_env} is empty — the API refuses to start on LLM_PROVIDER={provider}",
+            "Paste your key into .env. For Gemini: https://aistudio.google.com/apikey",
+        )
+        return
+    rep.good(f"{key_env} is set ({len(key)} chars)")
+
+    if not model:
+        rep.soft(
+            "LLM_MODEL is not set — the provider's default is used and may be retired",
+            "Pin it, e.g. LLM_MODEL=gemini-2.5-flash",
+        )
+    if offline:
+        rep.note("--offline: not calling the provider to validate the key")
+        return
+
+    # The only outbound call in this script: ask the provider for its catalogue.
+    # It validates the key AND whether the pinned model still exists, which is
+    # the failure a key-presence check cannot see.
+    status, payload, err = _get_json(
+        f"{base}/models", timeout=15.0, headers={"Authorization": f"Bearer {key}"}
+    )
+    if status in (401, 403):
+        rep.hard(
+            f"{key_env} was rejected by {provider} (HTTP {status})",
+            "The key is present but not valid. Re-copy it from the provider console.",
+        )
+        return
+    if status != 200 or not isinstance(payload, dict):
+        rep.soft(
+            f"could not validate {key_env}: {err or f'HTTP {status}'}",
+            "Usually a network/proxy problem rather than a bad key. Re-run with "
+            "--offline to skip this check.",
+        )
+        return
+    rep.good(f"{key_env} accepted by {provider}")
+
+    ids = {
+        str(m.get("id", "")).rsplit("/", 1)[-1]
+        for m in payload.get("data", [])
+        if isinstance(m, dict)
+    }
+    if model and ids and model.rsplit("/", 1)[-1] not in ids:
+        rep.hard(
+            f"LLM_MODEL={model!r} is not in {provider}'s catalogue",
+            "Provider catalogues are retired on a schedule. Pick a current id "
+            f"from {base}/models.",
+        )
+    elif model and ids:
+        rep.good(f"LLM_MODEL={model!r} is still in {provider}'s catalogue")
+
+
+def preflight(*, offline: bool = False) -> int:
+    """Check the configured local stack end to end. Changes nothing, anywhere.
+
+    One command that answers "can I demo this right now?", with a fix on every
+    failing line. Every call it makes is a GET.
+    """
+    print(_c("1", "\nInsightGPT preflight — read-only; nothing is started or changed."))
+    env = read_env(ENV_FILE)
+    rep = _Report()
+
+    _check_config(env, rep)
+    _check_dataset_storage(env, rep)
+    _check_qdrant(env, rep)
+    _check_ollama(env, rep)
+    _check_provider(env, rep, offline=offline)
+
+    print(_c("1", "\nWhat this configuration means"))
+    if (env.get("EMBED_PROVIDER") or "ollama").strip().lower() == "ollama":
+        info("document text is embedded locally and the vectors are stored locally;")
+    else:
+        info("document text is embedded by a CLOUD endpoint (EMBED_PROVIDER is not")
+        info("'ollama'), so every chunk of every document leaves this machine;")
+    info("the snippets retrieved for a question are sent to the reasoning")
+    info(f"provider ({(env.get('LLM_PROVIDER') or 'ollama').strip()}) inside the prompt.")
+    info("a numeric question over an uploaded table is planned and run locally,")
+    info("so its columns and result rows are not sent to that provider.")
+
+    print()
+    if rep.failures:
+        bad(f"{len(rep.failures)} blocking problem(s) — the demo will not work yet:")
+        for msg, _ in rep.failures:
+            print(f"       - {msg}")
+        print()
+        return 1
+    ok("preflight passed — the local stack is ready")
+    print()
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Doctor                                                                       #
 # --------------------------------------------------------------------------- #
 def _entrypoint() -> str:
@@ -683,13 +1075,22 @@ def doctor() -> int:
     except Exception as exc:  # noqa: BLE001 - diagnosis must never crash
         warn(f"{base}/health unreachable ({type(exc).__name__})")
 
+    # The checks above cover the Docker stack and the repo's own wiring. The
+    # local-stack checks (Qdrant/Ollama/provider key) live in preflight() so
+    # they can also be run on their own before a demo; run them here too rather
+    # than have two commands that each tell half the story.
+    rc = preflight(offline=False)
+
     print()
-    if problems:
-        bad(f"{len(problems)} problem(s) found:")
-        for p in problems:
-            print(f"       - {p}")
+    if problems or rc != 0:
+        if problems:
+            bad(f"{len(problems)} problem(s) found in the Docker stack / wiring:")
+            for p in problems:
+                print(f"       - {p}")
+        if rc != 0:
+            bad("the local stack preflight above also failed — fix those lines first")
         hint = f"{_entrypoint()} --repair"
-        print("\n  Most issues are fixed by:  " + _c("1", hint) + "\n")
+        print("\n  Most Docker issues are fixed by:  " + _c("1", hint) + "\n")
         return 1
     ok("no problems detected")
     print()
@@ -779,6 +1180,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="force a clean rebuild and container recreate, then re-verify")
     parser.add_argument("--doctor", action="store_true",
                         help="diagnose only; change nothing")
+    parser.add_argument("--preflight", action="store_true",
+                        help="check the configured local stack (Qdrant, Ollama models, "
+                             "provider key) is ready to demo; changes nothing")
+    parser.add_argument("--offline", action="store_true",
+                        help="with --preflight: skip the outbound call that validates "
+                             "the LLM provider key")
     parser.add_argument("--native", action="store_true",
                         help="set up the local dev stack instead of Docker")
     parser.add_argument("--skip-models", action="store_true",
@@ -786,6 +1193,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-verify", action="store_true",
                         help="skip the end-to-end smoke question")
     args = parser.parse_args(argv)
+
+    if args.preflight:
+        return preflight(offline=args.offline)
 
     if args.doctor:
         return doctor()

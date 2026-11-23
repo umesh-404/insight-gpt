@@ -96,7 +96,21 @@ def build_query(selection: MetricSelection, catalog: SemanticCatalog) -> BuiltQu
                 raise CatalogError(f"'between' only valid on a date dimension, got {f.dimension!r}")
             if len(f.values) != 2:
                 raise CatalogError("'between' filter needs exactly two values [start, end]")
-            where.append(f"{dim.table}.{dim.time_column} BETWEEN ? AND ?")
+            if _pins_to_latest_snapshot(metric, selection, dim):
+                # A semi-additive snapshot metric must never be summed over a
+                # date range: a quarter of daily stock snapshots counts the same
+                # pallet ~91 times. Pin to the latest snapshot inside the range
+                # instead, which is what "units on hand last quarter" means.
+                join_col = fact.joins[dim.table]
+                where.append(
+                    f"{dim.table}.{dim.time_column} = ("
+                    f"SELECT MAX(_pin_d.{dim.time_column}) "
+                    f"FROM {fact.name} AS _pin_f "
+                    f"JOIN {dim.table} AS _pin_d ON _pin_f.{join_col} = _pin_d.{join_col} "
+                    f"WHERE _pin_d.{dim.time_column} BETWEEN ? AND ?)"
+                )
+            else:
+                where.append(f"{dim.table}.{dim.time_column} BETWEEN ? AND ?")
             params.extend(f.values)
         elif f.op == "in":
             if not f.values:
@@ -128,6 +142,23 @@ def build_query(selection: MetricSelection, catalog: SemanticCatalog) -> BuiltQu
     lines.append(f"LIMIT {int(limit)}")
 
     return BuiltQuery(sql="\n".join(lines), params=params, columns=columns)
+
+
+def _pins_to_latest_snapshot(metric, selection: MetricSelection, dim) -> bool:
+    """Whether a date-range filter on a semi-additive metric must be pinned.
+
+    Grouping by ``day`` is the one case where a range is already correct: each
+    output row is then a single snapshot, not a sum of several. Any coarser
+    grain, or no date grouping at all, would collapse multiple snapshots into
+    one number, so the range is replaced by a pin to its latest snapshot.
+    """
+    if not getattr(metric, "semi_additive", False):
+        return False
+    if dim.name in selection.dimensions:
+        grain = selection.time_grain or dim.default_grain
+        if grain == "day":
+            return False
+    return True
 
 
 def _looks_like_ids(values: list[str | int | float]) -> bool:

@@ -16,6 +16,30 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 
+class ProviderError(RuntimeError):
+    """The reasoning model could not be reached, or refused the request.
+
+    Raised instead of returning something. A provider outage must not become a
+    templated answer that is indistinguishable from a grounded one: the whole
+    claim of this system is that a number traces back to the warehouse and a
+    sentence to a document, and a plausible paragraph produced while the model
+    was unreachable breaks that claim silently. The API maps this to a 503.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        status: int | None = None,
+        retryable: bool = False,
+    ):
+        super().__init__(message)
+        self.provider = provider
+        self.status = status
+        self.retryable = retryable
+
+
 @dataclass
 class Message:
     role: str  # "system" | "user" | "assistant"

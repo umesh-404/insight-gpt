@@ -1,4 +1,12 @@
-"""Batched embedding via Ollama (POST /api/embed).
+"""Batched embedding via Ollama (POST /api/embed), plus backend selection.
+
+Two backends live behind one interface, chosen by ``EmbeddingConfig.provider``
+through :func:`make_embedder`: this module's :class:`Embedder` (Ollama) and
+:class:`~retrieval.cloud_embedder.CloudEmbedder` (any OpenAI-compatible
+``/embeddings`` endpoint). Callers build through the factory so the indexer,
+the CLI and the retriever cannot drift apart about which one a deployment is
+actually using.
+
 
 Batching is the difference between a usable and an unusable indexer: the model
 is resident either way, so the cost is per-request round-trip. Batch size comes
@@ -123,3 +131,17 @@ class Embedder:
                 f"{self.cfg.dimensions}; indexing now would corrupt it."
             )
         return vectors
+
+
+def make_embedder(cfg: EmbeddingConfig):
+    """The embedder this config asks for.
+
+    One construction point. The Ollama path stays the default and is
+    unchanged; anything else routes to the cloud backend, which is imported
+    lazily so a purely local install never pays for it.
+    """
+    if cfg.provider.strip().lower() in ("", "ollama"):
+        return Embedder(cfg)
+    from .cloud_embedder import CloudEmbedder
+
+    return CloudEmbedder(cfg)

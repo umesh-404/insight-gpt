@@ -216,8 +216,8 @@ Configuration is the same environment contract as the API
 |---|---|---|
 | `WAREHOUSE` | `duckdb` | `postgres` (with `POSTGRES_DSN`) switches to the real warehouse |
 | `POSTGRES_DSN` | — | Read-only role DSN |
-| `RETRIEVER` | `fixture` | `qdrant` enables hybrid search (reads `QDRANT_URL`, `OLLAMA_HOST`, `EMBED_MODEL`) |
-| `LLM_PROVIDER` | `ollama` | `fake` for fully offline runs; `openai` / `groq` read their key from the environment (`gemini` is declared in config but not yet implemented) |
+| `RETRIEVER` | `fixture` | `qdrant` enables hybrid search (reads `QDRANT_URL`, `QDRANT_COLLECTION`, `OLLAMA_HOST`, `EMBED_MODEL`) |
+| `LLM_PROVIDER` | `ollama` | `fake` for fully offline runs; `gemini` / `openai` / `groq` read their key from the environment and raise at startup if it is missing |
 | `LLM_MODEL` | provider default | Model id |
 | `TODAY` | `2026-07-15` | Reference date for relative time ranges |
 

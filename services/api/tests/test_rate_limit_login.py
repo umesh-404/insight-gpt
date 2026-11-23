@@ -62,3 +62,54 @@ def test_bad_credentials_still_return_401_not_429(monkeypatch) -> None:
         assert res.status_code == 401
     finally:
         deps.reset_rate_limiter()
+
+
+# ---------------------------------------------------------------------------
+# Bucket bookkeeping
+# ---------------------------------------------------------------------------
+
+
+def test_each_distinct_caller_is_tracked_separately():
+    """The key is per (bucket, caller): one caller cannot spend another's budget."""
+    limiter = deps.TokenBucketLimiter()
+    for index in range(50):
+        decision = limiter.check(f"login:ip:10.0.0.{index}", capacity=10, window=60.0)
+        assert decision.allowed
+        # Each caller gets its own full budget, not a share of one.
+        assert decision.remaining == 9
+    assert limiter.tracked_keys() == 50
+
+
+def test_idle_buckets_are_swept_once_the_sweep_threshold_is_crossed():
+    """Insertions amortise the sweep, so the dict cannot grow without bound."""
+    limiter = deps.TokenBucketLimiter()
+    # Partially drain far more distinct callers than the sweep threshold.
+    total = deps.TokenBucketLimiter._SWEEP_EVERY * 3
+    for index in range(total):
+        assert limiter.check(f"read:user:{index}", capacity=120, window=60.0).allowed
+    # Every bucket is young, so nothing is evicted yet: the sweep is time-based,
+    # and this asserts it does not drop live budgets just because it ran.
+    assert limiter.tracked_keys() == total
+
+    # Age every entry past the horizon, then trigger one more sweep.
+    with limiter._lock:
+        limiter._buckets = {
+            key: (tokens, stamp - 10_000.0) for key, (tokens, stamp) in limiter._buckets.items()
+        }
+        limiter._since_sweep = deps.TokenBucketLimiter._SWEEP_EVERY - 1
+    assert limiter.check("read:user:fresh", capacity=120, window=60.0).allowed
+    # The stale entries are gone; only the live caller may remain.
+    assert limiter.tracked_keys() <= 1
+
+
+def test_exhausted_bucket_still_reports_retry_after():
+    """Eviction must not let a drained caller slip back to a full budget."""
+    limiter = deps.TokenBucketLimiter()
+    for _ in range(3):
+        assert limiter.check("ask:user:u1", capacity=3, window=60.0).allowed
+    denied = limiter.check("ask:user:u1", capacity=3, window=60.0)
+    assert not denied.allowed
+    assert denied.remaining == 0
+    assert denied.retry_after >= 1
+    # Still tracked — forgetting it here is exactly the bug eviction must avoid.
+    assert limiter.tracked_keys() == 1

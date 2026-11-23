@@ -1,6 +1,7 @@
 # InsightGPT — one-command developer workflow.
 #
 #   make setup       # FIRST RUN: set up everything from a fresh clone
+#   make preflight   # before a demo: is the configured local stack ready?
 #   make doctor      # diagnose an existing install (changes nothing)
 #   make repair      # clean rebuild + recreate, then re-verify
 #   make up          # build + start the whole stack (docker compose up --build)
@@ -10,6 +11,7 @@
 #   make seed        # (re)build the warehouse from synthetic data (host or worker)
 #   make reindex     # re-embed changed documents into Qdrant
 #   make test        # run every service's offline test suite
+#   make test-forecast # the forecast suite against the OPTIONAL statsforecast extra
 #   make lint        # ruff over every Python package
 #
 # Compose lives in docker/compose.yml but is always driven from the repo root.
@@ -22,7 +24,7 @@
 COMPOSE := docker compose --env-file .env -f docker/compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help setup doctor repair env up down restart bootstrap logs ps seed reindex test lint eval ci-local clean
+.PHONY: help setup preflight doctor repair env up down restart bootstrap logs ps seed reindex test test-forecast lint eval ci-local clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -30,6 +32,9 @@ help: ## Show this help
 
 setup: ## FIRST RUN: check prerequisites, configure, build, start, seed and verify
 	python scripts/setup.py
+
+preflight: ## Check the configured local stack is ready to demo (read-only)
+	python scripts/setup.py --preflight
 
 doctor: ## Diagnose the install and name what is broken (changes nothing)
 	python scripts/setup.py --doctor
@@ -78,6 +83,15 @@ test: ## Run each service's offline tests
 	@echo "== services/worker ==";     cd services/worker     && uv run pytest -q
 	@echo "== data/generator ==";      uv run pytest -q data/generator/tests
 	@echo "== tests (semantic-layer drift) =="; uv run --with pytest --with pyyaml pytest -q tests
+
+# The forecast backend is an OPTIONAL extra that CI deliberately does not
+# install, so the suite has to be runnable both ways. `uv sync` REPLACES the
+# extra set rather than adding to it: a bare `uv sync --extra forecast` would
+# uninstall FastAPI and break every other suite. This target spells the full set
+# out and restores the normal one afterwards even when the tests fail, so nobody
+# has to remember either half. See docs/13-forecasting.md §4.1 and §7.
+test-forecast: ## Run the forecast suite against the optional statsforecast backend
+	cd services/api && { uv sync --extra api --extra real --extra forecast --dev && uv run pytest -q tests/test_forecast.py; status=$$?; uv sync --extra api --extra real --dev; exit $$status; }
 
 lint: ## Ruff over every Python package (line-length 100; E,F,I,UP,B,SIM)
 	uv run --with ruff ruff check services data scripts tests

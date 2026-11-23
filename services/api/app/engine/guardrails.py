@@ -14,6 +14,7 @@ import contextlib
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.optimizer.scope import build_scope
 
 
 class GuardrailError(Exception):
@@ -41,7 +42,8 @@ _FORBIDDEN = (
 _DENIED_FUNCTIONS = frozenset({
     "sleep", "setval", "nextval", "currval", "current_setting", "set_config",
     "xpath", "xmltable", "glob", "parquet_scan", "system", "shell_exec",
-    "version", "current_database", "current_user", "session_user", "user",
+    "version", "current_version", "current_database", "current_user",
+    "session_user", "user",
     "inet_client_addr", "inet_server_addr", "txid_current",
 })
 # Whole families are denied by prefix rather than enumerated, so a function we
@@ -55,6 +57,13 @@ _DENIED_FUNCTION_PREFIXES = (
     "query_to_xml",
     "postgres_fdw",
 )
+
+# Reserved words that leak the session's identity while parsing as a *column*,
+# not a function: Postgres resolves a bare ``user`` / ``session_user`` /
+# ``current_user`` to the role name, so ``SELECT user FROM dim_date`` is an
+# identity disclosure that the function deny-list above never sees.
+_DENIED_BARE_NAMES = frozenset({"user", "session_user", "current_user",
+                                "current_catalog", "current_schema"})
 
 
 def validate_sql(sql: str, allow_tables: set[str], *, dialect: str = "postgres") -> exp.Expression:
@@ -84,6 +93,7 @@ def validate_sql(sql: str, allow_tables: set[str], *, dialect: str = "postgres")
             raise GuardrailError("row-locking clauses (FOR UPDATE/SHARE) are not allowed")
 
     _reject_denied_functions(root)
+    _reject_denied_bare_names(root)
 
     # Every referenced base table must be in the allow-list.
     referenced = _referenced_tables(root)
@@ -106,6 +116,15 @@ def _reject_denied_functions(root: exp.Expression) -> None:
                 raise GuardrailError(f"forbidden function call: {name}")
 
 
+def _reject_denied_bare_names(root: exp.Expression) -> None:
+    """Reject bare reserved identifiers that resolve to session identity."""
+    for col in root.find_all(exp.Column):
+        if col.table:
+            continue  # ``t.user`` is a real column of a real (allow-listed) table
+        if col.name.lower() in _DENIED_BARE_NAMES:
+            raise GuardrailError(f"forbidden reserved identifier: {col.name.lower()}")
+
+
 def _function_names(node: exp.Func) -> set[str]:
     """Every SQL spelling of one function node, lower-cased.
 
@@ -123,7 +142,7 @@ def _function_names(node: exp.Func) -> set[str]:
 
 
 def _referenced_tables(root: exp.Expression) -> set[str]:
-    """Collect base-table names, excluding CTE aliases defined in the same query.
+    """Collect base-table names, resolving CTE names **per scope**.
 
     A qualified reference (``schema.t``, ``catalog.schema.t``) is rejected
     outright rather than matched on its bare name: the allow-list holds table
@@ -131,18 +150,47 @@ def _referenced_tables(root: exp.Expression) -> set[str]:
     to the allow-listed ``fact_order_items`` and reach a table we never modeled.
     The query builder and the row-count probe both emit unqualified names — the
     executor pins ``search_path`` — so nothing legitimate is qualified.
+
+    CTE names are exempted only where they are actually *in scope*. Collecting
+    them from the whole tree let a subquery's CTE whitelist a name its own
+    sibling scopes then used as a real table::
+
+        SELECT * FROM pg_authid
+         WHERE 1 IN (WITH pg_authid AS (SELECT 1 AS c FROM dim_date)
+                     SELECT c FROM pg_authid)
+
+    The inner CTE made the outer ``FROM pg_authid`` look like a CTE reference,
+    so a non-allow-listed catalog table passed validation. Scope resolution
+    (``build_scope``) answers the real question — in *this* scope, is this name a
+    CTE or a base table? — and anything the resolver cannot account for is
+    treated as a base table, never silently exempted.
     """
-    cte_names = {cte.alias_or_name for cte in root.find_all(exp.CTE)}
-    tables: set[str] = set()
+    nodes: list[exp.Table] = []
+    seen_ids: set[int] = set()
+    scope_root = None
+    with contextlib.suppress(Exception):  # unsupported shape -> strict fallback
+        scope_root = build_scope(root)
+    if scope_root is not None:
+        for scope in scope_root.traverse():
+            for t in scope.tables:
+                seen_ids.add(id(t))
+                # Exempt the name only where a CTE of that name is in scope.
+                if t.name in scope.cte_sources and not (t.db or t.catalog):
+                    continue
+                nodes.append(t)
+    # Any table node the resolver did not classify is checked as a base table.
     for t in root.find_all(exp.Table):
-        name = t.name
-        if not name or name in cte_names:
-            continue
+        if id(t) not in seen_ids:
+            nodes.append(t)
+
+    tables: set[str] = set()
+    for t in nodes:
         if t.db or t.catalog:
             raise GuardrailError(
                 f"schema/catalog-qualified table reference is not allowed: {t.sql()}"
             )
-        tables.add(name)
+        if t.name:
+            tables.add(t.name)
     return tables
 
 

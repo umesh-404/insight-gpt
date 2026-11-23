@@ -56,6 +56,12 @@ class Metric(BaseModel):
     expr: str
     fact: str
     additive: bool = True
+    #: Semi-additive: sums across every dimension EXCEPT time, because the fact
+    #: is a periodic snapshot (stock on hand, account balances). Such a metric
+    #: is neither additive over a date range nor a ratio — ``additive: false``
+    #: means "ratio" to the metrics API and the forecaster — so it needs its own
+    #: flag, and the query builder pins a date range to its latest snapshot.
+    semi_additive: bool = False
     format: str = "number"
     aliases: list[str] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)

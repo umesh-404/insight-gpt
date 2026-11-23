@@ -35,12 +35,38 @@ behind the numbers.
 | **Support tickets** | Helpdesk export (CSV/JSON), one record per ticket | "What are customers complaining about this month?" |
 | **Product reviews** | Store/marketplace export, one record per review | "Why are reviews for the X230 trending negative?" |
 | **Reports / internal emails** | Markdown/PDF/`.eml`, long-form, multi-section | "What did the Q2 ops review say about fulfilment delays?" |
+| **Uploaded datasets** | A file a user uploads in the browser (`.csv .tsv .xlsx .pdf .txt .md .json .docx`) | "What does the file I just uploaded say about returns?" |
 
-Structured facts (orders, revenue, inventory) are deliberately **out of scope
-for retrieval** — they live in Postgres and are answered by governed SQL. Qdrant
-holds only document text and its metadata. This separation is a hard design
-line: it keeps numeric answers exact and auditable (SQL, not vector similarity)
-and keeps retrieval focused on language.
+Structured facts in the **warehouse** (orders, revenue, inventory) are
+deliberately out of scope for retrieval — they live in Postgres and are answered
+by governed SQL. Qdrant holds only document text and its metadata. This
+separation is a hard design line: it keeps numeric answers exact and auditable
+(SQL, not vector similarity) and keeps retrieval focused on language.
+
+An **uploaded spreadsheet never becomes a governed metric.** A `.csv` is parsed
+into text rows, chunked, redacted and embedded like any other document, and
+retrieval is how every question about its language is answered — with the
+dataset named in the citation, or declined.
+
+Phase 2 added one thing to that picture, and it is worth being exact about what.
+A *tabular* upload is **also** loaded into its own DuckDB database so that an
+arithmetic question about it ("what is total revenue in `my_sales.csv`?") can be
+answered over **every** row rather than over the handful of row chunks a search
+returns — summing those would be a total computed from a sample
+([`05-insight-engine.md`](05-insight-engine.md) §3.4). What has *not* changed:
+
+- The upload's table is not in the warehouse. Separate database file, separate
+  connection, separate allow-list; the two are never attached, joined, or used
+  as each other's fallback.
+- The upload did not become a metric. There is no semantic-layer entry for it,
+  no dashboard tile, and no governed metric name that resolves to it.
+- The retail warehouse still never answers a question about somebody's file,
+  and an upload's number is never presented as a warehouse figure: the answer
+  names the dataset and shows the SQL that produced it.
+
+Answering with the retail fixture's revenue as though it were the user's file
+remains the worst failure available to this system
+([`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1).
 
 ### 1.1 Metadata (payload) schema
 
@@ -66,12 +92,16 @@ document types and across corpora.
 | `chunk_index` / `chunk_total` | int | Position within the document (context expansion) |
 | `heading_path` | string \| null | Breadcrumb for report sections (see §2) |
 | `indexed_at` / `schema_version` | string / int | When the point was written, under which payload contract |
+| `dataset_id` | string \| null | The uploaded dataset this chunk came from (`ds_<hex12>`); null for the seeded corpus. The key for filtered deletion (§7.1) |
+| `dataset_name` | string \| null | The uploaded file's name, so a citation can say which dataset answered |
 | `content` | string | The chunk text actually shown/quoted |
 
 Keyword payload indexes exist for `source_type`, `region`, `category`,
-`product_ref`, `order_ref`, and `author_role`; `created_at` gets a datetime
-index. Only those need an index — an unindexed field is still stored and still
-returned, it just cannot be filtered on.
+`product_ref`, `order_ref`, `author_role`, and `dataset_id`; `created_at` gets a
+datetime index. Only those need an index — an unindexed field is still stored
+and still returned, it just cannot be filtered on. `dataset_id` is in that list
+because it carries two operations, not one: scoping a search to an uploaded
+dataset, and deleting that dataset's points by filter (§7.1).
 
 `author_role` is a **closed** enum, normalized from whatever the producer wrote.
 An un-normalized `support_agent` would not error; it would simply never match
@@ -148,8 +178,10 @@ is an ingestion concern, not a retrieval one.
 
 ### 3.1 Embeddings via Ollama (local, batched)
 
-Chunks are embedded with a **local Ollama embedding model** — CPU-viable and
-private, no data leaves the box. The model is configurable in
+Chunks are embedded with a **local Ollama embedding model** — CPU-viable, and
+the chunk text stays on the machine (the cloud embedding path in
+[`09-deployment.md`](09-deployment.md) §2.5 is opt-in and does send it). The
+model is configurable in
 `services/retrieval/config/retrieval.yaml`; the shipped default is
 **`nomic-embed-text`, 768-dimensional, cosine distance** (overridable with the
 `EMBED_MODEL` environment variable). Documents are embedded in **batches** of 32
@@ -305,13 +337,39 @@ a hard filter, not a soft hope.
 
 ## 7. Collections design in Qdrant
 
-InsightGPT uses a single primary collection:
+InsightGPT uses a single collection, named by `QDRANT_COLLECTION` (default
+**`insightgpt_documents`**):
 
-- **`documents`** — all indexed tickets, reviews, reports, and emails, each
-  point carrying dense + sparse vectors and the §1.1 payload. Document type is a
-  **payload field** (`source_type`), not a separate collection, so a single
+- all indexed tickets, reviews, reports, emails **and user-uploaded datasets**,
+  each point carrying dense + sparse vectors and the §1.1 payload. Document type
+  is a **payload field** (`source_type`), not a separate collection, so a single
   query can span types or filter to one — cheaper and more flexible than
-  per-type collections.
+  per-type collections. An uploaded dataset is likewise a payload field
+  (`dataset_id`), not a collection of its own: one upload would otherwise mean
+  one more collection to query, fuse and keep in schema lockstep.
+
+### 7.1 The name is namespaced, and the namespace is enforced
+
+A Qdrant instance is commonly **shared**. The one on the maintainer's machine
+also holds another project's `code`, `docs` and `memory` collections, and a
+managed instance may host anything. So:
+
+- InsightGPT creates, queries, upserts into and deletes from collections whose
+  name starts with **`insightgpt_`**, and nothing else. Test collections are
+  named `insightgpt_test_*` and only those are torn down.
+- **Deleting a dataset is a filtered delete** on `dataset_id`
+  (`POST /collections/{name}/points/delete` with a filter), never a collection
+  drop. Dropping the collection to remove one dataset would discard every other
+  dataset and the whole seeded corpus with it.
+- The prefix is asserted **in code** before any create or delete — in
+  `scripts/bootstrap.py`, in `scripts/setup.py --preflight`, and in the
+  retrieval package's store — not left to reviewer memory. There is no
+  `recreate_collection` call and no prune/reset path anywhere in the repo.
+
+The failure this prevents is silent, not loud: writing into a collection another
+project created does not error, it overwrites that project's points. A
+"start fresh" drop is worse — it is unrecoverable from here, because the vectors
+belong to a corpus this repo has never seen.
 
 Notably **absent**: any collection for structured data. Orders, revenue, and
 inventory are **not** embedded — they live in Postgres and are queried with
@@ -368,7 +426,8 @@ practice).
 | Fusion | **Server-side RRF** | Client-side weighted score blend | Cosine and sparse scores are on incomparable scales; rank-based RRF avoids fragile hand-tuned weights |
 | Second stage | **Cross-encoder rerank** | Trust first-stage order | Bi-encoder measures similarity, not answerhood; rerank restores precision on the top-N cheaply |
 | Structured data | **Stays in Postgres** | Embed rows into Qdrant | Numeric answers must be exact and auditable (SQL), not approximated by similarity |
-| Collections | **One `documents` collection + `source_type` field** | One collection per document type | A single query spans/filters types; avoids cross-collection fan-out for hybrid questions |
+| Collections | **One `insightgpt_documents` collection + `source_type` / `dataset_id` fields** | One collection per document type, or per uploaded dataset | A single query spans/filters types and datasets; avoids cross-collection fan-out for hybrid questions, and keeps one schema to hold in lockstep |
+| Deleting a dataset | **Filtered delete on `dataset_id`** | Drop and recreate the collection | A drop takes every other dataset and the seeded corpus with it — and on a shared instance, possibly another project's data |
 | Chunk unit | **Whole-record for tickets/reviews** | Fixed-size windows everywhere | A record is one thought; windowing scatters complaints and breaks citations |
 
 ---

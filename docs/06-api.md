@@ -82,6 +82,8 @@ Three roles, additive in capability (`viewer` ⊂ `analyst` ⊂ `admin`).
 | Run ad-hoc governed metric queries (`/metrics/query`) | — | ✅ | ✅ |
 | Generate & export executive reports | — | ✅ | ✅ |
 | View pipelines & run history | — | ✅ | ✅ |
+| List / read uploaded datasets | ✅ | ✅ | ✅ |
+| Upload / delete a dataset (`/datasets`) | — | ✅ | ✅ |
 | Trigger a pipeline run | — | — | ✅ |
 | Create / test / delete data sources | — | — | ✅ |
 | View `/status` service internals | — | — | ✅ |
@@ -313,6 +315,92 @@ verified, so `ok` is never ambiguous. Every message is scrubbed of the source's
 secrets before it leaves the process. `DELETE` is soft-delete (marks inactive,
 retains run history for audit).
 
+### 3.3.1 Uploaded datasets (viewer reads, analyst uploads)
+
+A **registered source** (§3.3) is a connector the deployment is configured to
+pull from. A **dataset** is a file a user just uploaded in the browser. They are
+separate surfaces because they have different lifecycles, different permissions
+and different failure modes.
+
+```
+POST   /datasets             multipart: files[] (1..10)   -> 202 DatasetJob
+GET    /datasets                                          -> list[Dataset]
+GET    /datasets/{id}                                     -> Dataset
+GET    /datasets/{id}/status                              -> DatasetJob   (poll)
+DELETE /datasets/{id}                                     -> 200 {"deleted": true}
+```
+
+```python
+class Dataset(BaseModel):
+    id: str                     # "ds_<hex12>"
+    name: str                   # original filename, or a user-supplied title
+    kind: Literal["document", "tabular"]
+    status: Literal["pending", "indexing", "ready", "failed"]
+    bytes: int
+    chunks: int                 # points actually written to Qdrant
+    redactions: int             # secrets/PII removed at ingestion
+    created_at: datetime
+    error: str | None = None
+
+class DatasetJob(BaseModel):
+    dataset_id: str
+    status: Literal["pending", "indexing", "ready", "failed"]
+    progress: float             # 0.0 .. 1.0
+    message: str | None = None
+```
+
+**Upload is `202`, not `200`.** Parsing, redacting, chunking and embedding a
+25 MB file is not a request-response operation, so the upload returns a job and
+the client polls `/datasets/{id}/status`. The alternative — holding the request
+open — produces a gateway timeout that is indistinguishable from a crash.
+
+**Roles.** Upload and delete require **analyst**; list and read require
+**viewer**. The gate is on the fetch, not the render: a viewer that cannot
+upload is told so, and never shown an upload control that would 403.
+
+**Rejections are specific and final.** Accepted extensions are
+`.csv .tsv .xlsx .pdf .txt .md .json .docx`; anything else is a `400` naming
+what is accepted. A single file over 25 MB, or a request over 50 MB, is a `413`.
+Neither is retryable, so neither offers a retry — a "Try again" on a permanent
+error is a lie about what will happen.
+
+**Counts are measurements.** `chunks` is the number of points actually written
+to Qdrant and `redactions` the number of secrets/PII removed before embedding —
+both read back from the work done, not estimated. A dataset whose indexing died
+is `status="failed"` with the reason in `error`; it is never left at
+`"indexing"`, which is indistinguishable from slow.
+
+**`progress` is reported, not animated.** Parse and redaction occupy the first
+0.45; the remainder is the embed, and the fraction inside it comes from the
+indexer's own callback ("embedded 128 of 420 chunks" is what the indexer just
+did). It is clamped so it never moves backwards, and it is **not** persisted: it
+describes a job in flight, and no job survives a restart. A bar that sat still
+through the slow step and then jumped to 1.0 was the phase-1 behaviour and is
+gone.
+
+**The list survives a restart.** The registry is a JSON file written atomically
+(`data/datasets.json`, overridable with `DATASETS_STORE_PATH`), and it
+**reconciles against Qdrant** when it first loads: a dataset whose points are no
+longer there is not reported `ready`, and one left at `"indexing"` by a restart
+that killed its worker comes back `"failed"` with that reason rather than
+waiting forever for a worker that no longer exists. Where a deployment cannot
+persist, the registry says so instead of implying durability it does not have.
+
+**A number from an uploaded table says so.** `POST /ask` with a question naming
+a tabular upload can now answer arithmetic over that file: the envelope carries
+the `sql` that ran, cites the dataset, and caveats that the figure came from an
+upload rather than the governed warehouse. A question about a file the registry
+does not hold **abstains** — it is never answered with a retail figure. The
+routing rules are in [`05-insight-engine.md`](05-insight-engine.md) §3.4.
+
+**Deletion removes the vectors, by filter.** `DELETE /datasets/{id}` issues a
+filtered delete on the `dataset_id` payload field, never a collection drop —
+see [`04-retrieval-rag.md`](04-retrieval-rag.md) §7.1 for why that distinction
+is load-bearing on a shared Qdrant.
+
+Ingestion semantics, limits and the honesty constraints on answering from an
+uploaded file are in [`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1.
+
 ### 3.4 Pipelines (analyst reads, admin triggers)
 
 Thin HTTP surface over the APScheduler worker. The worker owns execution and
@@ -355,8 +443,20 @@ class PipelineRun(BaseModel):
 #### `POST /reports` — generate; `GET /reports/{id}`; `GET /reports/{id}/export`
 
 An executive report is a generated, cited narrative over a chosen scope
-(period, domain area). Generation is asynchronous — `POST` returns a report
-handle that the client polls or subscribes to.
+(period, domain area).
+
+`period` is **load-bearing**, not a header decoration. Each section maps to a
+fixed governed question that names no period of its own; the period is handed
+to the engine as an explicit override of the range it would otherwise resolve
+from the question's words. A change section's comparison window is re-derived
+as the equal-length span immediately preceding the chosen period, so the
+decomposition is against something comparable. `start` and `end` are inclusive
+ISO dates and are validated: a period that ends before it starts is a `422`.
+
+Generation runs **inline** on the offline stack — fast enough that there is no
+queue to poll. `POST` still answers `202` with a handle, but the handle already
+carries the final status (`ready` or `failed`); a client that announces
+"generation started" from it misreports what happened.
 
 ```python
 class ReportRequest(BaseModel):
@@ -420,6 +520,7 @@ graph TD
         FBR["feedback.py"]
         METR["metrics.py"]
         SRCR["sources.py"]
+        DSR["datasets.py — uploads"]
         PIPER["pipelines.py"]
         REPR["reports.py"]
     end
@@ -440,6 +541,7 @@ graph TD
     METR --> ENGINE
     CONVR --> DB
     SRCR --> DB
+    DSR --> ENGINE
     PIPER --> WORKER
     REPR --> ENGINE
     V1 --> AUTHDEP
@@ -584,20 +686,45 @@ payload small, themeable, and accessible.
 
 ## 8. Rate limiting
 
-A token-bucket limiter runs as middleware, keyed by user id (falling back to
-client IP for unauthenticated `/auth/login`). Limits are tiered because the
-`/ask` path is far more expensive than a dashboard read:
+A token-bucket limiter runs as a **route dependency** (`rate_limit(bucket)` in
+`app/api/deps.py`), not as middleware — buckets differ per route, and a
+dependency lets each router declare the bucket it belongs to instead of a
+middleware re-deriving it from the path. It is keyed per caller: user id from
+the token, falling back to client IP for unauthenticated `/auth/login`. Limits
+are tiered because the `/ask` path is far more expensive than a dashboard read:
 
-| Bucket | Default limit | Applies to |
+| Bucket | Base limit | Applies to |
 |---|---|---|
-| `ask` | 20 req / min / user | `POST /ask`, `POST /reports` |
-| `read` | 120 req / min / user | dashboards, metrics, conversations |
-| `mutate` | 30 req / min / user | sources, pipeline triggers, feedback |
+| `ask` | 20 req / min | `POST /ask`, `POST /reports` |
+| `read` | 120 req / min | dashboards, metrics, conversations |
+| `mutate` | 30 req / min | sources, pipeline triggers, feedback |
 | `login` | 10 req / min / IP | `POST /auth/login` |
 
+These are the **viewer** budgets. Roles are additive in capability, so their
+budgets are too: the base is multiplied by **1× viewer, 2× analyst, 4× admin**,
+so an admin's `ask` budget is 80/min. Defaults live in `_DEFAULT_LIMITS` in
+code and each bucket is overridable by environment variable —
+`RATE_LIMIT_ASK="40/60"`, or a bare `RATE_LIMIT_ASK="40"` meaning per minute. A
+malformed override falls back to the default rather than taking the API down.
+`RATE_LIMIT_ENABLED` gates the whole thing, and defaults off under pytest so
+test runs are not order-dependent.
+
 Exhaustion returns `429 rate_limited` with `Retry-After` and
-`X-RateLimit-Remaining`. Limits are config values (`config/api.yaml`), not
-hardcoded.
+`X-RateLimit-Remaining`; successful responses carry `X-RateLimit-Limit` and
+`X-RateLimit-Remaining`.
+
+**Bucket state is swept.** The limiter holds one entry per (bucket, caller) in
+memory. That dict was append-only, which for an IP-keyed anonymous endpoint
+means unbounded growth chosen by whoever is calling. An entry idle for longer
+than its refill window is equivalent to an absent one — both start the next
+caller at full capacity — so insertions of unseen keys amortise a sweep that
+drops them. No background task, and no decision changes.
+
+Two known limits, accepted for this scope: the state is per-process, so a
+multi-replica deployment enforces the limit per replica (a shared store is the
+fix, and is out of scope here); and behind a reverse proxy every anonymous
+caller presents the proxy's address, so the IP-keyed `login` bucket is shared
+across them unless the proxy's forwarded-for header is trusted explicitly.
 
 ## 9. Observability
 
@@ -616,6 +743,17 @@ auditable, not just plausible.
   request id, so `/ask` shows exactly which model steps ran and what they cost.
   The provider name is whatever is configured (Ollama by default; OpenAI,
   Gemini, or Groq if a key is set).
+- **The dataset lifecycle trail.** One structured line per upload, per index
+  stage, and per failure or delete, carrying `event`, `dataset_id`, `outcome`,
+  `duration_ms`, and the real `chunks` / `redactions` counts — enough to say
+  which dataset was slow and where, from the log alone. What it deliberately
+  does *not* carry: the document's text, the filename in full (an extension, a
+  length and a stable short digest instead — users name files after the person
+  or case they concern), or anything credential-shaped. Redaction happens at
+  ingestion and the logs sit on the far side of that boundary, so
+  `observability.dataset_event` scrubs its own input rather than trusting the
+  caller: forbidden fields are dropped and *recorded as dropped*, connection
+  strings lose their credentials, and long token-shaped runs are masked.
 - **Pipeline run records.** Every worker run persists a `PipelineRun` (§3.4)
   with per-stage row counts, timings, and errors — the same records the
   `/pipeline-runs` endpoints serve. This is the audit trail for data freshness.

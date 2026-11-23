@@ -15,9 +15,10 @@ import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
 import type { Cell, ColumnDtype, ColumnSpec, TableBlock } from '@/lib/types';
 
 const NUMERIC: ColumnDtype[] = ['currency', 'number', 'ratio'];
-const DEFAULT_PAGE_SIZE = 10;
 
 function fmtCell(value: Cell, dtype: ColumnDtype): React.ReactNode {
+  // An absent value prints as an em dash, never as a confident 0 — the result
+  // set is evidence, and inventing a zero would misreport it.
   if (value == null) return <span className="text-muted-foreground">—</span>;
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'number') {
@@ -37,7 +38,11 @@ function fmtCell(value: Cell, dtype: ColumnDtype): React.ReactNode {
   return value;
 }
 
-/** Renders a result `TableBlock` with intelligent filtering, pagination, and collapsible support. */
+/**
+ * Renders a result `TableBlock` from the answer envelope.
+ * Supports intelligent filtering and collapsible views for attachments,
+ * while maintaining sticky headers and clear row counts.
+ */
 export function DataTable({
   block,
   question,
@@ -77,28 +82,23 @@ export function DataTable({
     }
 
     // 2. Identify relevant columns (e.g. mentions of status, name, amount, or id)
-    // Only filter columns if we matched specific rows
     let targetColumns = allColumns;
     let targetRows = allRows;
 
     if (matchingRows.length > 0) {
-      // Find columns that are explicitly mentioned or key identifier/status columns
       const relevantColIndices: number[] = [];
       allColumns.forEach((col, idx) => {
         const cname = col.name.toLowerCase();
-        // Always keep the ID column
         if (idx === idColIndex) {
           relevantColIndices.push(idx);
           return;
         }
-        // Keep columns mentioned in question or answer
         const words = cname.split(/[\s_-]+/);
         if (words.some((w) => w.length > 2 && context.includes(w))) {
           relevantColIndices.push(idx);
         }
       });
 
-      // If at least 1-4 columns match, filter to those; otherwise keep original columns
       if (relevantColIndices.length >= 2 && relevantColIndices.length < allColumns.length) {
         targetColumns = relevantColIndices
           .map((i) => allColumns[i])
@@ -118,69 +118,53 @@ export function DataTable({
     return { filteredColumns: allColumns, filteredRows: allRows, isFiltered: false };
   }, [allColumns, allRows, isAttachment, question, answer]);
 
-  // Mode: show only relevant filtered rows or the full file
-  const [viewAllRows, setViewAllRows] = React.useState(!isFiltered);
-  const [isExpanded, setIsExpanded] = React.useState(true);
-  const [page, setPage] = React.useState(1);
+  const [viewAllRows, setViewAllRows] = React.useState(false);
+  const [isExpanded, setIsExpanded] = React.useState(!isAttachment || isFiltered);
 
-  const activeColumns = viewAllRows ? allColumns : filteredColumns;
-  const activeRows = viewAllRows ? allRows : filteredRows;
+  const activeColumns = isFiltered && !viewAllRows ? filteredColumns : allColumns;
+  const activeRows = isFiltered && !viewAllRows ? filteredRows : allRows;
 
-  if (!allColumns.length) return null;
-
-  const displayRows = viewAllRows ? activeRows.slice(0, page * DEFAULT_PAGE_SIZE) : activeRows;
+  if (activeColumns.length === 0 && activeRows.length === 0) return null;
 
   return (
-    <div className="rounded-lg border bg-card/40 text-card-foreground">
-      {block.name ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3.5 py-2.5">
-          <button
-            type="button"
-            onClick={() => setIsExpanded((prev) => !prev)}
-            className="flex items-center gap-1.5 text-xs font-medium text-foreground hover:text-primary transition-colors"
+    <section
+      aria-label={block.name ?? 'Data table'}
+      className="overflow-hidden rounded-lg border bg-card text-card-foreground shadow-sm"
+    >
+      <header className="flex items-center justify-between border-b px-4 py-2.5 text-xs text-muted-foreground">
+        <button
+          type="button"
+          onClick={() => setIsExpanded((prev) => !prev)}
+          className="flex items-center gap-1.5 font-medium text-foreground hover:text-primary transition-colors"
+        >
+          {isExpanded ? (
+            <ChevronDown className="size-3.5 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-3.5 text-muted-foreground" />
+          )}
+          <span>{block.name ?? 'Table'}</span>
+          <span className="text-2xs text-muted-foreground font-normal">
+            ({activeRows.length} {activeRows.length === 1 ? 'row' : 'rows'}
+            {isFiltered && !viewAllRows ? ' relevant' : ''})
+          </span>
+        </button>
+
+        {isFiltered ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setViewAllRows((prev) => !prev)}
+            className="h-6 text-2xs px-2 text-primary"
           >
-            {isExpanded ? (
-              <ChevronDown className="size-3.5 text-muted-foreground" />
-            ) : (
-              <ChevronRight className="size-3.5 text-muted-foreground" />
-            )}
-            <span>{block.name}</span>
-            <span className="text-2xs text-muted-foreground font-normal">
-              ({activeRows.length} {activeRows.length === 1 ? 'row' : 'rows'}
-              {isFiltered && !viewAllRows ? ' relevant' : ''})
-            </span>
-          </button>
-
-          <div className="flex items-center gap-2">
-            {isFiltered ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setViewAllRows((prev) => !prev)}
-                className="h-6 text-2xs px-2 text-primary"
-              >
-                {viewAllRows
-                  ? `Show relevant rows only (${filteredRows.length})`
-                  : `Show all rows & columns (${allRows.length})`}
-              </Button>
-            ) : null}
-
-            {viewAllRows && activeRows.length > displayRows.length ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setPage((p) => p + 1)}
-                className="h-6 text-2xs px-2"
-              >
-                Load more
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
+            {viewAllRows
+              ? `Show relevant rows only (${filteredRows.length})`
+              : `Show all rows & columns (${allRows.length})`}
+          </Button>
+        ) : null}
+      </header>
 
       {isExpanded ? (
-        <div className="scrollbar-thin overflow-x-auto">
+        <div className="max-h-80 overflow-auto scrollbar-thin">
           <Table>
             <TableHeader>
               <TableRow>
@@ -188,7 +172,10 @@ export function DataTable({
                   <TableHead
                     key={`${col.name}-${i}`}
                     scope="col"
-                    className={NUMERIC.includes(col.dtype) ? 'text-right' : 'text-left'}
+                    className={cn(
+                      'sticky top-0 z-10 bg-card',
+                      NUMERIC.includes(col.dtype) ? 'text-right' : 'text-left',
+                    )}
                   >
                     {col.name}
                   </TableHead>
@@ -196,8 +183,8 @@ export function DataTable({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {displayRows.length ? (
-                displayRows.map((row, ri) => (
+              {activeRows.length ? (
+                activeRows.map((row, ri) => (
                   <TableRow key={ri}>
                     {activeColumns.map((col, ci) => {
                       const numeric = NUMERIC.includes(col.dtype);
@@ -229,6 +216,6 @@ export function DataTable({
           </Table>
         </div>
       ) : null}
-    </div>
+    </section>
   );
 }

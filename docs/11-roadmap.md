@@ -8,13 +8,15 @@ those documents specify.
 
 ## 1. Current state
 
-- **Documentation:** complete for the phases described here (docs 00–11).
-- **Implementation:** **pending maintainer approval of this plan.** No service
-  code is written yet; this document defines what "done" means for each step so
-  approval is a decision about a concrete, bounded plan rather than an open
-  brief.
+- **Documentation:** complete for the phases described here (docs 00–14).
+- **Implementation:** Phases 0–6 are **built**. The plan below is kept as
+  written, because what it promised is how the system should be read — and
+  because a plan edited after the fact to match the result teaches nobody
+  anything. The honest status of the build, including what was designed and
+  deliberately *not* built, lives in the README's status table; what landed
+  after Phase 6 is listed in §3.7.
 
-Nothing in Phase 0+ starts until this plan is approved. The build order is:
+The build order was, and the order for anything added from here still is:
 **docs → approved plan → vertical slice → iterate**, matching the sequence in
 [`00-overview.md`](00-overview.md) and [`01-architecture.md`](01-architecture.md).
 
@@ -215,6 +217,19 @@ dashboards → pipeline monitor → reports/export.
 
 **Rough sequencing.** security pass → test/CI hardening → docs sync → demo
 script → report polish.
+
+### 3.7 After Phase 6 — what was added, and in what order
+
+These were not in the approved plan. Each is recorded here with the doc that
+specifies it, so the plan stays honest about the difference between what was
+promised and what the system now does.
+
+| Addition | Doc | Why it was added |
+|---|---|---|
+| Forecasting over governed metrics, with prediction intervals and a refusal below four periods | [`13-forecasting.md`](13-forecasting.md) | "What happens next?" is the obvious next question after "what happened?", and the refusal is the interesting half |
+| The MCP server surface | [`12-mcp.md`](12-mcp.md) | Lets an external agent use the governed path instead of reaching for the database |
+| Uploaded datasets: parse → redact → chunk → embed → cited answers | [`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1 | The plan only ever ingested *configured* sources; "can it read my file?" is the first thing anyone asks |
+| **Dynamic datasets, second pass:** a registry that survives a restart, real indexing progress, and SQL over a tabular upload's own table | [`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1, [`05-insight-engine.md`](05-insight-engine.md) §3.4 | The first pass could index a file but not answer an arithmetic question about it, and lost the dataset list on restart — both of which were visible in a demo |
 
 ## 4. Vertical-slice definition
 

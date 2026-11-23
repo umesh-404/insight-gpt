@@ -1,7 +1,13 @@
 import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { cn, formatCurrency, formatNumber, formatPercent } from '@/lib/utils';
+import {
+  cn,
+  formatCurrency,
+  formatNumber,
+  formatPercent,
+  isMaterialChange,
+} from '@/lib/utils';
 import type { GoodDirection } from '@/lib/metrics';
 import type { MetricSummary, MetricUnit } from '@/lib/types';
 
@@ -38,7 +44,7 @@ function TileSparkline({
 }) {
   if (points.length < 3) return null;
   const width = 120;
-  const height = 34;
+  const height = 36;
   const min = Math.min(...points);
   const max = Math.max(...points);
   const span = max - min || 1;
@@ -90,6 +96,13 @@ export interface StatTileProps {
   /** Human label for the comparison window, e.g. "vs. prior 30 days". */
   comparisonLabel?: string;
   loading?: boolean;
+  /**
+   * `hero` is the one metric the page is *about*. It gets the display figure and
+   * a wider box; everything else on the row stays a supporting tile. Four tiles
+   * at identical weight make the reader choose where to look, which is the job
+   * the dashboard is supposed to have already done.
+   */
+  emphasis?: 'hero' | 'default';
 }
 
 export function StatTile({
@@ -99,30 +112,48 @@ export function StatTile({
   points,
   comparisonLabel = 'vs. prior period',
   loading,
+  emphasis = 'default',
 }: StatTileProps) {
+  const hero = emphasis === 'hero';
+  // Proportional figures on the display value: `tabular-nums` pads narrow digits
+  // and makes a large "1" sit in a visible gutter. Alignment only matters where
+  // numbers stack — the delta, the baseline, table rows and axis ticks.
+  //
+  // The supporting figure only reaches its full size at `xl`. The KPI band
+  // goes to five columns at `lg`, and in the 1024-1279px band a supporting
+  // column is ~86px wide while a seven-glyph currency figure (₹90,335) needs
+  // ~115px at 30px - so the value was shorn off mid-digit at exactly the
+  // resolution a lecture-theatre projector tends to run. Stepping down to
+  // 24px there costs nothing: the value still outranks its own label, which
+  // is what the hierarchy is for.
+  const valueClass = hero
+    ? 'text-3xl sm:text-4xl font-semibold leading-none tracking-tight text-foreground'
+    : 'text-2xl xl:text-3xl font-semibold leading-none tracking-tight text-foreground';
+  const pad = hero ? 'p-5 sm:p-6' : 'p-5';
+
   if (loading) {
     return (
       <Card>
-        <CardContent className="p-5">
+        <CardContent className={pad}>
           <Skeleton className="h-3.5 w-20" />
-          <Skeleton className="mt-3.5 h-8 w-28" />
-          <Skeleton className="mt-3.5 h-3.5 w-24" />
+          <Skeleton className={cn('mt-4', hero ? 'h-9 w-40' : 'h-8 w-28')} />
+          <Skeleton className="mt-4 h-3.5 w-24" />
         </CardContent>
       </Card>
     );
   }
 
   // A metric with no rows in the selected window is a real, reportable state —
-  // show it rather than spinning forever.
+  // show it rather than spinning forever, and never as a confident zero.
   if (!summary) {
     return (
       <Card>
-        <CardContent className="p-5">
+        <CardContent className={pad}>
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             {label}
           </p>
-          <p className="mt-2 text-3xl font-semibold text-muted-foreground">—</p>
-          <p className="mt-2 text-xs text-muted-foreground">No data in range</p>
+          <p className={cn('mt-4 text-muted-foreground', valueClass)}>—</p>
+          <p className="mt-4 text-xs text-muted-foreground">No data in range</p>
         </CardContent>
       </Card>
     );
@@ -130,8 +161,12 @@ export function StatTile({
 
   const { value, unit, delta_pct: delta, previous } = summary;
   const hasDelta = typeof delta === 'number' && Number.isFinite(delta);
-  const rose = hasDelta && delta > 0;
-  const fell = hasDelta && delta < 0;
+  const deltaValue = hasDelta ? delta : 0;
+  // A move that rounds to "0.0%" is not a direction. Below the floor the tile
+  // reports flat rather than painting an arrow and a verdict on drift.
+  const moved = isMaterialChange(delta);
+  const rose = moved && deltaValue > 0;
+  const fell = moved && deltaValue < 0;
 
   const good =
     goodDirection === 'neutral' ? false : goodDirection === 'up' ? rose : fell;
@@ -144,7 +179,7 @@ export function StatTile({
 
   return (
     <Card interactive className="relative overflow-hidden">
-      <CardContent className="relative p-5">
+      <CardContent className={cn('relative', pad)}>
         {points && points.length > 2 ? (
           <TileSparkline
             points={points}
@@ -155,39 +190,41 @@ export function StatTile({
         <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {label}
         </p>
-        <p className="mt-2 text-3xl font-semibold tabular-nums text-foreground">
-          {formatMetric(value, unit)}
-        </p>
+        <p className={cn('mt-4', valueClass)}>{formatMetric(value, unit)}</p>
 
         {hasDelta ? (
-          <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+          <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            {/* Colour sits on the glyph and the figure, not on a filled pill:
+                a row of four tinted capsules reads as a status board even when
+                three of the four movements are unremarkable. */}
             <span
               className={cn(
-                'inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 font-medium tabular-nums',
-                good && 'bg-success/12 text-success',
-                bad && 'bg-destructive/12 text-destructive',
-                !good && !bad && 'bg-muted text-muted-foreground',
+                'inline-flex items-center gap-1 font-semibold tabular-nums',
+                good && 'text-success',
+                bad && 'text-destructive',
+                !good && !bad && 'text-muted-foreground',
               )}
             >
               {rose ? (
-                <ArrowUpRight className="size-3.5" aria-hidden />
+                <ArrowUpRight className="size-4" aria-hidden />
               ) : fell ? (
-                <ArrowDownRight className="size-3.5" aria-hidden />
+                <ArrowDownRight className="size-4" aria-hidden />
               ) : (
-                <Minus className="size-3.5" aria-hidden />
+                <Minus className="size-4" aria-hidden />
               )}
-              {formatPercent(Math.abs(delta))}
+              {moved ? formatPercent(Math.abs(deltaValue)) : 'Flat'}
               <span className="sr-only"> {verdict}</span>
             </span>
             <span className="text-muted-foreground">{comparisonLabel}</span>
             {typeof previous === 'number' ? (
               <span className="basis-full text-2xs tabular-nums text-muted-foreground">
                 was {formatMetric(previous, unit)}
+                {moved ? null : ' · under 0.1% change'}
               </span>
             ) : null}
           </div>
         ) : (
-          <p className="mt-2.5 text-xs text-muted-foreground">
+          <p className="mt-4 text-xs text-muted-foreground">
             No prior-period baseline
           </p>
         )}

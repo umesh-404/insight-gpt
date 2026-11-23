@@ -12,7 +12,10 @@ this system is only allowed to make claims it can support**. Concretely:
    holds two quarters, that refusal is the correct answer and the one you get.
 3. Above the floor it forecasts, but every point carries a prediction interval,
    the method name, ``n_history``, and a ``low_confidence`` flag that stays on
-   until the history is genuinely long.
+   until the history is genuinely long. An interval of zero width is only
+   allowed when the history itself is constant; a model that fits a varying
+   history perfectly has its interval re-derived, because an in-sample perfect
+   fit is not knowledge of the future (see ``_repair_degenerate_interval``).
 4. Ratio metrics (``additive: false`` in the catalog — margins, rates, averages)
    are forecast **directly from their own period values**. They are never summed
    or averaged across segments, because ratio deltas do not compose.
@@ -221,11 +224,12 @@ def build_result(
     m = season_length(grain)
     points, method, family, seasonal_used = _project(values, horizon, m, cfg)
 
-    if not seasonal_used and m > 1:
-        caveats.append(
-            f"No seasonal term: {grain} data needs {2 * m} periods to estimate a "
-            f"{m}-period cycle and only {n} are available."
-        )
+    if m > 1 and seasonal_used is not True:
+        caveats.append(_seasonal_caveat(seasonal_used, grain, m, n, method))
+
+    points, interval_note = _repair_degenerate_interval(points, values, horizon, m, cfg)
+    if interval_note:
+        caveats.append(interval_note)
 
     labels = future_periods(history[-1].period, grain, horizon)
     forecast = [
@@ -272,16 +276,98 @@ def build_result(
 
 def _project(
     values: list[float], horizon: int, m: int, cfg: ForecastConfig
-) -> tuple[list[tuple[float, float, float]], str, MethodFamily, bool]:
-    """Pick and run a method; always returns something usable."""
+) -> tuple[list[tuple[float, float, float]], str, MethodFamily, bool | None]:
+    """Pick and run a method; always returns something usable.
+
+    The fourth element is whether the fitted model carries a seasonal term:
+    ``None`` when the backend did not say, which is reported as unknown rather
+    than assumed either way.
+    """
     if statsforecast_available() and len(values) >= cfg.min_history_statsforecast:
         out = statsforecast_project(values, horizon, m, cfg.interval_level)
         if out is not None:
-            points, name = out
-            return points, name, "statsforecast", m > 1 and len(values) >= 2 * m
+            return list(out.points), out.method, "statsforecast", out.seasonal
     points, _fit, seasonal_used = smoothing.project(values, horizon, m, cfg.interval_level)
     method = FALLBACK_METHOD_SEASONAL if seasonal_used else FALLBACK_METHOD
     return points, method, "fallback", seasonal_used
+
+
+def _seasonal_caveat(seasonal_used: bool | None, grain: str, m: int, n: int, method: str) -> str:
+    """Say *why* the projection carries no seasonal term, truthfully."""
+    if seasonal_used is None:
+        return (
+            f"Seasonality unconfirmed: {method} did not report which form it fitted, so "
+            f"whether a {m}-period {grain} cycle was modelled is unknown. Read any "
+            "apparent seasonal shape in the projection with that in mind."
+        )
+    if n < 2 * m:
+        return (
+            f"No seasonal term: {grain} data needs {2 * m} periods to estimate a "
+            f"{m}-period cycle and only {n} are available."
+        )
+    return (
+        f"No seasonal term: {method} selected a non-seasonal model, so the "
+        f"{m}-period {grain} cycle is not projected even though {n} periods of "
+        "history could support one."
+    )
+
+
+# Any interval narrower than this fraction of the series' own scale is treated
+# as zero-width — a claim of certainty, not a narrow estimate.
+_NEGLIGIBLE_WIDTH_RATIO = 1e-9
+
+
+def _repair_degenerate_interval(
+    points: list[tuple[float, float, float]],
+    values: list[float],
+    horizon: int,
+    m: int,
+    cfg: ForecastConfig,
+) -> tuple[list[tuple[float, float, float]], str | None]:
+    """Never ship a zero-width interval over a history that actually varies.
+
+    A model that fits its training data perfectly has zero *in-sample*
+    residuals, which is evidence of an over-flexible fit, not of knowing the
+    future: ``statsforecast``'s AutoETS does exactly this on a short,
+    deterministic series and divides by a zero residual variance to get there.
+    Keeping the point but re-deriving the interval from the pure-Python
+    fallback — whose interval is a residual-standard-error band we document and
+    can explain (:mod:`.smoothing`) — is the smallest honest repair: it invents
+    no width of its own, and it says in a caveat that it happened.
+
+    A *constant* history is left alone. There the collapse is a property of the
+    input and is already labelled as such.
+    """
+    if all(v == values[0] for v in values):
+        return points, None
+    scale = max(abs(v) for v in values) or 1.0
+    widths = [upper - lower for _p, lower, upper in points]
+    if max(widths) > _NEGLIGIBLE_WIDTH_RATIO * scale:
+        return points, None
+
+    reference, _fit, _seasonal = smoothing.project(values, horizon, m, cfg.interval_level)
+    halves = [(upper - lower) / 2.0 for _p, lower, upper in reference]
+    if max(halves) <= 0.0:
+        # Both methods fit this history exactly. Report the point and say
+        # plainly that it carries no interval rather than implying one.
+        return points, (
+            "No prediction interval: every method available fitted this history with "
+            "zero residual error, so no width could be estimated. The projected "
+            "points are shown without an interval — read them as a direction, and "
+            "do not read the absence of a band as certainty."
+        )
+
+    widened = [
+        (point, point - half, point + half)
+        for (point, _lower, _upper), half in zip(points, halves, strict=True)
+    ]
+    return widened, (
+        "Interval re-derived: the fitted model returned a zero-width "
+        f"{int(round(cfg.interval_level * 100))}% interval, which would claim perfect "
+        "certainty about the future from a perfect fit to the past. The points are the "
+        f"model's; the interval is the residual-error band of {FALLBACK_METHOD}, "
+        "computed on the same history."
+    )
 
 
 def _point(

@@ -29,6 +29,12 @@ It:
    English and get answers that combine hard numbers with document context.
 5. Presents results as **interactive dashboards, a conversational analytics
    interface, and exportable executive reports**.
+6. Lets a user **upload their own file** and ask about it — redacted and indexed
+   locally, answered from that file's text or, for a spreadsheet, from a query
+   over every one of its rows. An upload is kept strictly apart from the
+   governed warehouse: the answer names the dataset it came from, and a question
+   about a file the system does not hold is declined rather than answered with
+   company figures.
 
 The whole stack is **containerized** and **cloud-portable**, exposing a
 **FastAPI** backend and a **Next.js** frontend — a production-shaped Data
@@ -44,6 +50,9 @@ Engineering + AI pipeline.
   rate, and lead time; ranks at-risk SKUs.
 - *"Summarize customer complaints this month."* → retrieves and clusters recent
   tickets/reviews, summarizes the top themes with representative quotes.
+- *"What is the total revenue in `my_sales.csv`?"* (after uploading it) → runs
+  one query over the whole uploaded table and shows that query, with the dataset
+  named; the same question about a file that was never uploaded is declined.
 
 ## 4. Goals
 

@@ -2,6 +2,7 @@
 REM InsightGPT - one-command setup for Windows (Command Prompt).
 REM
 REM   setup.cmd                  set up (or repair) the full Docker stack
+REM   setup.cmd --preflight      is the configured local stack ready to demo?
 REM   setup.cmd --doctor         diagnose only; changes nothing
 REM   setup.cmd --repair         clean rebuild + recreate, then re-verify
 REM   setup.cmd --native         no Docker: prepare the local dev stack

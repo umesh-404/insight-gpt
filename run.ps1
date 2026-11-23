@@ -2,7 +2,11 @@
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'SilentlyContinue'
 
-$RepoDir = "d:\capstone\insight-gpt"
+# Derived from this script's own location, never hardcoded: an absolute path
+# baked in here breaks the one-click launcher the moment the repo is cloned or
+# moved anywhere else, and it fails by silently starting nothing.
+$RepoDir = $PSScriptRoot
+if (-not $RepoDir) { $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ApiDir = Join-Path $RepoDir "services\api"
 $WebDir = Join-Path $RepoDir "web"
 $PythonExe = Join-Path $ApiDir ".venv\Scripts\python.exe"
@@ -40,7 +44,7 @@ if ($DesktopDir -and (Test-Path $DesktopDir)) {
 }
 
 # 2. Check and start Ollama
-Write-Host "`n[1/3] Checking Local Embedding & Reranker Service (Ollama)..." -ForegroundColor Yellow
+Write-Host "`n[1/4] Checking Local Embedding & Reranker Service (Ollama)..." -ForegroundColor Yellow
 $ollamaUp = Test-IsUp "http://127.0.0.1:11434"
 if (-not $ollamaUp) {
     Write-Host "  -> Starting Ollama server in background..." -ForegroundColor Gray
@@ -61,8 +65,21 @@ if ($ollamaUp) {
     Write-Host "  [INFO] Ollama is initializing..." -ForegroundColor Gray
 }
 
-# 3. Check and start API Backend
-Write-Host "`n[2/3] Checking Backend API..." -ForegroundColor Yellow
+# 3. Preflight: is the configured stack actually ready? Read-only, and never
+# fatal — it reports, the launcher still starts, so a missing Gemini key shows
+# up here as one readable line instead of as a failed API boot in a log window.
+Write-Host "`n[2/4] Checking configuration (Qdrant, local models, provider key)..." -ForegroundColor Yellow
+$SetupPy = Join-Path $RepoDir "scripts\setup.py"
+if (Test-Path $SetupPy) {
+    & python $SetupPy --preflight
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  [WARN] Preflight reported a blocking problem (see the FAIL lines above)." -ForegroundColor Yellow
+        Write-Host "         Starting anyway, but expect the API to refuse questions until it is fixed." -ForegroundColor Yellow
+    }
+}
+
+# 4. Check and start API Backend
+Write-Host "`n[3/4] Checking Backend API..." -ForegroundColor Yellow
 $backendUp = Test-IsUp "http://127.0.0.1:8000/health"
 if (-not $backendUp) {
     Write-Host "  -> Starting FastAPI backend (port 8000)..." -ForegroundColor Gray
@@ -80,8 +97,8 @@ if ($backendUp) {
     Write-Host "  [INFO] Backend API is starting up..." -ForegroundColor Gray
 }
 
-# 4. Check and start Web Frontend
-Write-Host "`n[3/3] Checking Web Frontend..." -ForegroundColor Yellow
+# 5. Check and start Web Frontend
+Write-Host "`n[4/4] Checking Web Frontend..." -ForegroundColor Yellow
 $webUp = Test-IsUp "http://127.0.0.1:3000"
 if (-not $webUp) {
     Write-Host "  -> Starting Next.js frontend (port 3000)..." -ForegroundColor Gray

@@ -177,6 +177,49 @@ the North region", evidenced by cited tickets).
 Metric decomposition like this — total → by-dimension → contribution — is a
 reusable template the engine applies to any "why did *metric* change?" question.
 
+### 3.4 Uploaded datasets — a second SQL path that never touches the warehouse
+
+A question that **names a file** (`question_names_a_file`) leaves the governed
+path entirely. Phase 1 could only answer such a question from the file's indexed
+text, so "what is total revenue in `my_sales.csv`?" abstained: retrieval returns
+a handful of row chunks, and a total summed from those is a figure computed from
+a sample. That abstention was correct and useless.
+
+Phase 2 gives a **tabular** upload its own table
+([`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1) and answers the arithmetic
+with one query over every row. Four rules make that safe rather than merely
+impressive, and each is a rule, not a preference:
+
+1. **Separate database, separate allow-list.** Uploaded tables live in their own
+   DuckDB file with their own connection. The allow-list passed to `validate_sql`
+   on each call holds exactly one name — that dataset's own table — so a query
+   reaching another upload, a retail fact table or a catalog view fails
+   validation instead of returning rows. The two stores are never attached,
+   joined, or used as each other's fallback.
+2. **The question has to actually ask arithmetic.** The planner returns "not
+   mine" for anything that does not, and the answer comes from the indexed text
+   as before. Nothing that used to be a retrieval answer silently becomes a
+   number.
+3. **A partial table cannot answer a whole-table question.** A file loaded up to
+   the row cap is marked truncated and aggregates over it are **declined** with
+   the real row counts. So is a sum over a column that did not read as numbers,
+   or an aggregate whose column the question never named — with the real column
+   list, not a guess.
+4. **The answer says where the number came from.** The envelope names the
+   dataset in the first clause of the prose, carries the exact SQL, cites the
+   dataset with its derived schema, and caveats that the figure is from an
+   upload and *not* from the governed retail warehouse.
+
+The three outcomes are distinguishable by a reader without being told: a figure
+attributed to the dataset with its query; an **abstention** naming the file
+(including when the file is not one the registry holds — a filename we do not
+have never falls through to a governed figure); or a text answer with citations
+and no `sql`.
+
+The reverse direction is equally forbidden. A question that names no file is
+never answered from an upload, and the engine does not consult uploaded tables
+when resolving a governed metric.
+
 ---
 
 ## 4. SQL guardrails
@@ -302,10 +345,22 @@ Implementations, selected by config + env:
 
 | Provider | Role | Selection |
 |---|---|---|
-| **Ollama** | Default — local, private, CPU-viable | default; no key needed |
-| **OpenAI** | Optional cloud — higher reasoning quality | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
-| **Gemini** | Optional cloud | `LLM_PROVIDER=gemini` + key |
-| **Groq** | Optional cloud — low latency | `LLM_PROVIDER=groq` + key |
+| **Gemini** | **Production default** — OpenAI-compatible endpoint | `LLM_PROVIDER=gemini` + `GEMINI_API_KEY` |
+| **OpenAI** | Cloud alternative | `LLM_PROVIDER=openai` + `OPENAI_API_KEY` |
+| **Groq** | Cloud alternative — low latency | `LLM_PROVIDER=groq` + `GROQ_API_KEY` |
+| **Ollama** | Local, private, CPU-viable | `LLM_PROVIDER=ollama`; no key |
+| **Fake** | Tests and offline runs only | `LLM_PROVIDER=fake`; refused in production |
+
+The three cloud options share one implementation, because all three speak the
+OpenAI `/chat/completions` schema.
+
+**Model ids are configuration, not constants.** The id baked into the factory
+is a starting point that will rot: catalogues are retired on a published
+schedule (Groq shut down `llama-3.1-8b-instant` on 2026-08-16), so a pinned-in
+-code default becomes a 404 on a date nobody is watching. Set `LLM_MODEL` per
+deployment. `GET /system/status` calls the provider's own `/models` list and
+reports a configured model that has stopped existing, rather than reporting
+"ok" because a key happens to be present.
 
 Provider and model are chosen in `config/*.yaml` with secrets in env — never in
 the repo. On a CPU-only machine, pointing `LLM_PROVIDER` at a cloud key is the
@@ -322,6 +377,29 @@ on Ollama (see [`04-retrieval-rag.md`](04-retrieval-rag.md)).
   ([`06-api.md`](06-api.md)) and cost accounting.
 - **Graceful capability differences.** Streaming and JSON-mode are negotiated
   per provider; a provider lacking a feature falls back to a supported path.
+  JSON mode is requested but never *assumed*: Google's compatibility layer
+  does not document `response_format` for chat completions, so the router
+  parses tolerantly (fenced blocks, prose-wrapped objects) rather than
+  trusting the flag it set.
+
+### 7.3 What happens when the model is unreachable
+
+**It fails, loudly.** A provider outage raises `ProviderError`, which the API
+returns as a `503 dependency_unavailable` naming the provider. It never
+degrades to a templated answer.
+
+That is a deliberate trade of availability for honesty, and it is the only
+choice consistent with the rest of this document. Every surface frames an
+answer as traceable — the SQL that produced a figure, the document behind a
+claim. Prose assembled from a template while the model was down would wear
+that same framing while being something else entirely, and nothing on screen
+would tell the two apart. A system whose claim is "you can check this" cannot
+quietly serve output that cannot be checked.
+
+Transient faults are retried before giving up: a 429 or 5xx gets exponential
+backoff with full jitter, honouring `Retry-After`. A 401 or a 400 is not
+retried — a refusal will be a refusal the second time, and retrying only
+spends latency to be told twice.
 
 ---
 
@@ -375,7 +453,7 @@ a feature.
 |---|---|---|---|
 | NL → data | **Semantic-layer-grounded selection** | Free-form text-to-SQL | Grounding lifts accuracy ~70–85% → ~90%+ and removes hallucinated joins/aggregations |
 | SQL generation | **Deterministic builder from validated selection** | LLM emits raw SQL string | Correct joins/grain come from governed definitions, not model guesswork |
-| Provider | **Pluggable (Ollama default, cloud optional)** | Single hardcoded vendor | Runs anywhere; upgrade with a key; no lock-in; keeps the repo vendor-neutral |
+| Provider | **Pluggable (Ollama is the code default; the shipped `.env` configures Gemini)** | Single hardcoded vendor | Runs anywhere; upgrade with a key; no lock-in; keeps the repo vendor-neutral |
 | Numbers in answers | **Passed through from SQL verbatim** | LLM restates/derives numbers | An LLM must never be the source of a figure; it narrates, it doesn't compute |
 | Retrieved text | **Untrusted data, delimited** | Concatenate into the prompt as-is | Prevents prompt injection from documents influencing behavior |
 | Ambiguity | **Clarify** | Best-effort guess | A confident wrong answer is worse than a question |

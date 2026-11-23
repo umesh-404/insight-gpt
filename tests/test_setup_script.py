@@ -230,3 +230,129 @@ def test_setup_error_carries_a_fix() -> None:
     err = setup.SetupError("something broke", "do this to fix it")
     assert err.problem == "something broke"
     assert err.fix == "do this to fix it"
+
+
+# --------------------------------------------------------------------------- #
+# Preflight                                                                    #
+# --------------------------------------------------------------------------- #
+def test_model_present_accepts_a_bare_name_as_latest() -> None:
+    """Ollama lists ``nomic-embed-text:latest``; .env names it without the tag."""
+    installed = {"nomic-embed-text:latest", "dengcao/Qwen3-Reranker-0.6B:F16"}
+    assert setup._model_is_present(installed, "nomic-embed-text")
+    assert setup._model_is_present(installed, "nomic-embed-text:latest")
+    assert setup._model_is_present(installed, "dengcao/Qwen3-Reranker-0.6B:F16")
+    assert not setup._model_is_present(installed, "mxbai-embed-large")
+    assert not setup._model_is_present(installed, "")
+
+
+class _FakeQdrant:
+    """Records every URL asked for, so a test can prove what was NOT asked."""
+
+    def __init__(self, collections: list[str]) -> None:
+        self.collections = collections
+        self.urls: list[str] = []
+
+    def __call__(self, url, timeout=6.0, headers=None):
+        self.urls.append(url)
+        if url.endswith("/collections"):
+            return 200, {"result": {"collections": [{"name": n} for n in self.collections]}}, ""
+        name = url.rsplit("/", 1)[-1]
+        if name in self.collections:
+            return 200, {
+                "result": {
+                    "points_count": 42,
+                    "config": {"params": {"vectors": {"dense": {"size": 768}}}},
+                }
+            }, ""
+        return 404, {"status": {"error": "not found"}}, ""
+
+
+def test_preflight_rejects_a_collection_outside_our_namespace(monkeypatch) -> None:
+    """The instance is shared. A name we do not own is a hard stop, not a warning.
+
+    The assertion that matters is the second one: having refused the name, the
+    check must not go on to probe — let alone write to — that collection.
+    """
+    fake = _FakeQdrant(["code", "docs", "memory"])
+    monkeypatch.setattr(setup, "_get_json", fake)
+    rep = setup._Report()
+
+    setup._check_qdrant({"QDRANT_URL": "http://127.0.0.1:6333", "QDRANT_COLLECTION": "docs"}, rep)
+
+    assert rep.failures, "a foreign collection name must fail, not warn"
+    assert any("namespace" in msg for msg, _ in rep.failures)
+    assert not any(url.endswith("/collections/docs") for url in fake.urls), (
+        "a collection we do not own must never be probed"
+    )
+
+
+def test_preflight_reports_a_missing_collection_without_failing(monkeypatch) -> None:
+    """Before the first upload the collection is absent — that is not broken."""
+    fake = _FakeQdrant(["code", "docs", "memory"])
+    monkeypatch.setattr(setup, "_get_json", fake)
+    rep = setup._Report()
+
+    setup._check_qdrant(
+        {"QDRANT_URL": "http://127.0.0.1:6333", "QDRANT_COLLECTION": "insightgpt_documents"},
+        rep,
+    )
+
+    assert not rep.failures
+
+
+def test_preflight_catches_a_vector_width_mismatch(monkeypatch) -> None:
+    """768-d vectors queried against a 3072-d collection return nonsense, not an error."""
+    fake = _FakeQdrant(["insightgpt_documents"])
+    monkeypatch.setattr(setup, "_get_json", fake)
+    rep = setup._Report()
+
+    setup._check_qdrant(
+        {
+            "QDRANT_URL": "http://127.0.0.1:6333",
+            "QDRANT_COLLECTION": "insightgpt_documents",
+            "EMBED_DIMENSIONS": "3072",
+        },
+        rep,
+    )
+
+    assert any("EMBED_DIMENSIONS" in msg for msg, _ in rep.failures)
+
+
+def test_preflight_fails_when_the_retriever_cannot_see_uploads(tmp_path, monkeypatch) -> None:
+    """RETRIEVER=fixture cannot search an uploaded dataset, so it blocks the demo."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("JWT_SECRET=" + "a" * 64 + "\nRETRIEVER=fixture\n", encoding="utf-8")
+    monkeypatch.setattr(setup, "ENV_FILE", env_file)
+    rep = setup._Report()
+
+    setup._check_config(setup.read_env(env_file), rep)
+
+    assert any("RETRIEVER" in msg for msg, _ in rep.failures)
+
+
+def test_preflight_requires_the_provider_key(monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    rep = setup._Report()
+
+    setup._check_provider(
+        {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-2.5-flash"}, rep, offline=True
+    )
+
+    assert any("GEMINI_API_KEY" in msg for msg, _ in rep.failures)
+
+
+def test_preflight_offline_makes_no_outbound_call(monkeypatch) -> None:
+    """--offline must validate what it can locally and call nobody."""
+    def _boom(*args, **kwargs):  # pragma: no cover - must never run
+        raise AssertionError("--offline must not reach the network")
+
+    monkeypatch.setattr(setup, "_get_json", _boom)
+    rep = setup._Report()
+
+    setup._check_provider(
+        {"LLM_PROVIDER": "gemini", "LLM_MODEL": "gemini-2.5-flash", "GEMINI_API_KEY": "k" * 39},
+        rep,
+        offline=True,
+    )
+
+    assert not rep.failures

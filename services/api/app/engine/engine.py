@@ -8,6 +8,7 @@ independently testable. See ``docs/05-insight-engine.md``.
 
 from __future__ import annotations
 
+import calendar as _calendar
 import datetime as _dt
 import logging
 import re
@@ -17,9 +18,29 @@ from ..providers.base import Provider
 from ..providers.factory import get_provider
 from ..semantic.catalog import SemanticCatalog, load_catalog
 from ..semantic.query_builder import Filter, MetricSelection, build_query
+from ..warehouse.datasets_db import (
+    DatasetsDB,
+    DatasetsDBUnavailable,
+    DatasetTableError,
+    get_datasets_db,
+)
 from ..warehouse.executor import DuckDBWarehouse, Warehouse
 from .attachments import AttachmentInput, process_attachments
+from .dataset_query import (
+    DatasetDecline,
+    dataset_envelope,
+    plan_dataset_query,
+    resolve_named_file,
+)
 from .envelope import AnswerEnvelope, Chart, ChartSeries, Citation, CorrectionAttempt, Table
+from .grounding import (
+    question_names_a_file,
+    question_years,
+    selection_is_grounded,
+    year_span,
+    years_covered,
+)
+from .guardrails import GuardrailError
 from .retrieval import FixtureRetriever, Retriever
 from .router import route
 from .selfcorrect import AbstainSignal, suggest_metrics
@@ -31,12 +52,21 @@ log = logging.getLogger("insightgpt.engine")
 
 class InsightEngine:
     def __init__(self, *, catalog: SemanticCatalog, warehouse: Warehouse,
-                 retriever: Retriever, provider: Provider, today: str = "2026-07-15"):
+                 retriever: Retriever, provider: Provider, today: str = "2026-07-15",
+                 datasets_db: DatasetsDB | None = None):
         self.catalog = catalog
         self.warehouse = warehouse
         self.retriever = retriever
         self.provider = provider
         self.today = today
+        # The uploaded-datasets database is deliberately NOT ``warehouse``, and
+        # is never reachable from it: a question about somebody's spreadsheet
+        # and a question about the governed retail warehouse are answered by
+        # two different connections over two different databases, with two
+        # different allow-lists. ``None`` means "the process default", resolved
+        # on first use so an engine built for the offline stack never opens a
+        # file it does not need.
+        self.datasets_db = datasets_db
 
     # ---- convenience constructor for the offline fixture stack ---------------
     @classmethod
@@ -52,15 +82,39 @@ class InsightEngine:
 
     # ---- main entry point ----------------------------------------------------
     def ask(
-        self, question: str, attachments: list[AttachmentInput] | None = None
+        self,
+        question: str,
+        attachments: list[AttachmentInput] | None = None,
+        time_range: dict | None = None,
     ) -> AnswerEnvelope:
-        parsed_attachments = process_attachments(attachments, question=question) if attachments else []
+        """Answer ``question``.
+
+        ``time_range`` overrides the period the router resolved from the
+        question's own words. It exists for callers that scope a question from
+        outside it - the report builder asks fixed section questions over a
+        period the reader picked, and without this the engine resolved "last
+        quarter" from its own clock and the chosen period was decorative.
+        """
+        parsed_attachments = (
+            process_attachments(attachments, question=question) if attachments else []
+        )
         attachment_docs = [
             att.to_doc(self.today, i + 1) for i, att in enumerate(parsed_attachments)
         ]
         attachment_tables = [att.table for att in parsed_attachments if att.table is not None]
 
         r = route(question, self.catalog, self.provider, self.today)
+
+        # An explicitly supplied period replaces the resolved one. The prior
+        # window is re-derived as the equal-length span immediately before it,
+        # so a change question still decomposes against a comparable period
+        # rather than against whatever the router's default happened to be.
+        override = _as_time_range(time_range)
+        if override is not None and r["route"] in ("structured", "hybrid"):
+            r["time_range"] = override
+            r["prior_time_range"] = (
+                _preceding_span(override) if r.get("prior_time_range") else None
+            )
 
         # If files are attached, the user intends to query those files
         if parsed_attachments:
@@ -84,6 +138,45 @@ class InsightEngine:
         if r["route"] == "conversational" and not parsed_attachments:
             return self._conversational_envelope(question)
 
+        # A question that names an uploaded file leaves the governed path.
+        #
+        # The router decides on metric words, so "what was revenue in
+        # my_sales.csv" looks exactly like "what was revenue" to it: it routes
+        # structured, queries the warehouse, never consults retrieval, and
+        # returns a retail figure with no citation - a confident,
+        # correctly-formatted number drawn from somebody else's data, in
+        # answer to a question about the reader's own file. That is the single
+        # worst failure this engine can produce, because nothing on screen
+        # marks it as wrong.
+        #
+        # A file reference is therefore treated as the stronger signal: drop
+        # the metric, and answer from the file itself. Which half of the file
+        # answers it is decided in `_named_file_envelope` below: a tabular
+        # upload with an arithmetic question gets one SQL query over its own
+        # table, anything else gets retrieval over its indexed text. If the
+        # file was never uploaded we abstain, which is the honest reply to a
+        # question about a file that does not exist.
+        named_file = question_names_a_file(question)
+        if named_file and not parsed_attachments:
+            from_file = self._named_file_envelope(question, named_file)
+            if from_file is not None:
+                return from_file
+            log.info("question names a file (%s); answering from documents", named_file)
+            # Scope the fall-through search to that file's own chunks. Without
+            # this the search runs over the whole corpus and the retail sample
+            # documents answer a question about the reader's upload.
+            resolved = resolve_named_file(named_file)
+            dataset_id = getattr(resolved, "dataset_id", None) if resolved else None
+            if dataset_id:
+                r["named_dataset_id"] = dataset_id
+            r["metric"] = None
+            r["time_range"] = None
+            r["prior_time_range"] = None
+            r["metric_unresolved"] = False
+            r["needs_docs"] = True
+            if r["route"] in ("structured", "hybrid"):
+                r["route"] = "unstructured"
+
         # The question named a metric that is not in the governed catalog and no
         # documents can stand in for it: refuse rather than compute the wrong
         # thing (docs/05 §9). Abstention is distinct from clarification — we
@@ -95,6 +188,40 @@ class InsightEngine:
                 "reliably.",
                 suggest_metrics(requested, self.catalog),
             )
+
+        # The provider picks a metric from a *closed menu* of governed metrics, so
+        # it always returns one — asked for "average employee salary" a model must
+        # still answer "revenue". The engine therefore treats the selection as a
+        # hypothesis and checks it against the question's own words before
+        # computing a number from it. Enforcing this here (not per provider) is
+        # what makes abstention a property of the engine rather than of whichever
+        # provider happens to be configured.
+        if (
+            r["route"] in ("structured", "hybrid")
+            and r.get("metric")
+            and not selection_is_grounded(question, r["metric"])
+        ):
+            if r["needs_docs"] or parsed_attachments:
+                # Documents can still answer it; just do not attach a number.
+                r["metric"] = None
+                r["time_range"] = None
+            else:
+                return self._abstain(
+                    "That question does not map to anything in the governed "
+                    "semantic layer, so answering it would mean reporting a "
+                    "different metric than the one asked for.",
+                    suggest_metrics(None, self.catalog),
+                )
+
+        # A period the question named explicitly but the resolver did not honour
+        # means the resolver fell back to its default ("last quarter"). Answering
+        # then silently reports a *different* period than the one asked about, so
+        # honour the asked period instead and let the warehouse say it has no
+        # rows for it.
+        asked_years = [] if override is not None else question_years(question)
+        if r.get("time_range") and not years_covered(r["time_range"], asked_years):
+            r["time_range"] = year_span(asked_years)
+            r["prior_time_range"] = None
 
         structured: StructuredResult | None = None
         attempts: list[CorrectionAttempt] = []
@@ -155,13 +282,80 @@ class InsightEngine:
             sql=structured.sql if structured else [],
             tables=final_tables,
             citations=_citations(docs),
-            chart=_chart_for(final_tables, findings) if structured else None,
+            chart=_chart_for(final_tables, findings, self.catalog) if structured else None,
             confidence=synth.get("confidence", "high" if parsed_attachments else "medium"),
-            caveats=synth.get("caveats", []),
+            caveats=synth.get("caveats", []) + _foreign_evidence_caveat(
+                named_file if not parsed_attachments else None, docs
+            ),
             attempts=attempts,
         )
 
 
+
+    # ---- the uploaded-file path ---------------------------------------------
+    def _named_file_envelope(self, question: str, named_file: str) -> AnswerEnvelope | None:
+        """Answer a question that names an uploaded file, or decide not to.
+
+        Three outcomes, and a reader can tell which one they got without being
+        told:
+
+        * **SQL over the upload's own table** — an arithmetic question about a
+          tabular upload. The envelope names the dataset in the first clause,
+          carries the exact query in ``sql``, cites the dataset with its derived
+          schema, and says in a caveat that the figure is not from the governed
+          warehouse.
+        * **Abstention** (``route="abstain"``, no number anywhere) — the file is
+          not one we hold, or the arithmetic cannot be done over the whole
+          table. The reason names the file and, where it helps, the real
+          columns.
+        * **``None``** — not arithmetic, or no table to run it against. The
+          caller then answers from the file's indexed text, which arrives as
+          ``route="unstructured"`` with citations and no ``sql``.
+
+        What this must never do is answer from the retail warehouse. The file is
+        resolved against the dataset registry, and a filename the registry does
+        not hold abstains here rather than falling through to a governed figure
+        (honesty rule §3.1).
+        """
+        match = resolve_named_file(named_file, self.datasets_db)
+
+        if match.registry_available and not match.known:
+            held = ", ".join(sorted(set(match.known_names))[:5])
+            return self._abstain(
+                f"I have no uploaded file called '{_safe_echo(named_file, 80)}', so "
+                "there is nothing of yours to answer from - and I will not answer a "
+                "question about your file with figures from the retail sample data."
+                + (f" Files I do hold: {held}." if held else " No files are uploaded yet."),
+                ["Upload the file on the Sources page, then ask again"],
+            )
+
+        if match.table is None:
+            if match.note:
+                log.info("named file %s has no queryable table: %s", named_file, match.note)
+            return None
+
+        plan = plan_dataset_query(question, match.table)
+        if plan is None:
+            return None  # not arithmetic: the indexed text answers it
+        if isinstance(plan, DatasetDecline):
+            return self._abstain(plan.reason, plan.suggestions)
+
+        try:
+            # The allow-list on this call is one table: this dataset's own.
+            # Nothing here can reach another upload or the retail warehouse.
+            db = self.datasets_db or get_datasets_db()
+            result = db.run(match.table.dataset_id, plan.sql, plan.params)
+        except (DatasetTableError, DatasetsDBUnavailable, GuardrailError) as exc:
+            log.warning("dataset query failed for %s: %s", match.table.dataset_id, exc)
+            return self._abstain(
+                f"I could not run that calculation over '{match.table.file_name}': {exc}",
+                [],
+            )
+        log.info(
+            "answered from uploaded table %s (%s rows) with: %s",
+            match.table.table, match.table.rows, plan.sql,
+        )
+        return dataset_envelope(match.table, plan, result)
 
     # ---- abstention + no-data + conversational envelopes --------------------
     # ---- conversational envelope (dynamic live responses) -------------------
@@ -632,6 +826,64 @@ def _safe_echo(value: object, limit: int = 60) -> str:
     return cleaned or "that metric"
 
 
+def _as_time_range(raw: dict | None) -> dict | None:
+    """A ``{start, end}`` ISO window, or ``None`` when ``raw`` is not usable."""
+    if not isinstance(raw, dict):
+        return None
+    start, end = raw.get("start"), raw.get("end")
+    try:
+        first = _dt.date.fromisoformat(str(start))
+        last = _dt.date.fromisoformat(str(end))
+    except (TypeError, ValueError):
+        return None
+    if last < first:
+        return None
+    return {"start": first.isoformat(), "end": last.isoformat()}
+
+
+def _month_shift(day: _dt.date, months: int) -> _dt.date:
+    """``day`` moved by ``months``, clamped to the target month's last day."""
+    index = (day.year * 12 + day.month - 1) + months
+    year, month = divmod(index, 12)
+    month += 1
+    last = _calendar.monthrange(year, month)[1]
+    return _dt.date(year, month, min(day.day, last))
+
+
+def _whole_months(first: _dt.date, last: _dt.date) -> int | None:
+    """The month count when ``[first, last]`` is exactly N whole months."""
+    if first.day != 1 or last.day != _calendar.monthrange(last.year, last.month)[1]:
+        return None
+    return (last.year * 12 + last.month) - (first.year * 12 + first.month) + 1
+
+
+def _preceding_span(time_range: dict) -> dict:
+    """The comparable window immediately before ``time_range``.
+
+    A period that is a whole number of calendar months gets the preceding
+    whole months, so a quarter compares against the previous quarter and
+    reads as "2026Q1 -> 2026Q2". The equal-length day count is only a
+    fallback: applied to a quarter it starts a day early, which both labels
+    the comparison as a date pair instead of a quarter and drags a one-day
+    sliver of the quarter before it into the breakdown.
+    """
+    first = _dt.date.fromisoformat(time_range["start"])
+    last = _dt.date.fromisoformat(time_range["end"])
+    months = _whole_months(first, last)
+    if months is not None:
+        prior_first = _month_shift(first, -months)
+        return {
+            "start": prior_first.isoformat(),
+            "end": (first - _dt.timedelta(days=1)).isoformat(),
+        }
+    length = (last - first).days + 1
+    prior_end = first - _dt.timedelta(days=1)
+    return {
+        "start": (prior_end - _dt.timedelta(days=length - 1)).isoformat(),
+        "end": prior_end.isoformat(),
+    }
+
+
 def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:
     """Build the retrieval query + filters.
 
@@ -641,6 +893,17 @@ def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:
     entities in the question always take precedence.
     """
     filters: dict = {}
+    # A question that named a file searches THAT file and nothing else.
+    #
+    # When the SQL planner cannot handle a shape - a median, a question about
+    # text - the engine falls through to retrieval, and an unscoped search
+    # over a corpus that also holds the retail sample documents answered from
+    # them: "what is the median revenue in quarry_sales.csv" came back about
+    # fulfilment delays in the North region, with five citations and not one
+    # of them the file that was asked about. The fall-through is the right
+    # behaviour; searching the whole corpus from it is not.
+    if r.get("named_dataset_id"):
+        filters["dataset_id"] = [r["named_dataset_id"]]
     if r.get("time_range"):
         filters["date_range"] = r["time_range"]
     for key in ("region", "category"):
@@ -664,6 +927,31 @@ def _retrieval_query(question: str, r: dict, structured) -> tuple[str, dict]:
     return query, filters
 
 
+def _foreign_evidence_caveat(named_file: str | None, docs) -> list[str]:
+    """Say so when a question about a file is answered from other documents.
+
+    Retrieval is not scoped to the named upload: a question about
+    ``my_sales.csv`` whose text does not match well can come back with the
+    curated retail corpus as its evidence. The citations do name those sources,
+    so nothing here is fabricated — but the prose reads as an answer about the
+    reader's file, and the gap between "these documents" and "your file" is
+    exactly the gap this product refuses to leave to inference. So the envelope
+    states it.
+    """
+    if not named_file or not docs:
+        return []
+    wanted = named_file.lower()
+    for doc in docs:
+        if getattr(doc, "source_type", "") in ("dataset", "attachment") and (
+            wanted in str(getattr(doc, "title", "")).lower()
+        ):
+            return []
+    return [
+        f"None of the evidence below comes from '{_safe_echo(named_file, 80)}'. These "
+        "citations are other documents in the corpus, not your uploaded file."
+    ]
+
+
 def _citations(docs) -> list[Citation]:
     return [
         Citation(
@@ -673,9 +961,17 @@ def _citations(docs) -> list[Citation]:
             title=d.title,
             date=d.date,
             score=d.score,
+            # A snippet travels with user-supplied evidence, and only with it.
+            # The curated corpus is browsable elsewhere, so repeating its text
+            # in every envelope is weight for nothing. A file the reader
+            # uploaded is the opposite case: they cannot look it up, and a
+            # citation that names their document without quoting any of it
+            # asks them to take the grounding on faith - which is the one
+            # thing this product refuses to ask. "dataset" is an upload that
+            # was indexed; "attachment" is one attached to a single question.
             snippet=(
                 d.body[:250].replace("\n", " ").strip()
-                if d.source_type == "attachment"
+                if d.source_type in ("attachment", "dataset")
                 else None
             ),
         )
@@ -684,25 +980,43 @@ def _citations(docs) -> list[Citation]:
 
 
 
-def _chart_for(tables: list[Table], findings: dict) -> Chart | None:
+def _chart_unit(catalog: SemanticCatalog, metric: str) -> str | None:
+    """The governed metric's display format, for the client's y axis.
+
+    Resolved here rather than client-side because the catalog is the only
+    place that knows a column of numbers is rupees. An unknown metric name
+    yields ``None``: the client then falls back to plain number formatting,
+    which is what it did for every chart before this existed.
+    """
+    governed = catalog.metrics.get(metric)
+    return governed.format if governed is not None else None
+
+
+def _chart_for(
+    tables: list[Table], findings: dict, catalog: SemanticCatalog
+) -> Chart | None:
     if not tables:
         return None
     kind = findings.get("kind")
     metric = findings.get("metric", "value")
+    unit = _chart_unit(catalog, metric)
     first = tables[0]
     if kind == "change":  # trend table: [period, metric]
         return Chart(
             type="line", x=first.columns[0],
             series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]",
+            unit=unit,
         )
     if kind == "grouped":
         return Chart(
             type="bar", x=first.columns[0],
             series=[ChartSeries(name=metric, y=first.columns[-1])], data_ref="tables[0]",
+            unit=unit,
         )
     if kind == "restock" and len(tables) > 1:
         return Chart(
             type="bar", x=tables[1].columns[0],
             series=[ChartSeries(name=metric, y=tables[1].columns[-1])], data_ref="tables[1]",
+            unit=unit,
         )
     return None

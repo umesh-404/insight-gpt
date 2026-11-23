@@ -13,10 +13,14 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
+from ..auth.tokens import verify_jwt_secret
+from ..providers.base import ProviderError
+from ..providers.factory import verify_provider_config
 from .deps import APP_VERSION
 from .errors import (
     APIError,
     api_error_handler,
+    provider_error_handler,
     unhandled_error_handler,
     validation_error_handler,
 )
@@ -24,6 +28,7 @@ from .observability import RequestContextMiddleware, configure_logging
 from .routers import (
     ask,
     auth,
+    datasets,
     forecast,
     insights,
     metrics,
@@ -62,6 +67,14 @@ def _cors_origins() -> list[str]:
 def create_app() -> FastAPI:
     configure_logging()
 
+    # Fail before the first request rather than signing tokens with a secret
+    # that is published in the repository (see app/auth/tokens.py).
+    verify_jwt_secret()
+    # Same contract for the reasoning model: a deployment missing its API key
+    # should die on boot naming the variable, not pass health checks for an
+    # hour and then 503 the first real question a user asks.
+    verify_provider_config()
+
     app = FastAPI(
         title="InsightGPT API",
         version=APP_VERSION,
@@ -88,11 +101,16 @@ def create_app() -> FastAPI:
 
     # --- one error envelope for every failure ---------------------------------
     app.add_exception_handler(APIError, api_error_handler)
+    # Registered before the catch-all so a provider outage reports as an
+    # upstream 503 rather than an opaque 500 that looks like our own bug.
+    app.add_exception_handler(ProviderError, provider_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(Exception, unhandled_error_handler)
 
     # --- versioned application routers ----------------------------------------
-    for module in (auth, ask, metrics, sources, pipelines, reports, insights, forecast):
+    for module in (
+        auth, ask, metrics, sources, pipelines, reports, insights, forecast, datasets,
+    ):
         app.include_router(module.router, prefix=API_PREFIX)
 
     # --- unversioned operational routes ---------------------------------------

@@ -11,7 +11,7 @@ import os
 
 os.environ.setdefault("LLM_PROVIDER", "fake")
 os.environ.setdefault("WAREHOUSE", "duckdb")
-os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
+os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-32-bytes")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "0")
 
 from datetime import UTC, datetime, timedelta  # noqa: E402

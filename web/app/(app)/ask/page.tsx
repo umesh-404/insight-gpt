@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
-import { ConversationList } from '@/components/conversation-list';
 import { ConversationView } from '@/components/conversation-view';
+import { AskShell } from './ask-shell';
 
 export const metadata: Metadata = {
   title: 'Ask',
@@ -21,15 +21,12 @@ export default function AskPage({
   const initialQuestion = (Array.isArray(raw) ? raw[0] : raw)?.slice(0, 2000);
 
   return (
-    <div className="grid h-[calc(100vh-4rem)] grid-cols-1 md:grid-cols-[280px_1fr]">
-      <div className="hidden border-r bg-card md:block">
-        <ConversationList />
-      </div>
+    <AskShell>
       <ConversationView
         // Remount when the seeded question changes so it is asked exactly once.
         key={initialQuestion ?? 'blank'}
         initialQuestion={initialQuestion}
       />
-    </div>
+    </AskShell>
   );
 }

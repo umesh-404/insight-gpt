@@ -71,3 +71,62 @@ def test_private_key_block_body_redacted_lines_kept():
     assert "MIIBVgIBADAN" not in out
     assert "BEGIN PRIVATE KEY" in out
     assert out.count("\n") == text.count("\n")
+
+
+# --- shapes that reached the vector store before phase 2 ---------------------
+# Each of these was found in a stored chunk and rendered back to a user in a
+# citation snippet. They are regression tests, not hypotheticals.
+
+
+def test_a_hyphenated_api_key_is_redacted() -> None:
+    """`sk-live-…` and friends.
+
+    The token rules only knew the underscore spelling (`sk_live_…`), so every
+    hyphenated key - which is what most hosted model APIs now issue - matched
+    no rule at all. Worse than missing it: the bare digits inside were then
+    eaten by the phone rule, so the key emerged as
+    `sk-live-ABCD[REDACTED PHONE]abcdef`, still a secret and now corrupted.
+    """
+    for key in (
+        "sk-live-ABCD1234efgh5678abcdef",
+        "sk-proj-aBcD1234EfGh5678IjKl9012MnOp",
+        "rk-test-ZZZZ9999yyyy8888xxxx",
+        "sk-abcdefghij0123456789ABCDEFGHIJ",
+    ):
+        out = redact(f"Internal API key: {key} end")
+        text = out[0] if isinstance(out, tuple | list) else out
+        assert key not in text, f"{key} survived redaction"
+        assert "REDACTED" in text
+
+
+def test_an_international_phone_number_is_redacted() -> None:
+    """`+91 98765 43210` is the shape of every number in this demo's own data.
+
+    The original rule matched only 3-3-4 grouping, so the numbers most likely
+    to appear in a document uploaded to this product were the ones it missed.
+    """
+    for number in ("+91 98765 43210", "+44 20 7946 0958", "+1 415 555 2671"):
+        out = redact(f"Phone: {number} Resolution: refunded.")
+        text = out[0] if isinstance(out, tuple | list) else out
+        assert "[REDACTED PHONE]" in text
+        assert number not in text
+
+
+def test_a_bearer_token_is_redacted() -> None:
+    out = redact("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9abcdefghijklmnop")
+    text = out[0] if isinstance(out, tuple | list) else out
+    assert "eyJhbGciOiJIUzI1NiJ9abcdefghijklmnop" not in text
+
+
+def test_ordinary_business_content_still_survives() -> None:
+    """The other half of the job, and the easier one to break.
+
+    A redactor that eats order ids, SKUs and figures is a redactor someone
+    turns off, which protects nobody. The new patterns require a `+` on a
+    phone and a known key prefix precisely so that a long run of digits in a
+    retail document is left alone.
+    """
+    line = "Order ORD-88213 shipped, SKU 4051234 qty 12, revenue 1899, ref 2026-04-01"
+    out = redact(line)
+    text = out[0] if isinstance(out, tuple | list) else out
+    assert text == line, f"redaction damaged legitimate content: {text}"

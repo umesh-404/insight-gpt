@@ -252,3 +252,109 @@ def years_covered(time_range: dict | None, years: list[int]) -> bool:
 def year_span(years: list[int]) -> dict:
     """A full-calendar range spanning ``years`` (used to honour the asked period)."""
     return {"start": f"{min(years)}-01-01", "end": f"{max(years)}-12-31"}
+
+
+# --- questions that name a file ----------------------------------------------
+# The extensions the upload path accepts. A question that names one is asking
+# about a document the reader supplied, not about the governed warehouse.
+FILE_EXTENSIONS = (
+    "csv", "tsv", "xlsx", "pdf", "txt", "md", "json", "docx", "xls", "doc",
+)
+_EXTENSION_GROUP = "(?:" + "|".join(FILE_EXTENSIONS) + r")\b"
+# A filename with no spaces in it - the ordinary case, and the only one that can
+# be picked out of prose unambiguously. The character class excludes the space
+# on purpose: a lazy `[\w\-. ]+?` anchored at a word boundary starts at the
+# *first* word of the sentence and swallows the question into the filename
+# ("what is the total revenue in my_sales.csv" matched whole). That was
+# invisible while the match was only used for a log line, and became wrong the
+# moment the name had to be looked up in the dataset registry.
+_FILENAME_RE = re.compile(r"[\w\-.]{1,120}\." + _EXTENSION_GROUP, re.IGNORECASE)
+# A filename *with* spaces has to be quoted to be recognizable, which is also
+# how a reader naturally writes one.
+_QUOTED_FILENAME_RE = re.compile(
+    r"['\"‘’“”]([\w\-. ]{1,120}\." + _EXTENSION_GROUP
+    + r")['\"‘’“”]",
+    re.IGNORECASE,
+)
+
+
+def question_names_a_file(question: str) -> str | None:
+    """The filename a question refers to, or ``None``.
+
+    This decides which side of the line a question falls on. "What was revenue
+    last quarter?" is a governed question and belongs to the semantic layer.
+    "What was revenue in my_sales.csv?" contains the same metric word and is a
+    completely different question: it asks about a file the reader uploaded,
+    and answering it with warehouse revenue would hand back a confident,
+    correctly-formatted number from somebody else's data.
+
+    Detection is on the filename rather than on the set of uploaded datasets,
+    deliberately. A reader who names a file that was never uploaded should get
+    "I could not find that" and not a retail figure - so the question has to
+    leave the governed path before anyone checks whether the file exists.
+    """
+    quoted = _QUOTED_FILENAME_RE.search(question)
+    if quoted:
+        return quoted.group(1).strip()
+    match = _FILENAME_RE.search(question)
+    return match.group(0).strip() if match else None
+
+
+# --- aggregate vocabulary for uploaded tables ---------------------------------
+# A question about an uploaded file splits in two: "what is in this file" is
+# answered by retrieval over its indexed text, and "what is the total of this
+# column" is answered by one SQL query over every row, or not at all. These
+# words are what tells the two apart. They live here, with the rest of the
+# question vocabulary, so the dataset planner does not start a second private
+# keyword list that drifts from this one — which is the exact history recorded
+# at the top of this module.
+#
+# Order is significant and first match wins. ``count`` precedes ``sum`` because
+# "how many sales in total" is a count of rows, not a sum of a column.
+AGGREGATE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("average", "avg", "mean"), "avg"),
+    (("how many", "count", "number of"), "count"),
+    (("total", "sum", "summed", "altogether", "combined"), "sum"),
+    (("highest", "maximum", "max", "largest", "biggest", "most", "top"), "max"),
+    (("lowest", "minimum", "min", "smallest", "least", "worst"), "min"),
+)
+
+#: Words that name the rows themselves rather than a column of them, so
+#: "how many rows are in my_sales.csv" is a ``COUNT(*)`` and not a column sum.
+ROW_WORDS = ("row", "rows", "record", "records", "entry", "entries",
+             "line", "lines", "item", "items")
+
+#: Phrasings that ask for a breakdown over a column of an uploaded table.
+GROUP_PREPOSITIONS = ("by", "per", "for each", "grouped by", "broken down by",
+                      "across", "split by")
+
+#: Column-name words a money question is likely to mean when the question does
+#: not spell the column out. Only ever used to *match an existing column* — it
+#: never invents one, and a question whose words match no column is declined
+#: with the real column list rather than answered against a guess.
+VALUE_COLUMN_HINTS = ("revenue", "sales", "amount", "total", "value", "price",
+                      "cost", "spend", "turnover", "gmv", "profit")
+
+
+def _contains_phrase(question: str, phrase: str) -> bool:
+    """Whole-word containment, so "summarize" is not read as "sum"."""
+    return re.search(rf"(?<![\w]){re.escape(phrase)}(?![\w])", question) is not None
+
+
+def detect_aggregate(question: str) -> str | None:
+    """The aggregate a question asks for (``sum``/``avg``/``count``/``max``/``min``).
+
+    ``None`` means the question asked no arithmetic of the table, which is how
+    the engine knows to answer it from the file's indexed text instead.
+    """
+    q = question.lower()
+    for words, aggregate in AGGREGATE_KEYWORDS:
+        if any(_contains_phrase(q, w) for w in words):
+            return aggregate
+    return None
+
+
+def question_asks_about_rows(question: str) -> bool:
+    """True when the question counts the rows rather than a column's values."""
+    q = question.lower()
+    return any(_contains_phrase(q, w) for w in ROW_WORDS)

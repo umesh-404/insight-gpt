@@ -2,6 +2,7 @@
 # InsightGPT — one-command setup for macOS / Linux.
 #
 #   ./setup.sh                 # set up (or repair) the full Docker stack
+#   ./setup.sh --preflight     # is the configured local stack ready to demo?
 #   ./setup.sh --doctor        # diagnose only; changes nothing
 #   ./setup.sh --repair        # clean rebuild + recreate, then re-verify
 #   ./setup.sh --native        # no Docker: prepare the local dev stack

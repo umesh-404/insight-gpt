@@ -13,8 +13,19 @@ dependencies = [
     "qdrant-client>=1.12",  # vector store: dense + sparse, server-side RRF fusion
 ]
 
+# File formats the dataset loader reads. Optional, because the core indexer
+# works on text and the API service already carries both for its own parser -
+# which is the path a browser upload takes. They are declared here so the
+# standalone CLI can index a PDF or a spreadsheet from disk; without them it
+# refuses those two formats with a clear message rather than a traceback.
+[project.optional-dependencies]
+files = [
+    "openpyxl>=3.1",        # .xlsx
+    "pypdf>=4.0",           # .pdf
+]
+
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.8"]
+dev = ["pytest>=8.0", "ruff>=0.8", "openpyxl>=3.1", "pypdf>=4.0"]
 
 [project.scripts]
 # Indexer + query CLI. Also runnable as `python -m retrieval.cli`.
@@ -26,6 +37,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["retrieval"]
+
+# The YAML must travel inside the wheel. Without this it stays in the
+# source tree only, and an installed copy resolves its config path to a
+# site-packages directory that does not exist - so `uv sync --extra real`
+# produced an API that imported cleanly and failed on the first index.
+[tool.hatch.build.targets.wheel.force-include]
+"config/retrieval.yaml" = "retrieval/config/retrieval.yaml"
 
 [tool.ruff]
 line-length = 100

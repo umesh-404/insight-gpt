@@ -89,6 +89,37 @@ services):
   contract tests so integration runs assert *wiring and guardrails*, not model
   quality (model quality is the eval harnesses' job, Sections 2–3).
 
+### 1.2.1 The uploaded-dataset suite (`tests/e2e_datasets/`)
+
+Uploads are the one feature where the user's *own* data is on the line, so they
+get a suite of their own at the repo root, run by `uv run pytest tests -q`. It
+drives the real app with the deterministic `fake` provider, the DuckDB fixture
+warehouse and a recording stand-in for the indexing seam — **parsing and
+redaction are not stubbed**, because they are what the honesty rules promise
+about. One module per claim:
+
+| Module | What it proves |
+|---|---|
+| `test_contract.py` | the frozen API shapes, through the real routes |
+| `test_durability.py` | the dataset list survives a restart — and reports truthfully what did *not* survive with it |
+| `test_tabular.py` | a numeric question over an uploaded table returns the right figure, attributed to that dataset, and attacks the attribution rather than demonstrating success |
+| `test_honesty.py` | the rules most able to look like working software while saying something untrue |
+| `test_progress.py` | progress corresponds to work done, not to elapsed time |
+| `test_safety.py` | nothing can drop, recreate or prune a vector collection outside the `insightgpt_` prefix |
+| `test_live_roundtrip.py` | the unmocked journey — real Ollama, real Qdrant. **Skipped** unless the live stack is up |
+
+The one that earns its keep is `test_tabular.py`: it tries to make the system
+present an upload's number as a warehouse figure and the reverse, which is the
+failure mode the feature introduced
+([`05-insight-engine.md`](05-insight-engine.md) §3.4).
+
+**Optional backends are tested both ways.** `tests/test_forecast.py` is the
+pattern: CI does not install the `forecast` extra, so the behaviour of the
+optional statistical backend is pinned by stubbing it, *and* by assertions that
+are not relaxed when the real extra is present (`make test-forecast` runs that
+configuration and restores the venv afterwards). A rule that only holds on the
+backend CI happens to run is not a rule.
+
 ### 1.3 dbt tests
 
 The warehouse asserts its own data quality; these run as part of `dbt build`:

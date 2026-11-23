@@ -47,6 +47,13 @@ class Document:
     order_ref: str | None = None
     author_role: str | None = None  # customer | agent | manager
     channel: str | None = None
+    # Provenance for a user-uploaded dataset. ``None`` for the curated retail
+    # corpus, which belongs to no dataset. Both ride into the Qdrant payload:
+    # ``dataset_id`` is keyword-indexed so deleting a dataset is a FILTERED
+    # delete rather than a collection drop, and ``dataset_name`` so a citation
+    # can say which uploaded file an answer came from.
+    dataset_id: str | None = None
+    dataset_name: str | None = None
     # Hash of the index-relevant content, used for changed-only re-indexing.
     content_hash: str | None = None
 
@@ -73,8 +80,22 @@ class Document:
             order_ref=c["order_ref"],
             author_role=c["author_role"],
             channel=c["channel"],
+            # Read straight from the producer rather than through the canonical
+            # normalizer: these fields are provenance, not content, so they are
+            # deliberately outside the content hash. Folding them in would
+            # change the hash of every existing corpus document and force one
+            # pointless full re-index for a field those documents do not have.
+            dataset_id=_opt_str(raw.get("dataset_id")),
+            dataset_name=_opt_str(raw.get("dataset_name")),
             content_hash=c[CONTENT_HASH_KEY],
         )
+
+
+def _opt_str(value: object | None) -> str | None:
+    """``str(value)`` unless it is absent or empty, in which case ``None``."""
+    if value is None or value == "":
+        return None
+    return str(value)
 
 
 @dataclass

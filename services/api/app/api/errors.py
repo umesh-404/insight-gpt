@@ -133,6 +133,31 @@ async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:
     )
 
 
+async def provider_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """A reasoning-model outage is a 503, never a quietly degraded answer.
+
+    This is the one upstream failure the product cannot paper over. Everything
+    the UI shows is framed as traceable - the SQL that produced a figure, the
+    document behind a claim - so an answer assembled without the model would
+    wear that framing while being something else entirely. Saying the engine is
+    unavailable is the honest outcome, and the client already renders a 503 as
+    a retryable error.
+    """
+    from ..providers.base import ProviderError
+
+    assert isinstance(exc, ProviderError)
+    err = DependencyUnavailableError(
+        f"The reasoning engine is unavailable: {exc}",
+        details={"provider": exc.provider, "retryable": exc.retryable},
+        headers={"Retry-After": "10"} if exc.retryable else None,
+    )
+    log.warning(
+        "provider unavailable provider=%s status=%s retryable=%s: %s",
+        exc.provider, exc.status, exc.retryable, exc,
+    )
+    return await api_error_handler(request, err)
+
+
 async def validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:

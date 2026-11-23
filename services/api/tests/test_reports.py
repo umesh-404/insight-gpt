@@ -11,7 +11,7 @@ import os
 
 os.environ.setdefault("LLM_PROVIDER", "fake")
 os.environ.setdefault("WAREHOUSE", "duckdb")
-os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
+os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-32-bytes")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "0")
 
 import re  # noqa: E402
@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api.deps import reset_caches  # noqa: E402
 from app.api.main import create_app  # noqa: E402
 from app.api.routers import reports as reports_router  # noqa: E402
+from app.engine.engine import _preceding_span  # noqa: E402
 from app.engine.envelope import Citation, Table  # noqa: E402
 
 PERIOD = {"grain": "month", "start": "2026-04-01", "end": "2026-06-30"}
@@ -103,6 +104,114 @@ def test_report_is_stored_with_blocks(
     assert body["error"] is None
 
 
+def _sql_of(client: TestClient, analyst: dict[str, str], period: dict) -> str:
+    """Generate a one-section report over ``period`` and return its SQL params."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={"title": "scoped", "period": period, "sections": ["kpis"]},
+        headers=analyst,
+    )
+    assert resp.status_code == 202, resp.text
+    rid = resp.json()["report_id"]
+    detail = client.get(f"/api/v1/reports/{rid}", headers=analyst)
+    assert detail.status_code == 200, detail.text
+    return detail.text
+
+
+def test_period_scopes_the_report(client: TestClient, analyst: dict[str, str]) -> None:
+    """The chosen period changes the numbers, not only the header.
+
+    The section questions name no period, so before the engine accepted an
+    explicit range it resolved "last quarter" from its own clock and every
+    report covered the same window whatever the reader picked.
+    """
+    q1 = _sql_of(client, analyst, {"start": "2026-01-01", "end": "2026-03-31"})
+    q2 = _sql_of(client, analyst, {"start": "2026-04-01", "end": "2026-06-30"})
+    assert "2026-01-01" in q1 and "2026-03-31" in q1
+    assert "2026-04-01" in q2 and "2026-06-30" in q2
+    # Different windows over the same fixture must not produce the same figures.
+    assert q1 != q2
+
+
+def test_period_is_echoed_in_the_export(
+    client: TestClient, analyst: dict[str, str]
+) -> None:
+    """The header states the period the report was actually built over."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "H1 review",
+            "period": {"start": "2026-01-01", "end": "2026-06-30"},
+            "sections": ["kpis"],
+        },
+        headers=analyst,
+    )
+    rid = resp.json()["report_id"]
+    export = client.get(f"/api/v1/reports/{rid}/export", headers=analyst)
+    assert export.status_code == 200
+    assert "Period: 2026-01-01 to 2026-06-30" in export.text
+
+
+def test_backwards_period_is_rejected(
+    client: TestClient, analyst: dict[str, str]
+) -> None:
+    """A period that ends before it starts is a 422, not an empty report."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "inverted",
+            "period": {"start": "2026-06-30", "end": "2026-01-01"},
+            "sections": ["kpis"],
+        },
+        headers=analyst,
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize(
+    ("period", "expected"),
+    [
+        # A whole quarter compares against the previous quarter, not against
+        # the 91 days before it - which starts a day early, labels the
+        # comparison as a date pair rather than "2026Q1", and drags a one-day
+        # sliver of 2025Q4 into the breakdown.
+        (("2026-04-01", "2026-06-30"), ("2026-01-01", "2026-03-31")),
+        (("2026-01-01", "2026-06-30"), ("2025-07-01", "2025-12-31")),
+        (("2026-01-01", "2026-12-31"), ("2025-01-01", "2025-12-31")),
+        (("2026-03-01", "2026-03-31"), ("2026-02-01", "2026-02-28")),
+        # Not a whole number of months: fall back to the equal-length span.
+        (("2026-06-24", "2026-06-30"), ("2026-06-17", "2026-06-23")),
+    ],
+)
+def test_comparison_window_is_calendar_aligned(
+    period: tuple[str, str], expected: tuple[str, str]
+) -> None:
+    span = _preceding_span({"start": period[0], "end": period[1]})
+    assert (span["start"], span["end"]) == expected
+
+
+def test_quarter_report_compares_against_the_previous_quarter(
+    client: TestClient, analyst: dict[str, str]
+) -> None:
+    """A change section names the prior quarter, not a straddling date pair."""
+    resp = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Q2 change",
+            "period": {"start": "2026-04-01", "end": "2026-06-30"},
+            "sections": ["sales"],
+        },
+        headers=analyst,
+    )
+    assert resp.status_code == 202, resp.text
+    rid = resp.json()["report_id"]
+    prose = client.get(f"/api/v1/reports/{rid}", headers=analyst).json()["blocks"][0][
+        "prose"
+    ]
+    assert "2026Q1" in prose and "2026Q2" in prose, prose
+    assert "2025-12-31" not in prose, prose
+
+
 def test_unknown_report_is_404(client: TestClient, analyst: dict[str, str]) -> None:
     resp = client.get("/api/v1/reports/rep_missing", headers=analyst)
     assert resp.status_code == 404
@@ -113,7 +222,11 @@ def test_export_markdown(client: TestClient, analyst: dict[str, str], report_id:
     resp = client.get(f"/api/v1/reports/{report_id}/export", headers=analyst)
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"].startswith("text/markdown")
-    assert f'filename="{report_id}.md"' in resp.headers["content-disposition"]
+    # Named after the report, with the id kept so two exports never collide.
+    assert (
+        f'filename="q2-executive-review-{report_id}.md"'
+        in resp.headers["content-disposition"]
+    )
     text = resp.text
     assert text.startswith("# Q2 executive review")
     assert "_Generated:" in text
@@ -128,7 +241,10 @@ def test_export_pdf_is_a_real_document(
     )
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"] == "application/pdf"
-    assert f'filename="{report_id}.pdf"' in resp.headers["content-disposition"]
+    assert (
+        f'filename="q2-executive-review-{report_id}.pdf"'
+        in resp.headers["content-disposition"]
+    )
     body = resp.content
     assert body.startswith(b"%PDF-")
     assert body.rstrip().endswith(b"%%EOF")

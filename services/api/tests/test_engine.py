@@ -81,3 +81,41 @@ def test_comparison_answer_quotes_the_true_lowest_category():
     lowest_line = next(line for line in section if line.startswith("- Lowest:"))
     assert true_highest in highest_line, env.answer
     assert true_lowest in lowest_line, env.answer
+
+
+# ---------------------------------------------------------------------------
+# Chart unit (the y-axis format the client cannot infer)
+# ---------------------------------------------------------------------------
+
+
+def test_chart_carries_the_governed_metric_format():
+    """A money chart must say so, because the client cannot work it out.
+
+    ``Table.columns`` is a list of bare names, so the only client-side recourse
+    is to sniff the values — and a rupee amount and a plain count are both just
+    numbers. Without this the money axes rendered unformatted and sheared their
+    leading digits off against a fixed-width axis.
+    """
+    env = make_engine().ask("Revenue by region last quarter")
+    assert env.chart is not None
+    assert env.chart.unit == "currency"
+
+
+def test_chart_unit_follows_the_catalog_not_the_question():
+    """A count metric must not be labelled as money."""
+    env = make_engine().ask("How many units did we sell by category last quarter?")
+    assert env.chart is not None
+    # units_sold is `format: integer` in config/semantic_layer.yml.
+    assert env.chart.unit == "integer"
+
+
+def test_chart_unit_is_none_for_an_ungoverned_metric_name():
+    """An unknown metric yields no unit rather than a guess.
+
+    The client then formats plainly, which is what every chart did before the
+    field existed — so the fallback is the old behaviour, not a new failure.
+    """
+    from app.engine.engine import _chart_unit
+    from app.semantic.catalog import load_catalog
+
+    assert _chart_unit(load_catalog(), "not_a_governed_metric") is None

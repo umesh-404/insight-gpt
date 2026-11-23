@@ -1,11 +1,19 @@
-import { Badge, type BadgeProps } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import type { InsightSeverity } from '@/lib/types';
 
-const VARIANT: Record<InsightSeverity, BadgeProps['variant']> = {
-  high: 'destructive',
-  medium: 'warning',
-  low: 'muted',
+/**
+ * Severity is carried by a marker plus a word, not by a filled capsule.
+ *
+ * A digest of ten anomalies with a solid red or amber pill on each one turns
+ * the page into a traffic light: every card shouts, so the ordering the feed
+ * worked out stops being readable. The dot keeps the status hue (and is never
+ * the only signal — the word is right beside it), while the text stays in
+ * ordinary muted ink so rows of cards read as a list again.
+ */
+const DOT: Record<InsightSeverity, string> = {
+  high: 'bg-destructive',
+  medium: 'bg-warning',
+  low: 'bg-muted-foreground/45',
 };
 
 const LABEL: Record<InsightSeverity, string> = {
@@ -14,7 +22,7 @@ const LABEL: Record<InsightSeverity, string> = {
   low: 'Low severity',
 };
 
-/** Colour-codes an insight's magnitude — severity, not good/bad direction. */
+/** Marks an insight's magnitude — severity, not good/bad direction. */
 export function InsightSeverityBadge({
   severity,
   className,
@@ -23,8 +31,17 @@ export function InsightSeverityBadge({
   className?: string;
 }) {
   return (
-    <Badge variant={VARIANT[severity]} className={cn('capitalize', className)}>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground',
+        className,
+      )}
+    >
+      <span
+        className={cn('size-2 shrink-0 rounded-full', DOT[severity])}
+        aria-hidden
+      />
       {LABEL[severity]}
-    </Badge>
+    </span>
   );
 }

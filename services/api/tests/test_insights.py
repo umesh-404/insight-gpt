@@ -12,7 +12,7 @@ import os
 
 os.environ.setdefault("LLM_PROVIDER", "fake")
 os.environ.setdefault("WAREHOUSE", "duckdb")
-os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production")
+os.environ.setdefault("JWT_SECRET", "test-secret-not-for-production-32-bytes")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "0")
 # Ensure no Postgres backend is configured for the offline suite.
 os.environ.pop("POSTGRES_DSN", None)
@@ -63,14 +63,14 @@ def test_detection_flags_revenue_drop_with_north_root_cause() -> None:
     assert rev.direction == "down"
     assert rev.period == "2026Q2" and rev.prior_period == "2026Q1"
     # Numbers come from the warehouse, not invented.
-    assert rev.current == 13_293_312.0
-    assert rev.prior == 20_159_072.0
-    assert round(rev.change_pct, 3) == -0.341
+    assert rev.current == 489_164_981.0
+    assert rev.prior == 752_130_117.0
+    assert round(rev.change_pct, 3) == -0.350
     # Root cause is the segment that most explains the decline.
     assert rev.root_cause is not None
     assert rev.root_cause.dimension == "region"
     assert rev.root_cause.segment == "North"
-    assert rev.root_cause.delta == -2_905_833.0
+    assert rev.root_cause.delta == -109_497_837.0
     # The Electronics category decline is captured in the breakdown too.
     cats = {(c.dimension, c.segment): c for c in rev.contributions}
     assert ("category", "Electronics") in cats

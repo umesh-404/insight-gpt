@@ -69,8 +69,8 @@ copied into whichever image needs them.
 | `pgdata` | Postgres data dir | The warehouse — the durable source of truth |
 | `qdrant_storage` | Qdrant storage | Vectors + payloads; rebuildable from documents |
 | `ollama_models` | Pulled model blobs | Avoids re-downloading models on every restart |
-| `generated_data` | `worker:/app/data/generated` | The synthetic CSVs + document JSON `scripts/seed.py` writes |
-| `ingested_data` | `worker:/app/data/ingested` | The redacted document corpus handed to retrieval, plus its index state |
+| `generated_data` | `worker:/app/data/generated` (rw), `api:…:ro` | The synthetic CSVs + document JSON `scripts/seed.py` writes |
+| `ingested_data` | `worker:/app/data/ingested` (rw), `api:…:ro` | The redacted document corpus handed to retrieval, plus its index state |
 
 The last two exist because `make bootstrap` and `make seed` run in a throwaway
 `docker compose run --rm worker` container, while the scheduler that reindexes
@@ -80,9 +80,69 @@ the corpus would die with the container that produced it and every scheduled
 the two output directories rather than at `/app/data`, so the baked-in
 `data/generator` package stays visible.
 
+The `api` service mounts both **read-only**. `GET /sources` reports on the
+generator's CSV extracts and on the corpus (`GENERATED_DIR` and
+`DOCUMENT_CORPUS_PATH`), so without the mounts the source registry rendered
+every file-backed source as missing while the worker held the data — a
+confusing failure, because nothing was broken except the API's view of the
+disk. Read-only because writing is the worker's job: ingestion and dbt run
+there, and the API is a query path that should not be able to rewrite the
+corpus it cites.
+
 `qdrant_storage`, `generated_data`, and `ingested_data` are all **rebuildable**
 (re-seed, re-index), but `pgdata` for a real deployment is not — back it up
 (Section 6).
+
+#### 1.2.1 Uploaded datasets need writable, persistent state — and Compose does not give them any yet
+
+An upload is the one thing the **API** writes. It touches three paths, all under
+`data/` at the repo root when the API runs on the host:
+
+| Path | Holds | Overridden by |
+|---|---|---|
+| `data/ingested/<dataset_id>/` | the uploaded bytes, so a re-index needs no re-upload | `DATASETS_DIR` |
+| `data/datasets.json` | the dataset registry (atomic tmp-then-rename) | `DATASETS_STORE_PATH` |
+| `data/ingested/datasets.duckdb` | every tabular upload's own table | `DATASETS_DB_PATH` |
+
+On a host run (`make dev`, `uvicorn`, the native setup) all three are ordinary
+files in the repo and survive a restart, which is what
+[`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1 describes.
+`python scripts/setup.py --preflight` now checks all three for writability and
+says which it could not write.
+
+**In the shipped Compose stack they do not, and two of them cannot be written at
+all.** `api` mounts `ingested_data` at `/app/data/ingested` **read-only** (for
+the good reason above: writing the corpus is the worker's job), so both
+`save_upload` and the uploads database write into a read-only mount and the
+upload fails. The registry — the one path outside that mount — lands on the
+container's own writable layer, which survives `docker compose restart` but
+**not** `up --force-recreate`, a rebuild, or `make clean`. So "the dataset list
+survives a restart" is true of a host run and of a container restart, and not of
+a recreate.
+
+Until the compose file carries its own volume for this, treat uploads as a
+**host-run feature** and demo them that way. The fix is small and is deliberately
+*not* mounting a volume over `/app/data` (that would hide the baked-in
+`data/generator` package):
+
+```yaml
+# docker/compose.yml — api service
+    environment:
+      DATASETS_DIR: ${DATASETS_DIR:-/app/data/uploads/files}
+      DATASETS_STORE_PATH: ${DATASETS_STORE_PATH:-/app/data/uploads/datasets.json}
+      DATASETS_DB_PATH: ${DATASETS_DB_PATH:-/app/data/uploads/datasets.duckdb}
+    volumes:
+      - uploads_data:/app/data/uploads        # rw: the one thing the API writes
+# and in the top-level volumes: block
+volumes:
+  uploads_data:
+```
+
+One volume, mounted read-write at a path nothing else uses, with all three
+overrides pointed inside it — so the document corpus stays read-only for the API
+and only the uploads are writable. `make clean` deletes it along with the rest of the project's
+volumes, which is correct: uploads are user data for a demo, not a source of
+truth, and §6 says what is and is not backed up.
 
 ### 1.3 Healthchecks & dependencies
 
@@ -127,6 +187,52 @@ host publishes, and `NEXT_PUBLIC_API_URL` tells the frontend where to find the
 API (including the `/api/v1` prefix — the value must carry that suffix, and it
 does in both `.env.example` and the compose build args).
 
+### 2.0 Two topologies, one `.env`
+
+There are two ways to run InsightGPT, and the difference is **which hostnames
+resolve**. Getting this wrong is the single most common setup failure, because
+neither form errors — a URL that does not resolve looks exactly like a service
+that is down.
+
+| | **Host run** (the demo path) | **Compose run** (`make up`) |
+|---|---|---|
+| What runs where | API + web as host processes (`uv`, `npm`); Qdrant and Ollama are services you already run on this machine | Six containers on a private compose network |
+| Qdrant | `http://127.0.0.1:6333` | `http://qdrant:6333` |
+| Ollama | `http://127.0.0.1:11434` | `http://ollama:11434` |
+| Warehouse | `WAREHOUSE=duckdb` (the offline retail fixture) | `WAREHOUSE=postgres` (the `postgres` sibling) |
+| Published at | `http://localhost:3000` / `:8000` | `http://localhost:3000` / `:8000` |
+| Brought up by | `make preflight` to check, then the two dev servers (`run.ps1` does both on Windows) | `make up` + `make bootstrap` |
+
+`.env` is written for the **host run**: `127.0.0.1` everywhere and
+`WAREHOUSE=duckdb`. The compose topology does not inherit those values. The
+three variables that differ by topology read a `STACK_`-prefixed override in
+`docker/compose.yml` and otherwise keep the service-name default:
+
+| In `.env` (moves the host run) | In `docker/compose.yml` (moves the compose run) | Compose default |
+|---|---|---|
+| `QDRANT_URL` | `STACK_QDRANT_URL` | `http://qdrant:6333` |
+| `OLLAMA_HOST` | `STACK_OLLAMA_HOST` | `http://ollama:11434` |
+| `WAREHOUSE` | `STACK_WAREHOUSE` | `postgres` |
+
+So one `.env` serves both and there is nothing to edit when switching. Every
+other variable means the same thing in both and is interpolated normally —
+including `QDRANT_COLLECTION`, because the collection name is a property of the
+data, not of the topology.
+
+Set `STACK_QDRANT_URL` when the containerised stack should talk to a Qdrant
+outside the compose network (a managed instance, or the same loopback Qdrant the
+host run uses — on Docker Desktop that is
+`http://host.docker.internal:6333`, not `127.0.0.1`, which inside a container
+means the container itself).
+
+**Check it rather than assume it.** `python scripts/setup.py --preflight`
+(`make preflight`) reads `.env`, then verifies against reality: Qdrant answers,
+the collection exists and its vector width matches `EMBED_DIMENSIONS`, Ollama is
+up with both required models pulled, and the provider key is present and
+accepted. It prints a fix beside every failing line and exits non-zero. It is
+**read-only** — every call it makes is a `GET`, and it never creates, deletes or
+"tidies" anything (see §2.3).
+
 ### 2.1 Reading `.env`: use `make up`, or run compose from the root
 
 Compose derives its **project directory** from the first `-f` file and loads
@@ -154,8 +260,11 @@ WEB_PORT=3000
 API_PORT=8000
 
 # --- Database ---
-POSTGRES_DSN=postgresql://insight:insight@postgres:5432/insight
-APP_POSTGRES_DSN=postgresql://insight_app:insight@postgres:5432/insight
+# Empty ships on purpose: compose substitutes its own identical defaults for an
+# empty value, while a host run on WAREHOUSE=duckdb would otherwise register the
+# unresolvable `postgres` host as a data source.
+POSTGRES_DSN=
+APP_POSTGRES_DSN=
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
 POSTGRES_DB=insight
@@ -165,21 +274,28 @@ POSTGRES_PASSWORD=insight
 # --- Auth ---
 JWT_SECRET=                        # openssl rand -hex 32
 
-# --- Vector DB ---
-RETRIEVER=qdrant
-QDRANT_URL=http://qdrant:6333
+# --- Vector DB (host-run values; compose uses its own — §2.0) ---
+RETRIEVER=qdrant                   # `fixture` cannot see an uploaded dataset
+QDRANT_URL=http://127.0.0.1:6333
+QDRANT_COLLECTION=insightgpt_documents   # the ONE collection we own (§2.3)
 
-# --- Local models (Ollama) ---
-OLLAMA_HOST=http://ollama:11434
+# --- Local models (Ollama): embeddings + reranking, always local ---
+OLLAMA_HOST=http://127.0.0.1:11434
+EMBED_PROVIDER=ollama              # `openai` sends document text off the machine
 EMBED_MODEL=nomic-embed-text
+EMBED_DIMENSIONS=768               # must match the collection; changing it = re-index
 RERANK_MODEL=dengcao/Qwen3-Reranker-0.6B:F16
 
 # --- LLM provider (chat/reasoning step only) ---
-LLM_PROVIDER=ollama                # ollama (default) | openai | groq | typesafe | gemini*
-LLM_MODEL=llama3.1:8b
+APP_ENV=production                 # refuses a config that cannot serve users
+LLM_PROVIDER=gemini                # gemini | openai | groq (cloud) | ollama | fake
+LLM_MODEL=gemini-2.5-flash         # pin it: provider catalogues get retired
+GEMINI_API_KEY=                    # only if LLM_PROVIDER=gemini
 # OPENAI_API_KEY=                  # only if LLM_PROVIDER=openai
 # GROQ_API_KEY=                    # only if LLM_PROVIDER=groq
-# TYPESAFE_API_KEY=                # only if LLM_PROVIDER=typesafe
+LLM_MAX_OUTPUT_TOKENS=2048         # cost ceiling for one reasoning call
+LLM_TIMEOUT_S=60
+LLM_MAX_RETRIES=3
 
 # --- Pipeline ---
 REINDEX_SOURCE=ingested            # ingested | samples | <path>
@@ -210,9 +326,122 @@ allow-list rejects anything outside `marts` (see
 
 **Cloud keys** reach the `api` container only if they are in the root `.env`
 *and* the stack was started a way that reads it (§2.1). Embeddings and reranking
-always use local Ollama models regardless of `LLM_PROVIDER`; only the
-chat/reasoning step follows it. `gemini` is declared but not implemented — the
-provider factory raises on it rather than pretending.
+use local Ollama models regardless of `LLM_PROVIDER` — only the chat/reasoning
+step follows it, and only `EMBED_PROVIDER` (§2.5) can move embedding off the
+machine. `gemini` is the configured default and goes through Google AI Studio's
+OpenAI-compatible endpoint, so it shares the provider class with OpenAI and
+Groq; a cloud provider with no key raises at startup naming the variable.
+
+**What is local and what is not**, stated precisely, because the distinction is
+easy to overclaim: document text is chunked, redacted and embedded on this
+machine, and the vectors and chunk text are stored in a Qdrant on this machine.
+The **snippets retrieved for a question are sent to the reasoning provider** as
+part of the prompt — with `LLM_PROVIDER=gemini` that means those snippets go to
+Google. Nothing else about a document leaves the machine. Setting
+`LLM_PROVIDER=ollama` keeps the reasoning step local too, at the cost of answer
+quality on a CPU-only box.
+
+### 2.3 One collection, on an instance we may not own
+
+InsightGPT uses exactly one Qdrant collection, named by `QDRANT_COLLECTION`
+(default `insightgpt_documents`). The name is deliberately namespaced, and the
+namespace is enforced in code rather than remembered:
+
+- `scripts/bootstrap.py` refuses to run when `QDRANT_COLLECTION` does not start
+  with `insightgpt_`, before it creates or writes anything.
+- `scripts/setup.py --preflight` fails on the same condition, and having
+  refused the name does not go on to probe that collection.
+- The retrieval package asserts the prefix before any delete, and dataset
+  deletion is a **filtered delete on `dataset_id`** — never a collection drop
+  (see [`04-retrieval-rag.md`](04-retrieval-rag.md) §7).
+
+This is not hypothetical tidiness. A developer Qdrant is routinely shared: the
+instance on the maintainer's machine also holds another project's `code`, `docs`
+and `memory` collections. Indexing into one of those would not error — it would
+silently overwrite that project's points — and a `recreate_collection` or a
+"clean slate" prune would destroy them outright. So nothing in this repo issues
+a drop, reset or prune against a collection outside the prefix, and
+`make clean` (which *does* delete data) only ever touches the **compose**
+project's own `qdrant_storage` volume, not an instance you brought yourself.
+
+### 2.4 Production mode (`APP_ENV=production`)
+
+Setting `APP_ENV=production` turns three soft defaults into hard contracts.
+All three exist because the alternative is a deployment that *looks* healthy
+and is not.
+
+**The API refuses to boot on a configuration that cannot serve users.** A
+cloud provider with no key, or `LLM_PROVIDER=fake`, raises at startup naming
+the variable to set. Without this, a deployment that forgot `GEMINI_API_KEY`
+passes its health check, serves the UI, and fails on the first real question —
+usually in front of whoever is being shown the system.
+
+**An unreachable model is a `503`, never a templated answer.** See
+[`05-insight-engine.md`](05-insight-engine.md) §7.3 for why this product in
+particular cannot degrade quietly.
+
+**A single reasoning call is bounded.** `LLM_MAX_OUTPUT_TOKENS` (default 2048)
+caps the bill per answer, `LLM_TIMEOUT_S` (60) caps the wait, and
+`LLM_MAX_RETRIES` (3) caps the amplification of a provider outage. An
+unbounded completion against a metered API is an unbounded invoice.
+
+| Variable | Default | Why it matters |
+|---|---|---|
+| `APP_ENV` | unset | `production` enables the three contracts above |
+| `LLM_PROVIDER` | `ollama` | `gemini` \| `openai` \| `groq` \| `ollama` \| `fake` |
+| `LLM_MODEL` | per provider | **Pin it.** Catalogues are retired on a schedule |
+| `GEMINI_API_KEY` | — | Required when `LLM_PROVIDER=gemini` |
+| `LLM_MAX_OUTPUT_TOKENS` | `2048` | Cost ceiling for one answer |
+| `LLM_TIMEOUT_S` | `60` | Latency ceiling |
+| `LLM_MAX_RETRIES` | `3` | Retries on 429/5xx only, with jittered backoff |
+| `LLM_MAX_TOKENS_FIELD` | `max_tokens` | `max_completion_tokens` for OpenAI reasoning models |
+
+> **One ceiling, one field name.** Gemini answers `400 max_tokens and
+> max_completion_tokens cannot both be set`, so sending both spellings to
+> "cover either" fails every call. Verified against the live endpoint.
+
+### 2.5 Embeddings on a host without Ollama
+
+`RETRIEVER=qdrant` needs something to turn text into vectors. The default is a
+local Ollama model, which a managed host usually has nowhere to run — and
+without an embedder the retriever falls back to `fixture`, which is keyword
+overlap. That matters more than it sounds: the product presents hybrid dense
+retrieval with reranking, so a deployment quietly running keyword matching is
+making a claim it is not meeting.
+
+`EMBED_PROVIDER=openai` points the embedder at any OpenAI-compatible
+`/embeddings` endpoint (the same Gemini key already configured above works):
+
+```bash
+EMBED_PROVIDER=openai
+EMBED_API_KEY_ENV=GEMINI_API_KEY
+EMBED_MODEL=gemini-embedding-001
+EMBED_DIMENSIONS=3072      # must match the collection; changing it = re-index
+```
+
+Two failure modes are refused rather than absorbed, because both are otherwise
+invisible:
+
+- **Width mismatch.** A model returning 3072-d vectors against a collection
+  built for 768 would corrupt it. The first call fails, naming the number to
+  set.
+- **Prefix carry-over.** The `search_document:` / `search_query:` prompts are
+  specific to the nomic-style Ollama models; sent to a cloud model they embed
+  those literal words into every passage and cost recall without erroring.
+  They are cleared automatically for a non-Ollama provider.
+
+Note that `qdrant` also needs a reachable Qdrant. On a single-container host
+that means a managed instance, not a sibling service.
+
+---
+
+**Checking it is actually working.** `GET /system/status` (admin) asks the
+provider for its `/models` list and reports whether the configured model is
+still in it. This is the check that catches the failure mode a key-presence
+check cannot: a model id that was valid on the day you deployed and has since
+been retired.
+
+---
 
 ## 3. One-command bring-up & first-run bootstrap
 
@@ -237,7 +466,7 @@ graph TB
     START["make bootstrap<br/>(compose run --rm worker)"] --> WAIT["1 · wait for postgres / qdrant / ollama"]
     WAIT --> MODELS["2 · pull Ollama models<br/>embed + rerank always, chat only if LLM_PROVIDER=ollama"]
     MODELS --> SEED["3 · scripts/seed.py --require-postgres<br/>generate → load raw + publish corpus → dbt seed/run/test"]
-    SEED --> COLL["4 · create the Qdrant 'documents' collection"]
+    SEED --> COLL["4 · create the Qdrant 'insightgpt_documents' collection"]
     COLL --> INDEX["5 · index the published corpus (changed-only)"]
 ```
 
@@ -246,8 +475,9 @@ The five steps, and what each one really does:
 1. **Wait for postgres / qdrant / ollama.** Postgres via a real `SELECT 1`,
    the other two via HTTP polling, each with a 120 s deadline and an actionable
    message on timeout.
-2. **Pull Ollama models.** The embedding and reranker models always — retrieval
-   has no cloud embedding path. The **chat model only when
+2. **Pull Ollama models.** The embedding and reranker models always — they are
+   local by default, and the cloud embedding path (§2.5) is opt-in. The **chat
+   model only when
    `LLM_PROVIDER=ollama`**, since pulling several gigabytes for a model an
    openai/groq deployment will never call is pure waste. Already-present models
    are skipped. A pull is retried up to three times: long pulls over a flaky
@@ -261,8 +491,10 @@ The five steps, and what each one really does:
    cannot be quietly skipped. Seed generates the dataset, loads `raw`, publishes
    the redacted document corpus, then runs dbt `seed` + `run` + `test`
    ([`10-testing-eval.md`](10-testing-eval.md) §3).
-4. **Create the Qdrant `documents` collection** — skipped if it exists. An
-   unreachable Qdrant fails the step instead of being mistaken for a first run.
+4. **Create the collection named by `QDRANT_COLLECTION`** — skipped if it
+   exists. An unreachable Qdrant fails the step instead of being mistaken for a
+   first run, and a `QDRANT_COLLECTION` outside the `insightgpt_` namespace
+   aborts the whole run before step 1 (§2.3).
 5. **Index the corpus step 3 published.** Not the built-in demo documents: the
    real ones. There is no "skip if the collection is non-empty" shortcut here
    because indexing is changed-only — a re-run over an unchanged corpus
@@ -275,7 +507,63 @@ makes a re-run cheap.
 ## 4. Local development workflow
 
 Docker Compose is the integration path; day-to-day development runs services
-individually against the containerized data stores.
+individually against data stores already on the machine (§2.0, host run).
+
+### 4.0 Clean machine to working demo
+
+Six steps, in order. Each one is checkable, so a failure names itself instead of
+surfacing three steps later.
+
+1. **Install the prerequisites.** Python 3.12 + [uv], Node 20+, and either
+   Docker Desktop (to run Qdrant in a container) or a Qdrant binary. Ollama
+   from [ollama.com](https://ollama.com).
+2. **Start the two local services.** Qdrant on `127.0.0.1:6333` and Ollama on
+   `127.0.0.1:11434`. If they are already running for another project, use
+   them — InsightGPT shares the instance safely (§2.3).
+3. **Pull the two local models**, roughly 1.5 GB in total:
+
+   ```bash
+   ollama pull nomic-embed-text
+   ollama pull dengcao/Qwen3-Reranker-0.6B:F16
+   ```
+
+4. **Configure.** `python scripts/setup.py --native` creates `.env` from
+   `.env.example` (generating a real `JWT_SECRET`) and installs the Python and
+   web dependencies. Then paste a [Google AI Studio key] into
+   `GEMINI_API_KEY=`. It is blank on purpose: the API refuses to start on a
+   cloud provider with no key, which is a readable failure at boot rather than
+   a 503 in front of an audience.
+5. **Verify before relying on it.**
+
+   ```bash
+   make preflight          # or: python scripts/setup.py --preflight
+   ```
+
+   Every line is a pass or a fail with its fix: Qdrant reachable, the collection
+   present (or "not yet — created on first upload"), its vector width matching
+   `EMBED_DIMENSIONS`, both Ollama models pulled, and `GEMINI_API_KEY` present
+   *and accepted by the provider* with `LLM_MODEL` still in its catalogue. Add
+   `--offline` to skip the one outbound call.
+6. **Start the two processes** (or run `run.ps1` on Windows, which does both and
+   runs the preflight first):
+
+   ```bash
+   cd services/api && uv run uvicorn app.api.main:app --port 8000
+   cd web          && npm run dev                      # http://localhost:3000
+   ```
+
+Sign in as `admin@insightgpt.dev` / `admin-pass`, then upload a dataset on
+**Sources** and ask a question about it on **Ask**
+([`03-ingestion-etl.md`](03-ingestion-etl.md) §7.1).
+
+The retail warehouse questions ("why did sales decline last quarter?") answer
+from the DuckDB fixture in this mode; the Postgres warehouse and dbt models
+need the compose stack.
+
+[uv]: https://docs.astral.sh/uv/getting-started/installation/
+[Google AI Studio key]: https://aistudio.google.com/apikey
+
+### 4.1 Running a service at a time
 
 - **Python (api, worker, ingestion, retrieval)** — each is its own **uv**
   project with its own `pyproject.toml` and virtualenv, so a change to one
@@ -304,11 +592,19 @@ individually against the containerized data stores.
   docker compose up postgres qdrant ollama
   ```
 
-  The app reads `POSTGRES_DSN` / `POSTGRES_HOST`, `QDRANT_URL`, and
-  `OLLAMA_HOST` from `.env`, so pointing a host-run API at container stores is a
-  config change, not a code change. (Only `postgres` publishes a host port, on
-  loopback; uncomment the `qdrant` ports block in `docker/compose.yml` if you
-  need to reach it from the host too.)
+  The host-run app reads `POSTGRES_DSN` / `POSTGRES_HOST`, `QDRANT_URL`, and
+  `OLLAMA_HOST` from `.env`, so pointing it at container stores is a config
+  change, not a code change. Two caveats, both of which look like an outage
+  rather than a misconfiguration:
+
+  - Only `postgres` publishes a host port (on loopback). The compose `qdrant`
+    and `ollama` services are **internal-only**, so a host-run API cannot reach
+    them until you uncomment the `qdrant` ports block in
+    `docker/compose.yml` — or, more simply, point `QDRANT_URL` at a Qdrant you
+    published yourself, which is what the default `127.0.0.1:6333` assumes.
+  - That loopback Qdrant need not be the compose one. If another project
+    already runs Qdrant on `6333`, use it: InsightGPT confines itself to its own
+    `insightgpt_*` collection (§2.3).
 
 - **dbt** — the project and the profile live in the same directory, and the
   profile reads `POSTGRES_*` from the environment (no secrets on disk):

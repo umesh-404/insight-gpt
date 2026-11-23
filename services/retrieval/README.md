@@ -16,10 +16,15 @@ question ─embed(query)+tokenize─▶ dense & sparse prefetch (4×k, filtered)
                                         └──▶ cross-encoder rerank ──▶ per-doc diversity ──▶ cited results
 ```
 
-- **One `documents` collection.** Document type is the `source_type` payload
-  field, not a separate collection — a single query can span types or filter to
-  one. Structured facts (orders, revenue) are deliberately **not** here; they
-  live in Postgres and are answered by governed SQL.
+- **One `insightgpt_documents` collection** (`QDRANT_COLLECTION`). Document type
+  is the `source_type` payload field and an uploaded dataset is the `dataset_id`
+  field — neither is a separate collection, so a single query can span them or
+  filter to one. Structured facts (orders, revenue) are deliberately **not**
+  here; they live in Postgres and are answered by governed SQL.
+- **The `insightgpt_` prefix is enforced, not assumed.** A Qdrant instance is
+  commonly shared with other projects, so every delete asserts the prefix first
+  and dataset removal is a filtered delete on `dataset_id` — never a collection
+  drop, reset or prune.
 - **Redaction first.** Secrets and PII (cards via Luhn, emails, phones, tokens,
   private-key blocks) are removed before chunking, embedding, or storage, so a
   credential can never be retrieved into an LLM prompt.
@@ -59,9 +64,12 @@ prefetch branches (so recency is a hard bound before ranking).
   ```
 
 Endpoints default to `http://127.0.0.1:6333` (Qdrant) and
-`http://127.0.0.1:11434` (Ollama); override with `QDRANT_URL` / `OLLAMA_HOST`
-env vars for containerized deployment. Model names and dimensions stay pinned to
-the config file — they must match what is stored in Qdrant.
+`http://127.0.0.1:11434` (Ollama), which is what a host run wants; override with
+`QDRANT_URL` / `OLLAMA_HOST` (and the collection with `QDRANT_COLLECTION`). The
+containerised stack sets its own service names rather than inheriting these —
+see `docs/09-deployment.md` §2.0. Model names and dimensions stay pinned to the
+config file: they must match what is stored in Qdrant, and a mismatch is refused
+rather than written.
 
 ## Setup
 
@@ -75,7 +83,7 @@ uv pip install pytest ruff     # dev tooling
 ## CLI
 
 ```bash
-insight-retrieval setup                         # create the `documents` collection
+insight-retrieval setup                         # create the insightgpt_documents collection
 insight-retrieval index                         # index the ingestion corpus, changed-only
 insight-retrieval index --full                  # re-embed every document
 insight-retrieval index --samples               # index the built-in demo corpus instead

@@ -239,9 +239,21 @@ def _planted_dip(region: str, cat: str, d: dt.date) -> float:
     return 1.0
 
 
+#: Multi-store daily volume. The price list is premium — the cheapest
+#: Electronics SKU is ₹24,900 — while the per-region-category bases below are a
+#: few thousand rupees, so a whole category-day could not afford a single unit
+#: of its cheapest product. That is the reason quantity used to be derived from
+#: revenue (and came out as 1 almost everywhere). Scaling the target to a
+#: plausible volume for a four-region, twenty-four-store chain lets quantity
+#: lead and revenue follow from the price list, which is the coherent direction.
+#: Relative shape — seasonality, growth and the planted Q2 2026 dip — is
+#: untouched by a constant factor.
+_TARGET_SCALE = 40
+
+
 def _daily_revenue(region: str, cat: str, d: dt.date) -> int:
     """Compute the target daily net revenue for a region × category × date."""
-    base = _DAILY_BASE[(region, cat)]
+    base = _DAILY_BASE[(region, cat)] * _TARGET_SCALE
     mult = (
         _yoy_growth(d.year)
         * _seasonal_mult(d)
@@ -250,6 +262,28 @@ def _daily_revenue(region: str, cat: str, d: dt.date) -> int:
         * _planted_dip(region, cat, d)
     )
     return max(500, int(base * mult))
+
+
+#: Average line discount and cost as a share of gross, held constant so a
+#: line's implied unit price is exactly its list price net of discount.
+_DISCOUNT_RATE = 0.12
+_COST_RATE = 0.58
+
+
+def _pick_affordable(products: list[tuple], budget: int, seed: int) -> tuple[int, int]:
+    """Pick a SKU this line's revenue budget can actually buy; else the cheapest.
+
+    An unaffordable SKU would have to ship a single unit at its full list price
+    and so swamp the planted daily target — and with it the Q2 2026 North
+    Electronics dip the demo narrative is built on. Restricting the pool to
+    affordable SKUs keeps quantity, revenue and the price list coherent at once.
+    """
+    threshold = budget / (1 - _DISCOUNT_RATE)
+    pool = [p for p in products if p[4] <= threshold]
+    if not pool:
+        pool = [min(products, key=lambda p: p[4])]
+    chosen = pool[seed % len(pool)]
+    return chosen[0], chosen[4]
 
 
 def _mix(a: int, b: int) -> int:
@@ -352,16 +386,22 @@ def build_retail_warehouse(con) -> None:
 
                 for i, net_rev in enumerate(splits):
                     seed = _mix(day_seed, i + 1000)
-                    pid = cat_products[seed % len(cat_products)][0]
                     cid = reg_customers[(seed >> 4) % len(reg_customers)]
                     sid = reg_stores[(seed >> 8) % len(reg_stores)]
                     chid = ((seed >> 12) % 5) + 1
 
-                    base_price = cat_products[seed % len(cat_products)][4]
-                    qty = max(1, net_rev // base_price) if base_price > 0 else 1
-                    gross = int(net_rev / 0.88)  # ~12% avg discount
-                    discount = gross - net_rev
-                    cost = int(gross * 0.58)  # ~42% gross margin
+                    # The daily target drives QUANTITY; revenue then follows
+                    # from the price list as gross = qty x unit price. Doing it
+                    # the other way round (revenue from the target, quantity
+                    # from `net_rev // base_price`) pinned every costly SKU at
+                    # one unit and implied unit prices ~50x below the catalogue
+                    # — revenue / units did not match any listed price, and the
+                    # average order value fell below the cheapest product.
+                    pid, base_price = _pick_affordable(cat_products, net_rev, seed)
+                    qty = max(1, round(net_rev / (base_price * (1 - _DISCOUNT_RATE))))
+                    gross = qty * base_price
+                    discount = int(gross * _DISCOUNT_RATE)
+                    cost = int(gross * _COST_RATE)  # ~42% gross margin
 
                     # Returns: ~6% of items, higher for Apparel
                     return_threshold = 8 if cat == "Apparel" else 6

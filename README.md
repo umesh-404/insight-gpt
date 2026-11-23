@@ -31,11 +31,12 @@ instead of guessing.
 Everything below is verbatim output from a running API — no illustration, no
 tidying beyond trimming. It was captured against the **deterministic offline
 stack** (DuckDB fixture warehouse + offline provider) that the eval harnesses
-also run on, so these exact figures reproduce on any machine with
-the offline defaults (`LLM_PROVIDER=fake`, no `WAREHOUSE=postgres`). The Docker
-stack returns the same response envelope over the real Postgres warehouse, the
-Qdrant index and your configured LLM; the figures there come from the generated
-dataset, which is larger.
+also run on, so these exact figures reproduce on any machine — set
+`LLM_PROVIDER=fake`, `WAREHOUSE=duckdb` and `RETRIEVER=fixture` for the run (the
+shipped `.env` configures the real stack instead, so this is an explicit
+override, not a default). The real stack returns the same response envelope over
+the warehouse, the Qdrant index and your configured LLM; the figures there come
+from the generated dataset, which is larger.
 
 **Q: "Why did sales decline last quarter?"**
 
@@ -150,10 +151,65 @@ harnesses; no Docker, no network, no models).
 
 ## Quick start
 
+Two ways to run it. They differ in **where the stores live**, which is also the
+one thing that usually goes wrong — see
+[`docs/09-deployment.md`](docs/09-deployment.md) §2.0.
+
+### A · Local stack (the demo path)
+
+The API and web app run as host processes against a **Qdrant and an Ollama you
+already run on your machine**: embeddings, the vector index and reranking are
+all local, and only the reasoning step calls out to Gemini. This is the path to
+use if you already have those two services up — or if you want to upload a file
+and ask questions about it without building six containers.
+
+```bash
+ollama pull nomic-embed-text                       # embeddings, ~275 MB
+ollama pull dengcao/Qwen3-Reranker-0.6B:F16        # reranking, ~1.2 GB
+python scripts/setup.py --native                   # .env + deps, no Docker
+# paste a Google AI Studio key into GEMINI_API_KEY= in .env
+make preflight                                     # verify before you rely on it
+```
+
+`make preflight` is the whole point of this path being trustworthy: one command,
+one line per check, a fix beside every failure.
+
+```
+Vector store (Qdrant)
+  OK   collection name 'insightgpt_documents' is inside our namespace
+  OK   Qdrant reachable at http://127.0.0.1:6333
+  ..   other collections on this instance, left untouched: code, docs, memory
+Local models (Ollama)
+  OK   embedding model 'nomic-embed-text' pulled
+  OK   reranker model 'dengcao/Qwen3-Reranker-0.6B:F16' pulled
+Reasoning provider
+  FAIL GEMINI_API_KEY is empty — the API refuses to start on LLM_PROVIDER=gemini
+       fix: Paste your key into .env. For Gemini: https://aistudio.google.com/apikey
+```
+
+It is **read-only**: every call it makes is a `GET`, and it never creates,
+deletes or "tidies" anything. That matters because a Qdrant on `6333` is often
+shared with other projects — InsightGPT confines itself to its own
+`insightgpt_*` collection and leaves everything else alone.
+
+Then start the two processes (on Windows, `run.ps1` does this and runs the
+preflight first):
+
+```bash
+cd services/api && uv run uvicorn app.api.main:app --port 8000
+cd web          && npm run dev            # http://localhost:3000
+```
+
+In this mode the retail warehouse questions answer from the DuckDB fixture;
+Postgres and the dbt models need path B.
+
+### B · Full Docker stack
+
 **One command, from a fresh clone.** It checks prerequisites, writes `.env` with
-a generated secret, picks free ports, builds the images, starts every service,
-loads the demo warehouse, indexes the documents, and then *proves it works* by
-asking a real question end to end.
+a generated secret, picks free ports, builds the images, starts every service
+(including its *own* Postgres, Qdrant and Ollama), loads the demo warehouse,
+indexes the documents, and then *proves it works* by asking a real question end
+to end.
 
 **Windows**
 
@@ -175,7 +231,7 @@ see [`docs/09-deployment.md`](docs/09-deployment.md) §5).
 The script is **idempotent**: if anything fails, fix the cause it names and run
 it again — completed steps become fast no-ops.
 
-Then open:
+Either way, then open:
 
 - **web** — http://localhost:3000
 - **api** — http://localhost:8000 (health: `GET /health`)
@@ -195,11 +251,54 @@ Ask *"Why did sales decline last quarter?"* — you get the shape of answer show
 at the top of this file, computed over the generated dataset. Then run the
 five-minute tour in [`docs/14-demo.md`](docs/14-demo.md).
 
+### Bring your own data
+
+Upload a file on **Sources** (`.csv .tsv .xlsx .pdf .txt .md .json .docx`, up to
+25 MB each) and ask questions about it on **Ask**. The file is parsed, redacted,
+chunked and embedded **on your machine**; the chunks and vectors go to your local
+Qdrant, and the first time you ask arithmetic about a `.csv`/`.tsv`/`.xlsx`, its
+rows are loaded into a local DuckDB file that holds nothing but uploads. The
+uploaded bytes and the dataset
+list are kept on disk, so **restarting the API does not empty your dataset
+list** — and a dataset whose indexing was interrupted comes back as `failed`
+with the reason, not as `ready` over an index that has nothing in it.
+
+Ask a numeric question about a tabular upload — *"what is the total revenue in
+`my_sales.csv`?"* — and you get a figure computed over **every** row, with the
+dataset named and the SQL that produced it shown. Ask a question about its
+language and you get a cited answer from its text.
+
+What leaves the machine: the question text and the retrieved, already-redacted
+snippets go to the configured reasoning provider — with `LLM_PROVIDER=gemini`,
+to Google. A numeric answer over an uploaded table is planned and run locally,
+so your columns and totals are not in that prompt at all. (`EMBED_PROVIDER` is
+the setting to watch: leaving it at `ollama` is what keeps document text itself
+on the machine.)
+
+Three things it deliberately will **not** do:
+
+- **An uploaded spreadsheet does not become a governed metric.** The governed
+  text-to-SQL path answers only from the hand-authored semantic layer over the
+  retail warehouse, and no upload enters it. Your file's number comes from your
+  file, attributed to it — never the retail fixture's revenue dressed up as your
+  data.
+- **It never mixes the two.** An uploaded table lives in its own database with
+  its own allow-list; it is never attached to, joined with, or used as a
+  fallback for the warehouse.
+- **It will not total a part of your file.** A file too large to load completely
+  is marked truncated and aggregates over it are declined, because a sum over
+  the rows that fit is not the answer to a question about the file. Likewise, an
+  empty index stays empty: with nothing uploaded, `/ask` does not pretend to
+  have searched.
+
+Details in [`docs/03-ingestion-etl.md`](docs/03-ingestion-etl.md) §7.1.
+
 ### If something breaks
 
 | Command | What it does |
 |---|---|
-| `./setup.sh --doctor` | Diagnose only. Changes nothing, names the exact broken thing. |
+| `make preflight` | Check the local stack: Qdrant, the collection and its vector width, both Ollama models, the provider key. Read-only, a fix per failing line. |
+| `./setup.sh --doctor` | Diagnose only, Docker included. Changes nothing, names the exact broken thing. |
 | `./setup.sh --repair` | Clean rebuild + recreate, re-seed, re-verify. Your `.env` is preserved. |
 | `./setup.sh --skip-models` | Set up without pulling Ollama models (fast; retrieval quality degraded). |
 | `./setup.sh --native` | No Docker: prepare the local dev stack on the built-in sample dataset. |
@@ -279,7 +378,7 @@ envelope in one shot.
 | Warehouse | PostgreSQL + **dbt** (star schema + semantic metrics) |
 | Vector DB / retrieval | **Qdrant** + local embeddings & rerank (**Ollama**), hybrid dense/sparse search with RRF fusion |
 | Insight engine | Semantic-layer-grounded metric selection + RAG synthesis |
-| LLM access | **Pluggable provider** for the chat step (local Ollama default; OpenAI / Groq optional). Embeddings and rerank are always local Ollama. |
+| LLM access | **Pluggable provider** for the chat step — the shipped configuration is Gemini; Ollama (local), OpenAI and Groq are one setting away. Embeddings and rerank are local Ollama. |
 | Orchestration | Worker + **APScheduler** (pipeline runs & tracking) |
 | API | **FastAPI** (Python 3.12), JWT auth + roles, SSE streaming |
 | Frontend | **Next.js** + TypeScript + Tailwind + shadcn/ui |
@@ -288,7 +387,14 @@ envelope in one shot.
 
 ### Topology
 
-Six services on a private compose network; only `web` and `api` publish ports.
+Two shapes, and the difference is which hostnames resolve — see
+[`docs/09-deployment.md`](docs/09-deployment.md) §2.0. **Host run** (quick start
+A): `api` and `web` as host processes against a Qdrant and an Ollama on
+`127.0.0.1`, with the DuckDB fixture warehouse. **Compose run** (quick start B):
+six services on a private network, where the stores answer to their service
+names and the warehouse is Postgres. One `.env` serves both.
+
+The compose shape; only `web` and `api` publish ports.
 
 | Service | Image / build | Port | Role |
 |---|---|---|---|
@@ -297,7 +403,7 @@ Six services on a private compose network; only `web` and `api` publish ports.
 | `worker` | `docker/worker.Dockerfile` | — internal | APScheduler jobs, dbt, pipeline runs |
 | `postgres` | `postgres:16` | — internal (loopback) | Warehouse (`raw` / `marts` / `insight`) |
 | `qdrant` | `qdrant/qdrant` | — internal | Vector DB |
-| `ollama` | `ollama/ollama` | — internal | Local embeddings, rerank, default LLM |
+| `ollama` | `ollama/ollama` | — internal | Local embeddings and rerank (and the chat model when `LLM_PROVIDER=ollama`) |
 
 Persistent state lives in named volumes: `pgdata`, `qdrant_storage`,
 `ollama_models`, plus `generated_data` and `ingested_data` for the synthetic
@@ -319,7 +425,8 @@ to be healthy.
 | Target | What it does |
 |---|---|
 | `make setup` | **First run.** Check prerequisites, configure, build, start, seed and verify end to end |
-| `make doctor` | Diagnose the install; changes nothing |
+| `make preflight` | Before a demo: is the configured local stack ready? Read-only; a fix per failing line |
+| `make doctor` | Diagnose the install, Docker included; changes nothing |
 | `make repair` | Clean rebuild + recreate, re-seed, re-verify |
 | `make up` | Build and start the full stack (`docker compose up --build -d`) |
 | `make bootstrap` | First-run: pull Ollama models, build the warehouse (generate → load raw + publish the document corpus → dbt), create the Qdrant collection, index that corpus. Idempotent. |
@@ -331,7 +438,7 @@ to be healthy.
 | `make eval` | Run the text-to-SQL + faithfulness harnesses (floors + scoreboards) |
 | `make ci-local` | Everything CI runs without Docker: lint + tests + eval |
 | `make lint` | Ruff over every Python package |
-| `make clean` | Stop and **delete** all data volumes (destructive) |
+| `make clean` | Stop and **delete** the compose stack's own data volumes (destructive). It cannot reach a Qdrant you run yourself — nothing in this repo drops a collection outside the `insightgpt_` namespace |
 
 ### Running the steps by hand
 
@@ -373,10 +480,11 @@ onto a managed platform — see [`docs/09-deployment.md`](docs/09-deployment.md)
 
 The system runs end to end: ingestion with redaction, the dbt warehouse and its
 semantic layer, hybrid retrieval, the insight engine with guardrails and
-abstention, the FastAPI surface with JWT auth and SSE, the Next.js UI, the
-scheduled worker, and both eval harnesses. CI runs lint, every Python suite, the
-drift guards, a real dbt build on a throwaway Postgres, the web build, and the
-evals on every push.
+abstention, uploaded datasets (durable list, indexed text, and SQL over a
+tabular upload's own table), forecasting with prediction intervals, the FastAPI
+surface with JWT auth and SSE, the Next.js UI, the scheduled worker, and both
+eval harnesses. CI runs lint, every Python suite, the drift guards, a real dbt
+build on a throwaway Postgres, the web build, and the evals on every push.
 
 Designed in the docs and **deliberately not built**:
 
@@ -408,6 +516,8 @@ Start with the docs index: [`docs/README.md`](docs/README.md).
 - [`09-deployment.md`](docs/09-deployment.md) — Docker Compose & cloud path
 - [`10-testing-eval.md`](docs/10-testing-eval.md) — tests & eval harnesses
 - [`11-roadmap.md`](docs/11-roadmap.md) — phased build plan
+- [`12-mcp.md`](docs/12-mcp.md) — the MCP server surface
+- [`13-forecasting.md`](docs/13-forecasting.md) — forecasting, intervals, and when it refuses
 - [`14-demo.md`](docs/14-demo.md) — five-minute demo walkthrough
 
 ## License

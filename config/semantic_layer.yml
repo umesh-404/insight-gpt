@@ -70,10 +70,19 @@ dimensions:
 # --- Metrics: governed measures -----------------------------------------------
 # `expr` is the aggregate over the fact. `dimensions` is the allow-list of
 # dimensions this metric may be sliced by. `format` drives display only.
+#
+# RETURNS CONVENTION: every money and unit measure over fact_order_items is NET
+# OF RETURNS — a returned line contributes no revenue, no margin, no cost and no
+# units. `units_sold` and `return_rate` always worked that way; `revenue` did
+# not, so a dashboard could show revenue that counted ~7% of line items the same
+# screen was simultaneously reporting as returned. The inconsistency was the
+# bug, so the whole order-line family now shares one convention. `return_rate`
+# keeps its denominator over ALL lines, returned included — that is what makes
+# it a rate.
 metrics:
   revenue:
     label: Revenue
-    expr: "SUM(gross_revenue - discount_amount)"
+    expr: "SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount END)"
     fact: fact_order_items
     additive: true
     format: currency
@@ -81,7 +90,7 @@ metrics:
 
   gross_margin:
     label: Gross margin
-    expr: "SUM(gross_revenue - discount_amount - cost_amount)"
+    expr: "SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount - cost_amount END)"
     fact: fact_order_items
     additive: true
     format: currency
@@ -89,7 +98,7 @@ metrics:
 
   gross_margin_pct:
     label: Gross margin %
-    expr: "SUM(gross_revenue - discount_amount - cost_amount) / NULLIF(SUM(gross_revenue - discount_amount), 0)"
+    expr: "SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount - cost_amount END) / NULLIF(SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount END), 0)"
     fact: fact_order_items
     additive: false
     format: percent
@@ -114,7 +123,7 @@ metrics:
   avg_order_value:
     label: Average order value
     aliases: [aov]
-    expr: "SUM(gross_revenue - discount_amount) / NULLIF(COUNT(DISTINCT order_key), 0)"
+    expr: "SUM(CASE WHEN is_returned THEN 0 ELSE gross_revenue - discount_amount END) / NULLIF(COUNT(DISTINCT order_key), 0)"
     fact: fact_order_items
     additive: false
     format: currency
@@ -128,11 +137,19 @@ metrics:
     format: percent
     dimensions: [date, category, subcategory, product]
 
+  # SEMI-ADDITIVE. Stock sums across stores and SKUs but NOT across dates: the
+  # fact is a daily snapshot, so summing a quarter of snapshots counts the same
+  # pallet ~91 times. It is not a ratio either (`additive: false` means "ratio"
+  # to the metrics API and the forecaster), so it carries its own marker, and
+  # the query builder pins a date-range selection to the latest snapshot inside
+  # the range instead of summing over it. See
+  # services/warehouse/models/marts/fact_inventory_snapshot.sql.
   units_on_hand:
     label: Units on hand
     expr: "SUM(units_on_hand)"
     fact: fact_inventory_snapshot
     additive: true
+    semi_additive: true
     format: integer
     dimensions: [date, product, store]
 

@@ -16,7 +16,7 @@ const TabsList = React.forwardRef<
     // be a lighter or darker fill, and no single fill reads as raised in both
     // themes — an underline plus a colour change is unambiguous in either.
     className={cn(
-      'inline-flex h-9 w-full items-center justify-start gap-1 overflow-x-auto border-b text-muted-foreground scrollbar-thin',
+      'inline-flex h-10 w-full items-center justify-start gap-1 overflow-x-auto border-b text-muted-foreground scrollbar-thin',
       className,
     )}
     {...props}
@@ -31,9 +31,17 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      'relative inline-flex h-9 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-t-md px-3 text-sm font-medium ring-offset-background transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
+      'relative inline-flex h-10 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-t-md px-3 text-sm font-medium transition-colors duration-150 ease-out hover:text-foreground disabled:pointer-events-none disabled:opacity-60',
+      // The list scrolls horizontally, and an offset ring on the first or last
+      // trigger gets clipped by that overflow. An inset ring with no offset
+      // stays fully visible wherever the strip happens to be scrolled to.
+      'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-0',
+      'forced-colors:focus-visible:outline forced-colors:focus-visible:outline-2',
       'after:absolute after:inset-x-2 after:-bottom-px after:h-0.5 after:rounded-full after:bg-transparent after:transition-colors after:content-[""]',
       'data-[state=active]:text-primary data-[state=active]:after:bg-primary',
+      // In high-contrast mode the primary underline is not painted; bold the
+      // selected label so the active tab is still identifiable.
+      'forced-colors:data-[state=active]:font-bold',
       className,
     )}
     {...props}
@@ -48,7 +56,7 @@ const TabsContent = React.forwardRef<
   <TabsPrimitive.Content
     ref={ref}
     className={cn(
-      'mt-4 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+      'mt-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
       className,
     )}
     {...props}
