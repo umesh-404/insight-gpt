@@ -1,4 +1,4 @@
-# InsightGPT One-Click Launcher
+﻿# InsightGPT One-Click Launcher
 $ProgressPreference = 'SilentlyContinue'
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -71,7 +71,11 @@ if ($ollamaUp) {
 Write-Host "`n[2/4] Checking configuration (Qdrant, local models, provider key)..." -ForegroundColor Yellow
 $SetupPy = Join-Path $RepoDir "scripts\setup.py"
 if (Test-Path $SetupPy) {
-    & python $SetupPy --preflight
+    if (Test-Path $PythonExe) {
+        & $PythonExe $SetupPy --preflight
+    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+        & python $SetupPy --preflight
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [WARN] Preflight reported a blocking problem (see the FAIL lines above)." -ForegroundColor Yellow
         Write-Host "         Starting anyway, but expect the API to refuse questions until it is fixed." -ForegroundColor Yellow
